@@ -774,7 +774,9 @@ void TrackHeaderComponent::valueTreePropertyChanged (juce::ValueTree& v, const j
 {
     if (te::TrackList::isTrack (v))
     {
-        if (i == te::IDs::mute)
+        if (i == te::IDs::name)
+            trackName.setText (track->getName(), dontSendNotification);
+        else if (i == te::IDs::mute)
             muteButton.setToggleState ((bool)v[i], dontSendNotification);
         else if (i == te::IDs::solo)
             soloButton.setToggleState ((bool)v[i], dontSendNotification);

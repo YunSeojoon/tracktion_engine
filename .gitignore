@@ -81,3 +81,4 @@ doxygen/doc
 coverage.xml
 CoverageReport-*
 .claude/*local*
+__pycache__/

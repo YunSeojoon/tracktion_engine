@@ -1395,10 +1395,6 @@ void FourOscPlugin::flushPluginStateToValueTree()
 
     auto um = getUndoManager();
 
-    auto vt = state.getChildWithName (IDs::MODMATRIX);
-    if (vt.isValid())
-        state.removeChild (vt, um);
-
     auto mm = juce::ValueTree (IDs::MODMATRIX);
 
     for (const auto& itr : modMatrix)
@@ -1408,16 +1404,23 @@ void FourOscPlugin::flushPluginStateToValueTree()
             if (itr.second.depths[s] >= -1.0f)
             {
                 auto mmi = juce::ValueTree (IDs::MODMATRIXITEM);
-                mmi.setProperty (IDs::modParam, itr.first->paramID, um);
-                mmi.setProperty (IDs::modItem, modulationSourceToID ((ModSource)s), um);
-                mmi.setProperty (IDs::modDepth, itr.second.depths[s], um);
+                mmi.setProperty (IDs::modParam, itr.first->paramID, nullptr);
+                mmi.setProperty (IDs::modItem, modulationSourceToID ((ModSource)s), nullptr);
+                mmi.setProperty (IDs::modDepth, itr.second.depths[s], nullptr);
 
-                mm.addChild (mmi, -1, um);
+                mm.addChild (mmi, -1, nullptr);
             }
         }
     }
 
-    state.addChild (mm, -1, um);
+    // Repeated saves must not create no-op undo actions or rebuild the live graph.
+    auto vt = state.getChildWithName (IDs::MODMATRIX);
+    if (! vt.isEquivalentTo (mm))
+    {
+        if (vt.isValid())
+            state.removeChild (vt, um);
+        state.addChild (mm, -1, um);
+    }
 
     Plugin::flushPluginStateToValueTree(); // Add any parameter values that are being modified
 }
