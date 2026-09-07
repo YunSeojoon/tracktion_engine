@@ -454,7 +454,9 @@ public:
         }
         JUCE_CATCH_EXCEPTION
 
+       #if JUCE_CATCH_UNHANDLED_EXCEPTIONS
         return tl::unexpected (TRANS("Unable to start recording"));
+       #endif
     }
 
     std::vector<tl::expected<std::unique_ptr<RecordingContext>, juce::String>> prepareToRecord (RecordingParameters params) override

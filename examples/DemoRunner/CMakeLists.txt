@@ -115,7 +115,7 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR
     CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     target_compile_options(${TARGET_NAME} PRIVATE "$<$<CONFIG:Release>:-Werror>")
 elseif (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-    target_compile_options(${TARGET_NAME} PRIVATE "/W4")
+    target_compile_options(${TARGET_NAME} PRIVATE /W4 /utf-8 "$<$<COMPILE_LANGUAGE:CXX>:/EHsc>")
     target_compile_options(${TARGET_NAME} PRIVATE "$<$<CONFIG:Release>:/WX>")
 endif()
 
