@@ -55,6 +55,12 @@ jobs:
         shell: pwsh
         run: ./tools/test_install_and_update.ps1 -Unpacked (Resolve-Path build-cocompose/unpacked)
 
+      # The seal is the last thing between a build and whoever downloads it, so what it
+      # refuses is checked on fixtures before it is trusted with the real distribution.
+      - name: Check the release seal refuses bad reports
+        shell: pwsh
+        run: ./tools/test_release_seal.ps1
+
       # Only now, with every check passed, does the distribution get its report and
       # its hash. The hash is of the file people would actually download.
       - name: Seal the distribution

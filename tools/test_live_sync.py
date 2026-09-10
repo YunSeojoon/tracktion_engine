@@ -1,6 +1,8 @@
 """Integration check against the real Windows app; no mock engine or GUI."""
 import argparse
 import copy
+import ctypes
+from ctypes import wintypes
 import hashlib
 import json
 import math
@@ -9,6 +11,7 @@ import shutil
 import subprocess
 import time
 import struct
+import threading
 import uuid
 import wave
 from xml.etree import ElementTree
@@ -68,6 +71,40 @@ def settled(folder, quiet=0.4, timeout=20):
         time.sleep(quiet)
 
     raise TimeoutError("CoCompose kept changing; state never settled")
+
+
+def report_identity(exe):
+    """What was actually run: which binary, from which commit. The hash is what lets a
+    release step tell this report apart from one made against a different build."""
+    exe = Path(exe)
+    digest = hashlib.sha256(exe.read_bytes()).hexdigest().upper() if exe.exists() else ""
+    commit = ""
+    try:
+        commit = subprocess.run(["git", "-C", str(Path(__file__).resolve().parents[1]),
+                                 "rev-parse", "HEAD"],
+                                capture_output=True, text=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return digest, commit
+
+
+def write_report(exe, folder, checks, failure):
+    digest, commit = report_identity(exe)
+    report = {
+        "schema": 1,
+        "result": "passed" if failure is None else "failed",
+        "checks": len(checks),
+        "passed": checks,
+        "failure": "" if failure is None else "%s: %s" % (type(failure).__name__, failure),
+        "executable": str(exe),
+        "executable_sha256": digest,
+        "commit": commit,
+        "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "folder": str(folder),
+    }
+    atomic_write(folder / "test-report.json", report)
+    print(json.dumps(report, indent=2))
+    return report
 
 
 def run(exe, folder):
@@ -296,9 +333,12 @@ def run(exe, folder):
         checks.append(check_recording_and_recovery(exe, folder))
         checks.append(check_a_song_made_only_on_screen(exe, folder))
 
-        report = {"passed": checks, "folder": str(folder), "executable": str(exe)}
-        atomic_write(folder / "test-report.json", report)
-        print(json.dumps(report, indent=2))
+        write_report(exe, folder, checks, None)
+    except BaseException as failure:
+        # A failed run leaves a report too, saying so. Otherwise a release script has
+        # nothing to reject and the only evidence of the failure is a console log.
+        write_report(exe, folder, checks, failure)
+        raise
     finally:
         if process is not None and process.poll() is None:
             try:
@@ -1483,6 +1523,81 @@ def read_png_size(path):
 
 
 
+# Windows file handles, used to make a replace fail on purpose and to see whether a
+# file was ever taken away. Nothing here changes the app; it only watches or holds.
+_GENERIC_READ = 0x80000000
+_FILE_LIST_DIRECTORY = 0x0001
+_SHARE_READ_ONLY = 0x00000001
+_SHARE_ALL = 0x00000007
+_OPEN_EXISTING = 3
+_BACKUP_SEMANTICS = 0x02000000
+_NOTIFY_FILE_NAME = 0x00000001
+_INVALID_HANDLE = ctypes.c_void_p(-1).value
+_kernel32 = ctypes.windll.kernel32
+_kernel32.CreateFileW.restype = wintypes.HANDLE
+
+
+def hold_against_replacement(path):
+    """An open handle that shares nothing, so no rename or delete can take its name."""
+    handle = _kernel32.CreateFileW(str(path), _GENERIC_READ, _SHARE_READ_ONLY, None,
+                                   _OPEN_EXISTING, 0, None)
+    if handle == _INVALID_HANDLE:
+        raise OSError("could not hold %s: %d" % (path, ctypes.GetLastError()))
+    return handle
+
+
+class FolderWatch:
+    """Records name changes in a folder, so a file that briefly stops existing is seen
+    even though polling would miss it."""
+
+    def __init__(self, folder):
+        self.folder = folder
+        self.events = []
+        self._stop = threading.Event()
+        self._handle = None
+        self._thread = None
+
+    def __enter__(self):
+        self._handle = _kernel32.CreateFileW(str(self.folder), _FILE_LIST_DIRECTORY, _SHARE_ALL,
+                                             None, _OPEN_EXISTING, _BACKUP_SEMANTICS, None)
+        if self._handle == _INVALID_HANDLE:
+            raise OSError("could not watch %s: %d" % (self.folder, ctypes.GetLastError()))
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        time.sleep(0.5)
+        return self
+
+    def __exit__(self, *unused):
+        self._stop.set()
+        _kernel32.CancelIoEx(self._handle, None)
+        _kernel32.CloseHandle(self._handle)
+        self._thread.join(timeout=5)
+        return False
+
+    def removed(self, name):
+        return [entry for entry in self.events if entry == ("removed", name)]
+
+    def _run(self):
+        buffer = ctypes.create_string_buffer(64 * 1024)
+        written = wintypes.DWORD()
+        actions = {1: "added", 2: "removed", 3: "modified", 4: "renamed_from", 5: "renamed_to"}
+        while not self._stop.is_set():
+            if not _kernel32.ReadDirectoryChangesW(self._handle, buffer, len(buffer), False,
+                                                   _NOTIFY_FILE_NAME, ctypes.byref(written), None, None):
+                return
+            offset = 0
+            while True:
+                raw = buffer.raw
+                step = int.from_bytes(raw[offset:offset + 4], "little")
+                action = int.from_bytes(raw[offset + 4:offset + 8], "little")
+                length = int.from_bytes(raw[offset + 8:offset + 12], "little")
+                name = raw[offset + 12:offset + 12 + length].decode("utf-16-le")
+                self.events.append((actions.get(action, action), name))
+                if not step:
+                    break
+                offset += step
+
+
 def check_render_output_is_never_lost(exe, folder):
     """Exporting must not lose work. Two channels that share a display name have to
     produce two files, a stem has to carry the sends its channel feeds, and a render
@@ -1589,6 +1704,44 @@ def check_render_output_is_never_lost(exe, folder):
 
         assert hashlib.sha256((sub / "mix.wav").read_bytes()).digest() == before, \
             "The previous mix was lost"
+        assert not failed["files"], failed
+        assert "mix.wav" in failed["message"], failed
+
+        # V2-R1. Two separate things: a render that finished but could not take the
+        # destination's place, and the destination never being taken away at all.
+        #
+        # First, make the swap impossible by holding the destination open. The file that
+        # is already there has to come through untouched, and the render that did finish
+        # has to be kept rather than thrown away with the failure.
+        run([{"select_channel": 0}, {"note": [64, 1.0, 2.0, 100]}])
+        handle = hold_against_replacement(sub / "mix.wav")
+        try:
+            blocked = render("mix")
+        finally:
+            _kernel32.CloseHandle(handle)
+
+        assert not blocked["files"], ("A blocked replace reported success", blocked)
+        assert "replace" in blocked["message"], ("A failed replace is not told apart from a "
+                                                 "failed render", blocked)
+        assert hashlib.sha256((sub / "mix.wav").read_bytes()).digest() == before, \
+            "A failed replace lost the previous mix"
+
+        kept = list(sub.glob("mix-rendering-*.wav"))
+        assert len(kept) == 1, ("The finished render was thrown away with the failure", kept)
+        assert kept[0].name in blocked["message"], blocked
+        assert read_wav(kept[0])["peak"] > 0.001, "The kept render is not audio"
+        kept[0].unlink()
+
+        # Second, a replace that works must never remove the destination on the way. A
+        # delete followed by a move leaves a window where losing power costs the last
+        # good render; the folder itself is asked whether that window existed.
+        with FolderWatch(sub) as watching:
+            replaced = render("mix")
+        assert replaced["files"], replaced
+        assert not watching.removed("mix.wav"), \
+            ("The destination was deleted before it was replaced", watching.events)
+        assert hashlib.sha256((sub / "mix.wav").read_bytes()).digest() != before, \
+            "The replacement did not actually land"
 
         # Editing while a render runs must not disturb either of them. The render works
         # from the project as it was when it started, and it says which revision that was.
@@ -1636,7 +1789,8 @@ def check_render_output_is_never_lost(exe, folder):
             process.wait(timeout=10)
 
     return ("Exports keep their names apart, carry a channel's sends, survive a failed write, "
-            "and render the project as it was while it keeps being edited")
+            "keep a finished render whose swap failed without ever removing the file it was "
+            "replacing, and render the project as it was while it keeps being edited")
 
 
 def check_recording_and_recovery(exe, folder):

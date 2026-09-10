@@ -95,8 +95,23 @@ try {
     }
     $report.project_survived_update = $true
 
+    # --- a removal that cannot work has to say so ----------------------------------
+    # The app holds its own executable open while it runs, so nothing can remove it.
+    # Reporting success there would leave a half-removed install looking finished.
+    $running = Start-App $exe $project
+    try {
+        Use-CleanPath { & (Join-Path $installed 'Uninstall.cmd') /y | Out-Null }
+        $refused = $LASTEXITCODE
+    } finally { Stop-App $running }
+
+    if ($refused -eq 0)       { throw 'removing a running CoCompose reported success' }
+    if (-not (Test-Path $exe)) { throw 'the refused removal deleted the program anyway' }
+    if (-not (Test-Path $shortcut)) { throw 'the refused removal took the shortcut with it' }
+    $report.refused_while_running = $refused
+
     # --- remove, and keep the work ------------------------------------------------
     Use-CleanPath { & (Join-Path $installed 'Uninstall.cmd') /y | Out-Null }
+    if ($LASTEXITCODE -ne 0) { throw "Uninstall.cmd reported $LASTEXITCODE" }
     $deadline = (Get-Date).AddSeconds(30)
     while ((Get-Date) -lt $deadline -and (Test-Path $exe)) { Start-Sleep -Milliseconds 500 }
     if (Test-Path $exe)      { throw 'the uninstaller left the program behind' }

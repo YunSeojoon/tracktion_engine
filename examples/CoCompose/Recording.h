@@ -360,6 +360,7 @@ private:
             else
             {
                 int failed = 0;
+                String firstProblem;
 
                 for (const auto& stem : plannedStems)
                 {
@@ -371,10 +372,17 @@ private:
                         tracks.setBit (index);
                     tracks.setBit (stem.channelTrackIndex);
 
-                    if (render (*rendering, target.getChildFile (stem.fileName), tracks))
+                    String problem;
+                    if (render (*rendering, target.getChildFile (stem.fileName), tracks, problem))
+                    {
                         outcome.files.add (target.getChildFile (stem.fileName).getFullPathName());
+                    }
                     else
+                    {
                         ++failed;
+                        if (firstProblem.isEmpty())
+                            firstProblem = problem;
+                    }
                 }
 
                 outcome.complete = failed == 0 && ! threadShouldExit();
@@ -384,6 +392,9 @@ private:
                                     : "Rendered " + String (outcome.files.size())
                                         + (outcome.files.size() == 1 ? " stem" : " stems")
                                         + (failed > 0 ? "; " + String (failed) + " failed" : "");
+
+                if (failed > 0 && firstProblem.isNotEmpty())
+                    outcome.message += " (" + firstProblem + ")";
             }
         }
         else
@@ -394,7 +405,8 @@ private:
             for (int i = 0; i < allTracks.size(); ++i)
                 tracks.setBit (i);
 
-            if (render (*rendering, target, tracks))
+            String problem;
+            if (render (*rendering, target, tracks, problem))
             {
                 outcome.files.add (target.getFullPathName());
                 outcome.message = "Rendered " + target.getFileName();
@@ -402,7 +414,8 @@ private:
             }
             else
             {
-                outcome.message = "Could not write " + target.getFileName();
+                outcome.message = problem.isEmpty() ? "Could not write " + target.getFileName()
+                                                    : "Could not write " + target.getFileName() + ": " + problem;
             }
         }
 
@@ -476,11 +489,19 @@ private:
     }
 
     /** Renders beside the destination and only replaces it once there is a whole file
-        to replace it with, so a failed export never costs the last good one. */
-    bool render (te::Edit& source, const File& file, const juce::BigInteger& tracks)
+        to replace it with, so a failed export never costs the last good one.
+
+        Two different things can go wrong and they are not the same. A render that did
+        not finish leaves nothing worth keeping. A render that finished but could not
+        take the destination's place is a whole file that cost real time, so it is kept
+        and named rather than thrown away with the failure. */
+    bool render (te::Edit& source, const File& file, const juce::BigInteger& tracks, String& problem)
     {
         if (file.isDirectory())
+        {
+            problem = file.getFileName() + " is a folder";
             return false;
+        }
 
         auto working = file.getSiblingFile (file.getFileNameWithoutExtension()
                                               + "-rendering-" + Uuid().toString().substring (0, 8) + ".wav");
@@ -492,12 +513,18 @@ private:
         if (! rendered || ! working.existsAsFile() || working.getSize() == 0)
         {
             working.deleteFile();
+            problem = "could not render " + file.getFileName();
             return false;
         }
 
-        if (! working.moveFileTo (file))
+        // replaceFileIn goes through ReplaceFile, which leaves the existing file where
+        // it is when it cannot do the swap. moveFileTo deletes the destination first
+        // and only then moves, so anything that goes wrong in between - or a process
+        // that dies there - costs the last good render.
+        if (! working.replaceFileIn (file))
         {
-            working.deleteFile();
+            problem = "could not replace " + file.getFileName()
+                        + "; the new render is kept as " + working.getFileName();
             return false;
         }
 
