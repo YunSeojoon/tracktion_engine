@@ -415,9 +415,11 @@ public:
 
         if (device == nullptr)
             return object ({ { "open", false },
+                             { "inputs_available", inputReadback() },
                              { "type", deviceManager.deviceManager.getCurrentAudioDeviceType() } });
 
-        return object ({ { "open", device->isOpen() },
+        return object ({ { "inputs_available", inputReadback() },
+                         { "open", device->isOpen() },
                          { "type", deviceManager.deviceManager.getCurrentAudioDeviceType() },
                          { "name", device->getName() },
                          { "sample_rate", device->getCurrentSampleRate() },
@@ -426,6 +428,23 @@ public:
                          { "output_latency", device->getOutputLatencyInSamples() },
                          { "outputs", device->getActiveOutputChannels().countNumberOfSetBits() },
                          { "inputs", device->getActiveInputChannels().countNumberOfSetBits() } });
+    }
+
+    /** What could be recorded from: the MIDI and audio inputs the engine knows about
+        and whether each is switched on. An acceptance report has to be able to say
+        whether a keyboard was actually attached rather than assume one. */
+    var inputReadback()
+    {
+        Array<var> inputs;
+        for (auto* instance : edit->getAllInputDevices())
+        {
+            auto& input = instance->getInputDevice();
+            inputs.add (object ({ { "name", input.getName() },
+                                  { "kind", input.isMidi() ? "midi" : "audio" },
+                                  { "type", input.getDeviceTypeDescription() },
+                                  { "enabled", input.isEnabled() } }));
+        }
+        return inputs;
     }
 
     // Called only on the JUCE message thread, never the audio callback.
