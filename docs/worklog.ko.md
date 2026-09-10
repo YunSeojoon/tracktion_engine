@@ -46,3 +46,11 @@ CoCompose Windows Release 빌드가 MSVC 19.44.35223에서 성공했다. `tools/
 라이브 검사에서는 session/Edit 유지 여부를 확인했고, 마지막 검사의 종료·재실행은 저장 복원 검증을 위해 별도로 수행했다. 음악 변경 때 프로젝트를 다시 열도록 요구하지 않는다.
 
 실제 오디오 청취와 외부 VST3 호환성은 미검증이다. 재생 그래프 변경으로 엔진의 재생 플래그가 꺼지면 사용자의 재생 의도를 유지해 다음 UI tick에서 재개한다. 앱·프로젝트를 다시 열 필요는 없지만 무중단 음향을 보장하지 않는다.
+
+### Windows ZIP 배포 작업
+
+`tools/build-windows.ps1`에 Visual Studio 2022용 CMake Release 빌드와 CPack ZIP 생성을 연결했다. 출력은 `build-cocompose/dist/CoCompose-0.1.0-windows-x64.zip`이며 로컬 패키지 검증은 진행 중이다. 기존 Release 앱의 통합 검사 성공이 ZIP 배포 검사까지 의미하는 것은 아니다.
+
+`.github/workflows/cocompose-windows.yml`에 Windows 빌드·artifact 업로드를 추가했다. 관련 경로의 `ai-editor` push, 해당 브랜치 대상 PR, 수동 실행을 지원한다. 원격 CI 실행 성공 여부는 아직 확인하지 않았다.
+
+ZIP을 모두 풀어 `CoCompose.exe`를 더블클릭하는 사용법을 문서에 반영했다. 일반 실행에는 PowerShell·Python·Visual Studio가 필요 없다. 기본 프로젝트는 문서 폴더에 저장되므로 새 배포 폴더와 분리된다. `docs/windows-portable.ko.txt`가 배포용 안내다. 현재 코드 서명·설치 프로그램·자동 업데이트는 포함하지 않는다.

@@ -8,6 +8,12 @@ Upstream: https://github.com/Tracktion/tracktion_engine
 
 Development branch: `ai-editor`
 
+## Run the Windows ZIP
+
+Extract the entire `CoCompose-0.1.0-windows-x64.zip` archive and double-click `CoCompose.exe`. PowerShell, Python and Visual Studio are not required to run the app. Python is optional for the external editing helper. Default projects remain in the Windows Documents folder under `CoCompose`, outside the distribution folder.
+
+To update, close the app and extract the new ZIP to a separate folder. This is an unsigned portable build; an installer and automatic updates are not included. Local ZIP verification is in progress. The GitHub workflow is configured, but a successful remote run and downloadable artifact have not yet been confirmed.
+
 ## Build and run on Windows
 
 Requires Visual Studio 2022 with Desktop development with C++, Windows SDK, CMake 3.22+, Git and the recorded JUCE submodule.
@@ -18,6 +24,10 @@ cmake -S examples/CoCompose -B build-cocompose -G "Visual Studio 17 2022" -A x64
 cmake --build build-cocompose --config Release --target CoCompose --parallel 4
 & './build-cocompose/CoCompose_artefacts/Release/CoCompose.exe'
 ```
+
+To build and package a portable ZIP after initializing submodules, run `./tools/build-windows.ps1` in PowerShell. It invokes CMake and CPack and writes `build-cocompose/dist/CoCompose-0.1.0-windows-x64.zip`. Pass `-Jobs 4` to select build parallelism.
+
+`.github/workflows/cocompose-windows.yml` builds on relevant `ai-editor` pushes, pull requests targeting that branch, and manual dispatch. It uploads the ZIP as `CoCompose-windows-x64`. Remote CI execution is not yet verified.
 
 The default session lives in the Windows Documents folder under `CoCompose`. Use `--project 'C:\absolute\song\project.json'` to select a different session folder. Use one folder per song.
 

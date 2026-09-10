@@ -18,3 +18,17 @@ target_link_libraries(CoCompose PRIVATE
 if(MSVC)
     target_compile_options(CoCompose PRIVATE /W4 /WX /utf-8 "$<$<COMPILE_LANGUAGE:CXX>:/EHsc>")
 endif()
+
+install(TARGETS CoCompose RUNTIME DESTINATION . COMPONENT Runtime)
+install(FILES ../../docs/windows-portable.ko.txt DESTINATION . RENAME README.txt COMPONENT Runtime)
+install(FILES ../../LICENSE.md DESTINATION licenses RENAME Tracktion-LICENSE.md COMPONENT Runtime)
+install(FILES ../../modules/juce/LICENSE.md DESTINATION licenses RENAME JUCE-LICENSE.md COMPONENT Runtime)
+install(FILES ../../tools/cocompose.py DESTINATION tools COMPONENT Runtime)
+set(CPACK_COMPONENTS_ALL Runtime)
+set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
+set(CPACK_COMPONENTS_GROUPING ALL_COMPONENTS_IN_ONE)
+set(CPACK_GENERATOR ZIP)
+set(CPACK_PACKAGE_FILE_NAME "CoCompose-${PROJECT_VERSION}-windows-x64")
+set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
+include(CPack)
+

@@ -1,0 +1,31 @@
+name: CoCompose Windows
+on:
+  workflow_dispatch:
+  push:
+    branches: [ai-editor]
+    paths:
+      - 'examples/**'
+      - 'modules/**'
+      - 'tools/**'
+      - 'docs/**'
+      - '.github/workflows/cocompose-windows.yml'
+  pull_request:
+    branches: [ai-editor]
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build and package executable
+        shell: pwsh
+        run: ./tools/build-windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CoCompose-windows-x64
+          path: build-cocompose/dist/CoCompose-*-windows-x64.zip
+          if-no-files-found: error
