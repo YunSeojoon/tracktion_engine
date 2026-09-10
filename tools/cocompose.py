@@ -109,15 +109,21 @@ def main():
     tempo = commands.add_parser("tempo")
     tempo.add_argument("bpm", type=float)
     transpose = commands.add_parser("transpose")
-    transpose.add_argument("clip_id")
+    transpose.add_argument("pattern_id")
     transpose.add_argument("semitones", type=int)
     clear = commands.add_parser("clear-notes")
-    clear.add_argument("clip_id")
+    clear.add_argument("pattern_id")
+    place = commands.add_parser("place", help="add a playlist placement of a pattern")
+    place.add_argument("lane_id")
+    place.add_argument("pattern_id")
+    place.add_argument("start", type=float, help="start position in beats")
+    unique = commands.add_parser("make-unique", help="detach one placement from its pattern")
+    unique.add_argument("clip_id")
     gain = commands.add_parser("gain")
-    gain.add_argument("track_id")
+    gain.add_argument("channel_id")
     gain.add_argument("db", type=float)
     parameter = commands.add_parser("parameter")
-    parameter.add_argument("track_id")
+    parameter.add_argument("channel_id")
     parameter.add_argument("plugin_id")
     parameter.add_argument("parameter_id")
     parameter.add_argument("value", type=float, help="normalised value from 0 to 1")
@@ -134,17 +140,36 @@ def main():
             if args.command == "tempo":
                 state["bpm"] = args.bpm
             elif args.command in ("transpose", "clear-notes"):
-                clip = next(c for t in state["tracks"] for c in t["clips"] if c["id"] == args.clip_id)
-                if args.command == "clear-notes":
-                    clip["notes"] = []
-                else:
-                    for note in clip["notes"]:
-                        note["pitch"] += args.semitones
+                # A pattern is shared, so this changes every placement of it.
+                pattern = next(p for p in state["patterns"] if p["id"] == args.pattern_id)
+                for sequence in pattern["sequences"]:
+                    if args.command == "clear-notes":
+                        sequence["notes"] = []
+                    else:
+                        for note in sequence["notes"]:
+                            note["pitch"] += args.semitones
+            elif args.command == "place":
+                pattern = next(p for p in state["patterns"] if p["id"] == args.pattern_id)
+                next(l for l in state["playlist"]["lanes"] if l["id"] == args.lane_id)
+                state["playlist"]["clips"].append(
+                    {"id": str(uuid.uuid4()), "lane": args.lane_id, "pattern": args.pattern_id,
+                     "start": args.start, "length": pattern["length"]})
+            elif args.command == "make-unique":
+                clip = next(c for c in state["playlist"]["clips"] if c["id"] == args.clip_id)
+                shared = next(p for p in state["patterns"] if p["id"] == clip["pattern"])
+                copy = json.loads(json.dumps(shared))
+                copy["id"] = str(uuid.uuid4())
+                copy["name"] = shared["name"] + " (unique)"
+                for sequence in copy["sequences"]:
+                    for note in sequence["notes"]:
+                        note["id"] = str(uuid.uuid4())
+                state["patterns"].append(copy)
+                clip["pattern"] = copy["id"]
             elif args.command == "gain":
-                next(t for t in state["tracks"] if t["id"] == args.track_id)["gain_db"] = args.db
+                next(c for c in state["channels"] if c["id"] == args.channel_id)["gain_db"] = args.db
             elif args.command == "parameter":
-                track = next(t for t in state["tracks"] if t["id"] == args.track_id)
-                param = next(p for p in track["parameters"]
+                channel = next(c for c in state["channels"] if c["id"] == args.channel_id)
+                param = next(p for p in channel["parameters"]
                              if p["plugin_id"] == args.plugin_id and p["id"] == args.parameter_id)
                 param["value"] = args.value
             result = submit(args.project, state)
@@ -155,4 +180,4 @@ if __name__ == "__main__":
     try:
         main()
     except (RuntimeError, ValueError, OSError, StopIteration, TimeoutError) as error:
-        raise SystemExit(str(error) or "Requested track, clip, or parameter ID was not found")
+        raise SystemExit(str(error) or "Requested channel, pattern, clip, or parameter ID was not found")

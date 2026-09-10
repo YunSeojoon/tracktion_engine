@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<EDIT appVersion="Unknown" projectID="0/b9d87d" creationTime="1789000653081"
+      lastSignificantChange="1a088bf9a41" coComposeRevision="0" modifiedBy="CoCompose">
+  <TRANSPORT endToEnd="1" loopPoint1="0.0" loopPoint2="16.0" looping="1"/>
+  <PITCHSEQUENCE>
+    <PITCH startBeat="0.0" pitch="60"/>
+  </PITCHSEQUENCE>
+  <TEMPOSEQUENCE>
+    <TEMPO startBeat="0.0" bpm="120.0" curve="1.0"/>
+    <TIMESIG numerator="4" denominator="4" startBeat="0.0"/>
+  </TEMPOSEQUENCE>
+  <VIDEO/>
+  <CLICKTRACK level="0.6000000238418579"/>
+  <MASTERVOLUME>
+    <PLUGIN type="volume" volume="0.6376281380653381" id="1001" enabled="1">
+      <MODIFIERASSIGNMENTS/>
+    </PLUGIN>
+  </MASTERVOLUME>
+  <RACKS/>
+  <MASTERPLUGINS/>
+  <INPUTDEVICES/>
+  <TRACKCOMPS/>
+  <ARRANGERTRACK name="Arranger" id="1006"/>
+  <CHORDTRACK name="Chord" id="1008"/>
+  <MARKERTRACK id="1002" name="Marker"/>
+  <TEMPOTRACK name="Global" id="1007">
+    <MODIFIERS/>
+  </TEMPOTRACK>
+  <MASTERTRACK name="Master" id="1009">
+    <MODIFIERS/>
+  </MASTERTRACK>
+  <TRACK id="1010" coComposeId="synth-1" name="CoCompose Synth" mute="0"
+         solo="0">
+    <MODIFIERS/>
+    <OUTPUTDEVICES>
+      <DEVICE name="(default audio output)"/>
+    </OUTPUTDEVICES>
+    <CLIPSLOTS/>
+    <PLUGIN type="4osc" id="1013" enabled="1" remapOnTempoChange="1">
+      <MODIFIERASSIGNMENTS/>
+      <MODMATRIX/>
+    </PLUGIN>
+    <PLUGIN type="volume" id="1011" enabled="1" remapOnTempoChange="1" volume="0.4065696597099304">
+      <MODIFIERASSIGNMENTS/>
+    </PLUGIN>
+    <PLUGIN type="level" id="1012" enabled="1"/>
+    <MIDICLIP name="8 bars" start="0.0" length="16.0" offset="0.0" id="1014"
+              sync="0" currentTake="0" speed="1.0" colour="ff00ff00" coComposeId="phrase-1">
+      <AUTOMATIONCURVES/>
+      <QUANTISATION/>
+      <GROOVE/>
+      <SEQUENCE ver="1" channelNumber="1">
+        <NOTE p="48" b="0.0" l="0.75" v="88" c="0" coComposeId="note-0"/>
+        <NOTE p="51" b="1.0" l="0.75" v="88" c="0" coComposeId="note-1"/>
+        <NOTE p="54" b="2.0" l="0.75" v="88" c="0" coComposeId="note-2"/>
+        <NOTE p="57" b="3.0" l="0.75" v="88" c="0" coComposeId="note-3"/>
+        <NOTE p="48" b="4.0" l="0.75" v="88" c="0" coComposeId="note-4"/>
+        <NOTE p="51" b="5.0" l="0.75" v="88" c="0" coComposeId="note-5"/>
+        <NOTE p="54" b="6.0" l="0.75" v="88" c="0" coComposeId="note-6"/>
+        <NOTE p="57" b="7.0" l="0.75" v="88" c="0" coComposeId="note-7"/>
+        <NOTE p="48" b="8.0" l="0.75" v="88" c="0" coComposeId="note-8"/>
+        <NOTE p="51" b="9.0" l="0.75" v="88" c="0" coComposeId="note-9"/>
+        <NOTE p="54" b="10.0" l="0.75" v="88" c="0" coComposeId="note-10"/>
+        <NOTE p="57" b="11.0" l="0.75" v="88" c="0" coComposeId="note-11"/>
+        <NOTE p="48" b="12.0" l="0.75" v="88" c="0" coComposeId="note-12"/>
+        <NOTE p="51" b="13.0" l="0.75" v="88" c="0" coComposeId="note-13"/>
+        <NOTE p="54" b="14.0" l="0.75" v="88" c="0" coComposeId="note-14"/>
+        <NOTE p="57" b="15.0" l="0.75" v="88" c="0" coComposeId="note-15"/>
+        <NOTE p="48" b="16.0" l="0.75" v="88" c="0" coComposeId="note-16"/>
+        <NOTE p="51" b="17.0" l="0.75" v="88" c="0" coComposeId="note-17"/>
+        <NOTE p="54" b="18.0" l="0.75" v="88" c="0" coComposeId="note-18"/>
+        <NOTE p="57" b="19.0" l="0.75" v="88" c="0" coComposeId="note-19"/>
+        <NOTE p="48" b="20.0" l="0.75" v="88" c="0" coComposeId="note-20"/>
+        <NOTE p="51" b="21.0" l="0.75" v="88" c="0" coComposeId="note-21"/>
+        <NOTE p="54" b="22.0" l="0.75" v="88" c="0" coComposeId="note-22"/>
+        <NOTE p="57" b="23.0" l="0.75" v="88" c="0" coComposeId="note-23"/>
+        <NOTE p="48" b="24.0" l="0.75" v="88" c="0" coComposeId="note-24"/>
+        <NOTE p="51" b="25.0" l="0.75" v="88" c="0" coComposeId="note-25"/>
+        <NOTE p="54" b="26.0" l="0.75" v="88" c="0" coComposeId="note-26"/>
+        <NOTE p="57" b="27.0" l="0.75" v="88" c="0" coComposeId="note-27"/>
+        <NOTE p="48" b="28.0" l="0.75" v="88" c="0" coComposeId="note-28"/>
+        <NOTE p="51" b="29.0" l="0.75" v="88" c="0" coComposeId="note-29"/>
+        <NOTE p="54" b="30.0" l="0.75" v="88" c="0" coComposeId="note-30"/>
+        <NOTE p="57" b="31.0" l="0.75" v="88" c="0" coComposeId="note-31"/>
+      </SEQUENCE>
+    </MIDICLIP>
+  </TRACK>
+  <SCENES/>
+</EDIT>

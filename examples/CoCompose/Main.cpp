@@ -40,13 +40,11 @@ public:
         undo.onClick = [this] { project.undo(); };
         addTrack.onClick = [this]
         {
-            auto& edit = *project.edit;
-            edit.getUndoManager().beginNewTransaction ("Add track");
-            edit.ensureNumberOfAudioTracks (te::getAudioTracks (edit).size() + 1);
-            auto* track = te::getAudioTracks (edit).getLast();
-            auto synth = edit.getPluginCache().createNewPlugin (te::FourOscPlugin::xmlTypeName, {});
-            if (synth != nullptr) track->pluginList.insertPlugin (*synth, 0, nullptr);
-            track->getVolumePlugin()->setVolumeDb (-12);
+            auto& undoManager = project.edit->getUndoManager();
+            undoManager.beginNewTransaction ("Add channel");
+            project.model->addChannel ("Channel " + String (project.model->channels().getNumChildren() + 1),
+                                       &undoManager);
+            project.model->renderIfNeeded();
         };
         transposeDown.onClick = [this] { transpose (-1); };
         transposeUp.onClick = [this] { transpose (1); };
@@ -149,17 +147,39 @@ private:
             { "error", failure }, { "status", failure.isEmpty() ? "applied" : "rejected" } }), false));
     }
 
+    // Clips are placements of a pattern, so transposing one transposes the pattern and
+    // therefore every other placement of it. Use Make unique first to detach one.
     void transpose (int semitones)
     {
-        if (auto* clip = dynamic_cast<te::MidiClip*> (selection.getSelectedObject (0)))
+        auto sequence = selectedSequence();
+
+        if (! sequence.isValid())
         {
-            auto& undoManager = project.edit->getUndoManager();
-            undoManager.beginNewTransaction ("Transpose selected clip");
-            for (auto* note : clip->getSequence().getNotes())
-                note->setNoteNumber (jlimit (0, 127, note->getNoteNumber() + semitones), &undoManager);
+            status.setText ("Select a pattern clip first", dontSendNotification);
+            return;
         }
-        else
-            status.setText ("Select a MIDI clip first", dontSendNotification);
+
+        auto& undoManager = project.edit->getUndoManager();
+        undoManager.beginNewTransaction ("Transpose pattern");
+        for (auto note : sequence)
+            note.setProperty (live::ids::pitch,
+                              jlimit (0, 127, static_cast<int> (note[live::ids::pitch]) + semitones),
+                              &undoManager);
+        project.model->renderIfNeeded();
+    }
+
+    ValueTree selectedSequence()
+    {
+        auto* clip = dynamic_cast<te::MidiClip*> (selection.getSelectedObject (0));
+        if (clip == nullptr)
+            return {};
+
+        auto instance = project.model->instanceFor (clip->state[live::ids::clipInstance].toString());
+        if (! instance.isValid())
+            return {};
+
+        return live::Model::findSequence (project.model->patternFor (instance[live::ids::pattern].toString()),
+                                          clip->state[live::ids::clipChannel].toString());
     }
 
     void timerCallback() override
