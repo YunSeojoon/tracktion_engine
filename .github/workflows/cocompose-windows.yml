@@ -7,6 +7,7 @@ on:
       - 'examples/**'
       - 'modules/**'
       - 'tools/**'
+      - 'tests/**'
       - 'docs/**'
       - '.github/workflows/cocompose-windows.yml'
   pull_request:
@@ -16,14 +17,49 @@ permissions:
 jobs:
   package:
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
       - name: Build and package executable
         shell: pwsh
         run: ./tools/build-windows.ps1
+
+      - name: Unpack the distribution
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem build-cocompose/dist/CoCompose-*-windows-x64.zip | Select-Object -First 1
+          Expand-Archive -Path $zip.FullName -DestinationPath build-cocompose/unpacked -Force
+          if (-not (Test-Path build-cocompose/unpacked/CoCompose.exe)) { throw "No CoCompose.exe in the ZIP" }
+
+      # The runner has no audio device, so the app opens a null device. That is enough
+      # for the model, the work surface, the file protocol and rendering, which is what
+      # these checks cover. Anything that needs a real device or a third-party plugin is
+      # not run here and is not claimed as verified.
+      - name: Check the packaged executable
+        shell: pwsh
+        run: |
+          python tools/test_live_sync.py --exe build-cocompose/unpacked/CoCompose.exe --output build-cocompose/ci-check
+          if ($LASTEXITCODE -ne 0) { throw "Integration checks failed" }
+
+      - name: Check it starts like a double-click
+        shell: pwsh
+        run: ./tools/test_portable_start.ps1 -Exe (Resolve-Path build-cocompose/unpacked/CoCompose.exe)
+
+      - name: Collect the check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CoCompose-check-report
+          path: |
+            build-cocompose/ci-check/test-report.json
+            build-cocompose/ci-check/**/ui.png
+            build-cocompose/ci-check/**/sync-status.json
+          if-no-files-found: warn
+
+      # Only reached when the checks above passed, so a broken build is never published.
       - uses: actions/upload-artifact@v4
         with:
           name: CoCompose-windows-x64

@@ -7,9 +7,6 @@ $exe  = $Exe
 $docs = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'CoCompose'
 $state = Join-Path $docs 'state.json'
 
-$before = Get-Content $state -Raw | ConvertFrom-Json
-$beforeWrite = (Get-Item $state).LastWriteTimeUtc
-
 # Only the stock Windows directories: no Visual Studio, CMake, Python or Git.
 $clean = "$env:SystemRoot\system32;$env:SystemRoot;$env:SystemRoot\system32\Wbem"
 $saved = $env:PATH
@@ -17,6 +14,29 @@ $env:PATH = $clean
 foreach ($leaked in @('cmake','python','cl','git','msbuild')) {
     if (Get-Command $leaked -ErrorAction SilentlyContinue) { throw "developer tool still reachable: $leaked" }
 }
+$env:PATH = $saved
+
+# On a machine that has never run it there is nothing to restore yet, so make the
+# default project first and then check that a second run brings it back.
+if (-not (Test-Path $state)) {
+    $seed = Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) -PassThru
+    try {
+        $deadline = (Get-Date).AddSeconds(90)
+        while ((Get-Date) -lt $deadline -and -not (Test-Path $state)) { Start-Sleep -Milliseconds 500 }
+        if (-not (Test-Path $state)) { throw 'the app never created a default project' }
+        Start-Sleep -Seconds 2
+    }
+    finally {
+        if (-not $seed.HasExited) { $seed.CloseMainWindow() | Out-Null; Start-Sleep -Seconds 3 }
+        if (-not $seed.HasExited) { $seed.Kill() }
+        $seed.WaitForExit(20000) | Out-Null
+    }
+}
+
+$before = Get-Content $state -Raw | ConvertFrom-Json
+$beforeWrite = (Get-Item $state).LastWriteTimeUtc
+
+$env:PATH = $clean
 
 $proc = Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) -PassThru
 $env:PATH = $saved

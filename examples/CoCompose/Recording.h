@@ -239,29 +239,29 @@ public:
     {
         StringArray files;
         String message;
+        int revision = 0;
+        bool complete = false;
     };
 
     bool isBusy() const { return isThreadRunning(); }
 
-    bool startMix (const File& destination, te::TimeRange range)
+    bool startMix (const File& destination, te::TimeRange range, int revision)
     {
-        if (isBusy() || range.getLength().inSeconds() <= 0.0)
+        if (! begin (range, revision))
             return false;
 
         target = destination.hasFileExtension ("wav") ? destination : destination.withFileExtension ("wav");
-        renderRange = range;
         stems = false;
         startThread();
         return true;
     }
 
-    bool startStems (const File& folder, te::TimeRange range)
+    bool startStems (const File& folder, te::TimeRange range, int revision)
     {
-        if (isBusy() || range.getLength().inSeconds() <= 0.0)
+        if (! begin (range, revision))
             return false;
 
         target = folder;
-        renderRange = range;
         stems = true;
         startThread();
         return true;
@@ -279,6 +279,37 @@ public:
         return result;
     }
 
+    /** Takes a copy of the project as it is right now. The render runs from that copy
+        in an Edit of its own, so an edit made while it is running changes the next
+        render rather than corrupting this one. */
+    bool begin (te::TimeRange range, int revision)
+    {
+        if (isBusy() || range.getLength().inSeconds() <= 0.0)
+            return false;
+
+        renderRange = range;
+        startedAtRevision = revision;
+        snapshot = model.edit.state.createCopy();
+
+        // The channels are what a stem is per, and the copy has no model wrapper, so
+        // the plan is made here where the live model is safe to read.
+        plannedStems.clear();
+        StringArray taken;
+
+        for (auto channel : model.channels())
+        {
+            auto* track = model.trackFor (Model::uidOf (channel));
+            if (track == nullptr)
+                continue;
+
+            plannedStems.add ({ te::getAllTracks (model.edit).indexOf (track),
+                                chainFor (static_cast<int> (channel[ids::insert])),
+                                uniqueStemName (channel, taken) });
+        }
+
+        return true;
+    }
+
     /** The whole arrangement, or at least a bar of it. */
     te::TimeRange arrangementRange() const
     {
@@ -294,6 +325,17 @@ private:
     void run() override
     {
         Result outcome;
+        outcome.revision = startedAtRevision;
+
+        auto rendering = te::loadEditFromState (model.edit.engine, snapshot,
+                                                te::Edit::EditRole::forRendering);
+
+        if (rendering == nullptr)
+        {
+            outcome.message = "Could not prepare the project for rendering";
+            publish (outcome);
+            return;
+        }
 
         if (stems)
         {
@@ -303,39 +345,46 @@ private:
             }
             else
             {
-                for (auto channel : model.channels())
+                int failed = 0;
+
+                for (const auto& stem : plannedStems)
                 {
-                    auto* track = model.trackFor (Model::uidOf (channel));
-                    if (track == nullptr || threadShouldExit())
-                        continue;
+                    if (threadShouldExit())
+                        break;
 
-                    // A channel plays into its insert and onwards, so a stem has to carry
-                    // that chain with it or the render comes out silent.
                     juce::BigInteger tracks;
-                    addTrack (tracks, track);
-                    addOutputChain (tracks, static_cast<int> (channel[ids::insert]));
+                    for (auto index : stem.trackIndexes)
+                        tracks.setBit (index);
+                    tracks.setBit (stem.channelTrackIndex);
 
-                    auto file = target.getChildFile (File::createLegalFileName (channel[ids::name].toString()) + ".wav");
-                    if (render (file, tracks))
-                        outcome.files.add (file.getFullPathName());
+                    if (render (*rendering, target.getChildFile (stem.fileName), tracks))
+                        outcome.files.add (target.getChildFile (stem.fileName).getFullPathName());
+                    else
+                        ++failed;
                 }
 
-                outcome.message = outcome.files.isEmpty() ? "Nothing to render"
-                                                          : "Rendered " + String (outcome.files.size()) + " stems";
+                outcome.complete = failed == 0 && ! threadShouldExit();
+                outcome.message = outcome.files.isEmpty()
+                                    ? (plannedStems.isEmpty() ? "Nothing to render"
+                                                              : "Could not write any stems")
+                                    : "Rendered " + String (outcome.files.size())
+                                        + (outcome.files.size() == 1 ? " stem" : " stems")
+                                        + (failed > 0 ? "; " + String (failed) + " failed" : "");
             }
         }
         else
         {
             // An empty set renders nothing in this overload, so name every track.
             juce::BigInteger tracks;
-            const auto allTracks = te::getAllTracks (model.edit);
+            const auto allTracks = te::getAllTracks (*rendering);
             for (int i = 0; i < allTracks.size(); ++i)
                 tracks.setBit (i);
 
-            if (render (target, tracks))
+            if (render (*rendering, target, tracks))
             {
                 outcome.files.add (target.getFullPathName());
                 outcome.message = "Rendered " + target.getFileName();
+                outcome.complete = true;
             }
             else
             {
@@ -343,47 +392,117 @@ private:
             }
         }
 
+        publish (outcome);
+    }
+
+    void publish (const Result& outcome)
+    {
         const juce::ScopedLock lock (resultLock);
         result = outcome;
         finished = true;
     }
 
-    void addTrack (juce::BigInteger& tracks, te::Track* track) const
-    {
-        const auto index = te::getAllTracks (model.edit).indexOf (track);
-        if (index >= 0)
-            tracks.setBit (index);
-    }
+    /** Everything the channel can be heard through: its insert, whatever that insert
+        is routed to, and every insert it sends to, each with its own routing. A stem
+        without them is missing the part of the sound that comes back from a bus.
 
-    /** Follows an insert's routing to the master, marking every bus on the way. */
-    void addOutputChain (juce::BigInteger& tracks, int slot) const
+        Wet buses are shared, so two stems can both carry the same return and their sum
+        is not the mix. That is what a stem of a channel means here. */
+    Array<int> chainFor (int slot) const
     {
-        auto insert = model.insertForSlot (slot);
+        Array<int> indexes;
         StringArray seen;
+        Array<ValueTree> queue;
 
-        while (insert.isValid() && ! seen.contains (Model::uidOf (insert)))
+        if (auto start = model.insertForSlot (slot); start.isValid())
+            queue.add (start);
+
+        while (! queue.isEmpty())
         {
-            seen.add (Model::uidOf (insert));
-            addTrack (tracks, model.trackFor (Model::insertTrackID (Model::uidOf (insert))));
+            auto insert = queue.removeAndReturn (0);
+            const auto insertID = Model::uidOf (insert);
+
+            if (seen.contains (insertID))
+                continue;
+
+            seen.add (insertID);
+
+            const auto index = te::getAllTracks (model.edit)
+                                   .indexOf (model.trackFor (Model::insertTrackID (insertID)));
+            if (index >= 0)
+                indexes.add (index);
 
             const auto destination = insert.getProperty (ids::output, masterInsert).toString();
-            if (destination == masterInsert)
-                break;
+            if (destination != masterInsert)
+                if (auto next = model.insertFor (destination); next.isValid())
+                    queue.add (next);
 
-            insert = model.insertFor (destination);
+            for (auto child : insert)
+                if (child.hasType (ids::SEND))
+                    if (auto sendTarget = model.insertFor (child[ids::target].toString()); sendTarget.isValid())
+                        queue.add (sendTarget);
         }
+
+        return indexes;
     }
 
-    bool render (const File& file, const juce::BigInteger& tracks)
+    /** A file name per channel that cannot collide, whatever the channels are called. */
+    static String uniqueStemName (ValueTree channel, StringArray& taken)
     {
-        file.deleteFile();
-        return te::Renderer::renderToFile ("Render", file, model.edit, renderRange, tracks,
-                                           true, true, {}, false);
+        auto base = File::createLegalFileName (channel[ids::name].toString()).trim();
+        if (base.isEmpty())
+            base = "Channel";
+
+        auto name = base;
+        for (int suffix = 2; taken.contains (name.toLowerCase()); ++suffix)
+            name = base + " " + String (suffix);
+
+        taken.add (name.toLowerCase());
+        return name + ".wav";
     }
+
+    /** Renders beside the destination and only replaces it once there is a whole file
+        to replace it with, so a failed export never costs the last good one. */
+    bool render (te::Edit& source, const File& file, const juce::BigInteger& tracks)
+    {
+        if (file.isDirectory())
+            return false;
+
+        auto working = file.getSiblingFile (file.getFileNameWithoutExtension()
+                                              + "-rendering-" + Uuid().toString().substring (0, 8) + ".wav");
+        working.deleteFile();
+
+        const auto rendered = te::Renderer::renderToFile ("Render", working, source, renderRange, tracks,
+                                                          true, true, {}, false);
+
+        if (! rendered || ! working.existsAsFile() || working.getSize() == 0)
+        {
+            working.deleteFile();
+            return false;
+        }
+
+        if (! working.moveFileTo (file))
+        {
+            working.deleteFile();
+            return false;
+        }
+
+        return true;
+    }
+
+    struct PlannedStem
+    {
+        int channelTrackIndex = -1;
+        Array<int> trackIndexes;
+        String fileName;
+    };
 
     Model& model;
     File target;
+    ValueTree snapshot;
+    Array<PlannedStem> plannedStems;
     te::TimeRange renderRange;
+    int startedAtRevision = 0;
     bool stems = false, finished = false;
     Result result;
     juce::CriticalSection resultLock;

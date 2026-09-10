@@ -68,7 +68,11 @@ Drop a WAV onto a lane — from the Browser or from Explorer — and it becomes 
 
 Every channel plays through its numbered insert, an insert plays through whatever it is routed to, and everything reaches the master. `FX` on a strip adds one of six effects — EQ, limiter, saturation, delay, chorus, reverb — opens its window, bypasses it, moves it along the chain or removes it, and sets up a send; the button under it chooses where the strip is routed. Routing that would feed a signal back into itself is refused. Only saturation had to be written; the rest are the engine's own plugins.
 
-A curve automates any parameter `state.json` reports, and the engine plays it. `Tools > Arm channel` points the enabled inputs at the selected channel, `Ctrl+Shift+R` records into the armed channels with an optional bar of count-in, and a take becomes a pattern placed where it was played — so it is edited like anything else. `File > Export WAV` renders the arrangement, or the loop range when one is set over it, and `File > Export stems` renders one file per channel through that channel's own chain. Renders run on their own thread and report through `render-status.json`.
+A curve automates any parameter `state.json` reports, and the engine plays it. `Tools > Arm channel` points the enabled inputs at the selected channel, `Ctrl+Shift+R` records into the armed channels with an optional bar of count-in, and a take becomes a pattern placed where it was played — so it is edited like anything else. `File > Export WAV` renders the arrangement, or the loop range when one is set over it, and `File > Export stems` renders one file per channel through that channel's own chain. Renders run on their own thread, from a copy of the project taken when the render
+started, so the arrangement can keep being edited while one is running. The file it
+writes appears only once a whole file exists, so a failed export never costs the last
+good one. `render-status.json` reports the result, which revision it rendered, whether
+every file was written, and where they are.
 
 ## Working from outside
 
@@ -118,6 +122,6 @@ It also supports transpose, clear-notes, place, make-unique, gain, parameter, st
 - [Windows 실행 및 외부 AI 협업 가이드](docs/windows-guide.ko.md)
 - [작업 단위와 검증 기록](docs/worklog.ko.md)
 
-The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 23 real-app integration checks passed. Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. Details are in the work log. Real audio listening and third-party VST3 compatibility remain unverified. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
+The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 24 real-app integration checks passed. Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. Details are in the work log. Real audio listening and third-party VST3 compatibility remain unverified. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
 
 Keep upstream license notices intact. Tracktion Engine and JUCE have separate licenses; see the upstream README and JUCE license files.

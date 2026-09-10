@@ -292,6 +292,7 @@ def run(exe, folder):
         checks.append(check_external_agent_session(exe, folder))
         checks.append(check_every_menu_command(exe, folder))
         checks.append(check_survives_the_rough_edges(exe, folder))
+        checks.append(check_render_output_is_never_lost(exe, folder))
 
         report = {"passed": checks, "folder": str(folder), "executable": str(exe)}
         atomic_write(folder / "test-report.json", report)
@@ -1469,6 +1470,162 @@ def read_png_size(path):
 
     raise RuntimeError("No readable PNG at %s" % path)
 
+
+
+def check_render_output_is_never_lost(exe, folder):
+    """Exporting must not lose work. Two channels that share a display name have to
+    produce two files, a stem has to carry the sends its channel feeds, and a render
+    that cannot write must leave the last good file alone."""
+    sub = folder / "render-safety"
+    sub.mkdir()
+    project = sub / "project.json"
+    script = sub / "ui-script.json"
+    stage = {"round": 0}
+
+    def run(actions):
+        stage["round"] += 1
+        atomic_write(script, [{"comment": stage["round"]}] + list(actions))
+        wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
+                          and read(sub / "ui-script-status.json").get("finished")), timeout=180)
+        status = read(sub / "ui-script-status.json")
+        assert not status["error"], status
+        return settled(sub)
+
+    def render(what):
+        (sub / "render-status.json").unlink(missing_ok=True)
+        run([{"export": what}])
+        wait_for(lambda: read(sub / "render-status.json").get("running") is False, timeout=240)
+        return read(sub / "render-status.json")
+
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+    process = subprocess.Popen([str(exe), "--project", str(project), "--headless",
+                                "--screenshots", "--ui-script", str(script)], startupinfo=startup)
+    try:
+        wait_for(lambda: read(sub / "state.json"), timeout=40)
+        run([{"command": "Add channel"}, {"command": "New pattern"}, {"select_pattern": 1}])
+
+        # Two channels playing different notes, sharing a display name, and a reverb
+        # bus the first one only reaches through a send.
+        def build(live):
+            live["channels"][0]["name"] = "Lead"
+            live["channels"][1]["name"] = "Lead"
+            pattern = live["patterns"][1]
+            pattern["length"] = 16.0
+            pattern["sequences"] = [
+                {"channel": live["channels"][0]["id"], "notes": [
+                    {"id": "a%d" % i, "pitch": 60, "velocity": 110, "start": i * 2.0, "length": 1.0}
+                    for i in range(8)]},
+                {"channel": live["channels"][1]["id"], "notes": [
+                    {"id": "b%d" % i, "pitch": 48, "velocity": 110, "start": i * 2.0 + 1.0, "length": 1.0}
+                    for i in range(8)]}]
+            live["playlist"]["clips"].append({"id": "place-1", "lane": live["playlist"]["lanes"][0]["id"],
+                                              "pattern": pattern["id"], "start": 0.0, "length": 16.0,
+                                              "offset": 0.0})
+            live["mixer"]["inserts"].append({"id": "verb", "index": 7, "name": "Reverb",
+                                             "gain_db": 0.0, "pan": 0.0, "mute": False,
+                                             "output": "master",
+                                             "effects": [{"id": "verb-fx", "type": "reverb",
+                                                          "bypass": False, "wet": 1.0, "parameters": []}],
+                                             "sends": []})
+            dry = next(i for i in live["mixer"]["inserts"] if i["index"] == live["channels"][0]["insert"])
+            dry["sends"] = [{"id": "to-verb", "target": "verb", "level": 0.0}]
+
+        state, _ = apply_change(project, build)
+        assert [c["name"] for c in state["channels"]] == ["Lead", "Lead"], state["channels"]
+        assert len(engine_clips(state)) >= 2, "The two channels are not both playing"
+
+        # R1: two channels with the same name must not land on one path.
+        result = render("stems")
+        assert len(result["files"]) == 2, result
+        assert len(set(result["files"])) == 2, ("Two stems landed on one path", result)
+        for path in result["files"]:
+            assert Path(path).exists(), path
+            assert read_wav(Path(path))["peak"] > 0.001, path
+
+        # R3: the stem of the channel that feeds the reverb has to carry that send, so
+        # taking the send away has to change its file.
+        with_send = {path: hashlib.sha256(Path(path).read_bytes()).digest() for path in result["files"]}
+
+        def drop_the_send(live):
+            for insert in live["mixer"]["inserts"]:
+                insert["sends"] = []
+
+        apply_change(project, drop_the_send)
+        result = render("stems")
+        assert len(result["files"]) == 2, result
+        without_send = {path: hashlib.sha256(Path(path).read_bytes()).digest() for path in result["files"]}
+        assert any(with_send.get(path) != digest for path, digest in without_send.items()), \
+            "No stem changed when the send was removed, so sends are not in the stems"
+
+        # R2: a render that cannot write must leave the last good file alone.
+        mix = render("mix")
+        assert len(mix["files"]) == 1, mix
+        assert read_wav(sub / "mix.wav")["peak"] > 0.001
+        before = hashlib.sha256((sub / "mix.wav").read_bytes()).digest()
+
+        keep = sub / "mix-known-good.wav"
+        shutil.copyfile(sub / "mix.wav", keep)
+        (sub / "mix.wav").unlink()
+        (sub / "mix.wav").mkdir()
+        try:
+            failed = render("mix")
+            assert not failed["files"], ("A blocked render reported success", failed)
+        finally:
+            (sub / "mix.wav").rmdir()
+            shutil.copyfile(keep, sub / "mix.wav")
+
+        assert hashlib.sha256((sub / "mix.wav").read_bytes()).digest() == before, \
+            "The previous mix was lost"
+
+        # Editing while a render runs must not disturb either of them. The render works
+        # from the project as it was when it started, and it says which revision that was.
+        (sub / "render-status.json").unlink(missing_ok=True)
+        started_at = read(sub / "sync-status.json")["revision"]
+        run([{"export": "mix"}])
+
+        edits = 0
+        while read(sub / "render-status.json").get("running") is not False:
+            def nudge(live):
+                live["bpm"] = 120.0 + (edits % 5)
+
+            try:
+                apply_change(project, nudge)
+                edits += 1
+            except (Conflict, RuntimeError):
+                pass
+
+            control(project, "undo")
+            if edits > 12:
+                break
+
+        wait_for(lambda: read(sub / "render-status.json").get("running") is False, timeout=240)
+        rendered = read(sub / "render-status.json")
+        assert rendered["files"], rendered
+        assert rendered["complete"], rendered
+        assert rendered["revision"] == started_at, (rendered, started_at)
+        assert edits > 0, "Nothing was edited while the render ran"
+
+        during = read_wav(sub / "mix.wav")
+        assert during["peak"] > 0.001 and during["seconds"] > 1.0, during
+
+        # The project itself is still healthy and still the same session.
+        assert not read(sub / "sync-status.json")["error"], read(sub / "sync-status.json")
+        after_stress = settled(sub)
+        assert len(after_stress["channels"]) == 2, after_stress["channels"]
+        assert len(engine_clips(after_stress)) >= 2, "The arrangement lost clips during the render"
+
+        control(project, "quit")
+        assert process.wait(timeout=30) == 0
+        process = None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+    return ("Exports keep their names apart, carry a channel's sends, survive a failed write, "
+            "and render the project as it was while it keeps being edited")
 
 
 if __name__ == "__main__":

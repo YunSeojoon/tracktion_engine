@@ -364,13 +364,13 @@ public:
                 return true;
 
             case commands::exportMix:
-                status.setText (exporter.startMix (project.source.getSiblingFile ("mix.wav"), renderRange())
+                status.setText (exporter.startMix (project.source.getSiblingFile ("mix.wav"), renderRange(), project.revision)
                                   ? "Rendering the mix..." : "A render is already running",
                                 dontSendNotification);
                 return true;
 
             case commands::exportStems:
-                status.setText (exporter.startStems (project.source.getSiblingFile ("stems"), renderRange())
+                status.setText (exporter.startStems (project.source.getSiblingFile ("stems"), renderRange(), project.revision)
                                   ? "Rendering stems..." : "A render is already running",
                                 dontSendNotification);
                 return true;
@@ -737,12 +737,16 @@ private:
             live::atomicWrite (project.source.getSiblingFile ("render-status.json"),
                                JSON::toString (live::object ({ { "running", false },
                                                                { "message", result->message },
+                                                               { "revision", result->revision },
+                                                               { "complete", result->complete },
                                                                { "files", files } }), false));
         }
         else if (exporter.isBusy() && ! renderWasBusy)
         {
             live::atomicWrite (project.source.getSiblingFile ("render-status.json"),
                                JSON::toString (live::object ({ { "running", true }, { "message", "Rendering" },
+                                                               { "revision", project.revision },
+                                                               { "complete", false },
                                                                { "files", Array<var>() } }), false));
         }
 
@@ -927,8 +931,8 @@ private:
 
         if (action.hasProperty ("export"))
             return action["export"].toString() == "stems"
-                     ? exporter.startStems (project.source.getSiblingFile ("stems"), renderRange())
-                     : exporter.startMix (project.source.getSiblingFile ("mix.wav"), renderRange());
+                     ? exporter.startStems (project.source.getSiblingFile ("stems"), renderRange(), project.revision)
+                     : exporter.startMix (project.source.getSiblingFile ("mix.wav"), renderRange(), project.revision);
 
         if (action.hasProperty ("audio"))
         {
