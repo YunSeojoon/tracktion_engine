@@ -66,14 +66,18 @@ The Playlist is a bar grid with one row per lane. Drag a pattern from the picker
 
 Drop a WAV onto a lane — from the Browser or from Explorer — and it becomes an audio clip that moves, resizes, splits and fades like any other. The Browser lists the project's own objects and samples, the folders you add, favourites and recently previewed files, and can preview a sample or go looking for one a clip has lost. `File > Collect samples` copies every sample the project uses into a `samples` folder beside the session, so the folder can be moved whole.
 
-Every channel plays through its numbered insert, an insert plays through whatever it is routed to, and everything reaches the master. `FX` on a strip adds one of six effects — EQ, limiter, saturation, delay, chorus, reverb — opens its window, bypasses it, moves it along the chain or removes it, and sets up a send; the button under it chooses where the strip is routed. Routing that would feed a signal back into itself is refused. Only saturation had to be written; the rest are the engine's own plugins.
+Every channel plays through its numbered insert, an insert plays through whatever it is routed to, and everything reaches the master. `FX` on a strip adds an effect — the six built in (EQ, limiter, saturation, delay, chorus, reverb) or any scanned VST3 — opens its window, bypasses it, moves it along the chain or removes it, and sets up a send; the button under it chooses where the strip is routed. Routing that would feed a signal back into itself is refused. Only saturation had to be written; the rest are the engine's own plugins.
 
 A curve automates any parameter `state.json` reports, and the engine plays it. `Automate`
 in the Playlist toolbar lists the selected channel's instrument and fader and the effects
 on the insert it plays through; choosing one opens a curve row under the arrangement.
 Click an empty spot to add a point, drag it to move it in time and value, right-click to
-take one away, and `Delete` removes the selected one. `P` on a channel row saves and
-recalls that instrument's settings, and `Tools` has the same two as commands. `Tools > Arm channel` points the enabled inputs at the selected channel, `Ctrl+Shift+R` records into the armed channels with an optional bar of count-in, and a take becomes a pattern placed where it was played — so it is edited like anything else. Every way of stopping goes through the same path, so a take is kept whether the app, a shortcut, an outside `stop` or closing the window ended the recording.
+take one away, and `Delete` removes the selected one. Hold `Ctrl` or `Alt` and drag the
+line between two points to bend that segment; the row draws what the engine will play
+rather than a straight line between the points. `P` on a channel row saves and recalls
+that instrument's settings — a preset only loads onto the same kind of
+instrument, and says what it is for when it does not fit — and `Tools`
+has the same two as commands. `Tools > Arm channel` points the enabled inputs at the selected channel, `Ctrl+Shift+R` records into the armed channels with an optional bar of count-in, and a take becomes a pattern placed where it was played — so it is edited like anything else. Every way of stopping goes through the same path, so a take is kept whether the app, a shortcut, an outside `stop` or closing the window ended the recording.
 
 The project keeps rolling backups beside the session, written every minute while it changes and immediately after a take is kept or the app closes. `File > Restore a backup...` picks one to open next time, keeping the current session beside it. If the session file is gone or unreadable, the newest backup that opens is loaded instead and `sync-status.json` says which one. That file also lists the backups and names any sample a clip can no longer find. `File > Export WAV` renders the arrangement, or the loop range when one is set over it, and `File > Export stems` renders one file per channel through that channel's own chain. Renders run on their own thread, from a copy of the project taken when the render
 started, so the arrangement can keep being edited while one is running. The file it
@@ -112,7 +116,10 @@ A parameter with an automation curve is driven by that curve; the stored value i
 written only when nothing is automating it, so an edit and a curve never fight over
 the same control. Removing a curve hands the parameter back.
 
-MIDI learn and hardware control surfaces are not wired up.
+A parameter can also be moved by a MIDI controller. `Automate > MIDI learn` picks the
+parameter, the next controller that moves becomes its control, and the mapping is kept
+in the project so it comes back with it. `state.json` reports what is mapped under
+`automation.midi_mappings`. Dedicated control surfaces are not wired up.
 
 Use the standard-library Python helper while the app is running:
 
@@ -128,7 +135,12 @@ It also supports transpose, clear-notes, place, make-unique, gain, parameter, st
 
 - [Windows 실행 및 외부 AI 협업 가이드](docs/windows-guide.ko.md)
 - [작업 단위와 검증 기록](docs/worklog.ko.md)
+- [배포 방식·코드 서명·업데이트 채널 결정](docs/release.ko.md)
+- [릴리스 후보](docs/release-candidate.ko.md)
+- [이 기계의 VST3 호환성 표](docs/compatibility-2026-09-10.ko.md)
+- [수용 검사 기록](docs/acceptance-2026-09-10.ko.md)
+- [변경 기록](docs/CHANGELOG.md)
 
-The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 26 real-app integration checks passed, the packaged ZIP installs, updates and uninstalls without touching the user's projects (docs/release.ko.md), and every VST3 on the development machine was checked against the real app (docs/compatibility-2026-09-10.ko.md). Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. Details are in the work log. Third-party VST3 compatibility is recorded per plugin for the development machine; listening to the output is a person's judgement and is not claimed. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
+The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 28 real-app integration checks passed, the packaged ZIP installs, updates and uninstalls without touching the user's projects (docs/release.ko.md), and every VST3 on the development machine was checked against the real app (docs/compatibility-2026-09-10.ko.md). Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. CI runs only when someone asks it to (`gh workflow run cocompose-windows.yml --ref ai-editor`); a push does not trigger it. Details are in the work log. Third-party VST3 compatibility is recorded per plugin for the development machine; listening to the output is a person's judgement and is not claimed. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
 
 Keep upstream license notices intact. Tracktion Engine and JUCE have separate licenses; see the upstream README and JUCE license files.
