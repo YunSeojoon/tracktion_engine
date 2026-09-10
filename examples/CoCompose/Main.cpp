@@ -627,8 +627,15 @@ private:
         }
 
         status.setText (recorder.stopRecording(), dontSendNotification);
-        // A take is expensive to lose, so it is written and backed up straight away
-        // rather than waiting for the next autosave.
+        keepWhatWasRecorded();
+    }
+
+    /** A take is expensive to lose, so it is written and backed up straight away
+        rather than waiting for the next autosave. Every path that folds a take into
+        the model comes through here; one that did not would leave a take that only
+        exists in memory. */
+    void keepWhatWasRecorded()
+    {
         project.save();
         project.writeBackup();
     }
@@ -1134,6 +1141,7 @@ private:
         if (action.hasProperty ("keep_takes"))
         {
             status.setText (recorder.keepTakes(), dontSendNotification);
+            keepWhatWasRecorded();
             workspace.refresh();
             return true;
         }

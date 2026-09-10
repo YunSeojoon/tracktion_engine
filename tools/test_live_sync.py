@@ -1697,6 +1697,19 @@ def check_recording_and_recovery(exe, folder):
         assert round(placement["start"], 3) == 8.0, placement
         assert not read(sub / "sync-status.json")["recording"], "The transport is still recording"
 
+        # Whichever way the first take arrived, the other way has to keep a take too.
+        # On a machine with a device the branch above never runs keep_takes, which is
+        # how a take that was folded in but never written out went unnoticed here.
+        if transport_records:
+            backups_before = read(sub / "sync-status.json")["backups"]
+            run([{"arm": [0, True]}, {"take": [0, 20.0, 4.0, 55, 59]}, {"keep_takes": True}])
+            time.sleep(1.0)
+            state = settled(sub)
+            second = [p for p in state["patterns"]
+                      if p["id"] not in patterns_before and p["id"] != take["id"]]
+            assert len(second) == 1, ("The second take was lost", [p["name"] for p in state["patterns"]])
+            assert read(sub / "sync-status.json")["backups"] != backups_before,                 "Keeping a take left it only in memory"
+
         # Backups accumulate as the work changes, newest first, and are capped.
         for beat in (16.0, 24.0, 32.0):
             run([{"place": [0, beat]}])
