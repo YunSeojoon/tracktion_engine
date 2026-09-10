@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from xml.etree import ElementTree
 
 from cocompose import atomic_write, control, current, read, submit, wait_for
 
@@ -259,6 +260,7 @@ def run(exe, folder):
 
         checks.append(check_legacy_session(launch, folder))
         checks.append(check_legacy_json_input(launch, folder))
+        checks.append(check_workspace_layout(launch, folder))
 
         report = {"passed": checks, "folder": str(folder), "executable": str(exe)}
         atomic_write(folder / "test-report.json", report)
@@ -347,6 +349,40 @@ def check_legacy_json_input(launch, folder):
     assert notes[0]["pitch"] == 55
     assert len(engine_clips(state)) == 1
     return "Schema 1 project.json input upgrades to the pattern model"
+
+
+def check_workspace_layout(launch, folder):
+    """Panel sizes, visibility and selection live in the session, so a reopened project
+    comes back with the same work surface."""
+    session = folder / "workspace/session.tracktionedit"
+
+    state = with_session(launch, folder, "workspace", lambda _: None)
+    layout = ElementTree.parse(session).getroot().find("COCOMPOSELAYOUT")
+    assert layout is not None, "The session has no saved workspace layout"
+
+    sizes = [float(v) for v in layout.get("sizes", "").split()]
+    assert len(sizes) == 4 and all(size > 1.0 for size in sizes), layout.get("sizes")
+    assert layout.get("visible") == "11111", layout.get("visible")
+    assert layout.get("selectedChannel") == state["channels"][0]["id"]
+    assert layout.get("selectedPattern") == state["patterns"][0]["id"]
+    assert layout.get("selectedLane") == state["playlist"]["lanes"][0]["id"]
+
+    # Hide the Mixer and the Playlist and narrow the browser, the way the View menu and
+    # the resizer bars do, then confirm the next run honours it instead of resetting.
+    tree = ElementTree.parse(session)
+    edited = tree.getroot().find("COCOMPOSELAYOUT")
+    edited.set("visible", "11010")
+    edited.set("sizes", "160 %s %s %s" % tuple(str(size) for size in sizes[1:]))
+    tree.write(session, encoding="UTF-8", xml_declaration=True)
+
+    with_session(launch, folder, "workspace-reopened", lambda target:
+                 shutil.copyfile(session, target / "session.tracktionedit"))
+    reopened = ElementTree.parse(folder / "workspace-reopened/session.tracktionedit").getroot()
+    restored = reopened.find("COCOMPOSELAYOUT")
+    assert restored.get("visible") == "11010", restored.get("visible")
+    restored_sizes = [float(v) for v in restored.get("sizes", "").split()]
+    assert abs(restored_sizes[0] - 160.0) < 1.0, restored_sizes
+    return "Panel sizes, visibility and selection are saved in the session and restored"
 
 
 if __name__ == "__main__":

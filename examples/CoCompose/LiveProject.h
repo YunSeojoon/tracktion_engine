@@ -324,6 +324,18 @@ public:
         poll();
     }
 
+    /** Writes the native session and state.json now, instead of waiting for the next
+        change to be noticed. */
+    void save()
+    {
+        model->renderIfNeeded();
+        lastModel = text (snapshot());
+        publish();
+        error.clear();
+        syncState = "synced";
+        writeStatus();
+    }
+
     void writeStatus()
     {
         atomicWrite (statusFile, JSON::toString (object ({ { "session_id", sessionID },

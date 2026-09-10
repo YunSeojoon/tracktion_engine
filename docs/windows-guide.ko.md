@@ -36,7 +36,7 @@ git submodule update --init --recursive
 
 `.github/workflows/cocompose-windows.yml`은 `ai-editor`의 관련 경로 push, 해당 브랜치 대상 PR 또는 수동 실행에서 Windows 빌드 후 `CoCompose-windows-x64` artifact로 ZIP을 업로드한다. 원격 실행 성공과 artifact 실행을 확인했다.
 
-배포본 자체를 검사하려면 압축을 푼 뒤 `.	ools	est_portable_start.ps1 -Exe '<압축 해제 경로>\CoCompose.exe'`를 실행한다. PATH에서 개발 도구를 제거한 상태로 앱을 띄우고 기존 기본 프로젝트가 복원되는지 확인한다.
+배포본 자체를 검사하려면 압축을 푼 뒤 `.\tools\test_portable_start.ps1 -Exe '<압축 해제 경로>\CoCompose.exe'`를 실행한다. PATH에서 개발 도구를 제거한 상태로 앱을 띄우고 기존 기본 프로젝트가 복원되는지 확인한다.
 
 기본 작업 파일은 Windows 문서 폴더의 `CoCompose\project.json`이다. 문서 폴더가 OneDrive 등으로 이동된 경우 화면 상단의 실제 경로를 확인한다. 폴더에 기존 작업이 없으면 내장 FourOsc 신스로 8마디 예제를 만든다. 별도 작업 폴더를 쓰려면 다음처럼 실행한다.
 
@@ -48,18 +48,23 @@ git submodule update --init --recursive
 
 C++ 소스를 수정해 다시 빌드할 때는 실행 파일 잠금을 풀기 위해 앱을 종료해야 할 수 있다. 음악 데이터 라이브 싱크는 재빌드나 앱·프로젝트 재시작 없이 동작한다. 실행 중 C++ 바이너리를 교체하는 기능은 아니다.
 
-## 화면에서 하는 일
+## 화면 구성
 
-- `Play` / `Stop`: 현재 프로젝트 재생과 정지.
-- `Undo`: 최근 편집 되돌리기. 외부 변경은 하나의 편집 트랜잭션으로 적용한다.
-- `+ Track`: 내장 신스가 있는 트랙 추가.
-- `Notes -1` / `Notes +1`: 선택한 MIDI 클립의 노트를 반음씩 이동.
-- BPM: 현재 템포 변경.
-- `Audio settings`: 출력 장치 설정.
-- `Scan plugins`: 설치된 VST3 스캔. 스캔 후 트랙 하단의 플러그인 추가 UI에서 삽입한다.
-- `Project folder`: 작업 파일 위치 표시.
+왼쪽에 Browser, 가운데 위아래로 Channel Rack과 Mixer, 오른쪽 위아래로 Pattern picker와 Playlist가 놓인다. 패널 사이 막대를 끌어 크기를 조절하고, View 메뉴 또는 `Alt+1`~`Alt+5`로 각 패널을 숨기거나 되살린다. 포커스가 있는 패널은 테두리가 밝게 표시되며 `F6`으로 다음 패널로 이동한다. 패널 크기·표시 여부·현재 선택은 세션에 저장되어 다시 열 때 복원된다.
 
-현재 타임라인은 Tracktion 예제 컴포넌트를 사용한다. 완성형 DAW의 피아노롤·믹서·편곡 기능 전체를 제공하는 단계는 아니다.
+| 영역 | 하는 일 |
+|---|---|
+| Browser | 프로젝트의 채널·패턴·플레이리스트 레인·믹서 인서트와 스캔된 플러그인 목록. 항목을 누르면 선택이 바뀐다 |
+| Channel Rack | 채널 추가/삭제, 이름 변경, mute/solo, 볼륨, 믹서 인서트 번호, 악기 창 열기. 선택한 패턴에서 그 채널이 연주하는 노트 수를 함께 보여준다 |
+| Mixer | Master와 인서트별 볼륨·팬·mute, 각 인서트에 배정된 채널 수 |
+| Pattern picker | 패턴 목록과 배치 횟수, 새로 만들기·복제·삭제 |
+| Playlist | 레인 목록과 배치 개수, `Place pattern`으로 선택한 패턴을 레인 끝에 붙이기, 그리고 모델이 만든 클립과 재생 커서를 보여주는 타임라인 |
+
+상단 툴바는 재생/정지, Song·Pattern 루프 전환, BPM, 마디:박 위치, 메트로놈, CPU 사용률, 포커스된 패널을 표시한다. 메뉴는 File(저장·복사본 저장·폴더 열기·종료), Edit(undo/redo, 채널·패턴 추가, 패턴 배치, 배치 독립화, 반음 이동), View(패널 표시), Tools(플러그인 스캔·오디오 설정), Help로 구성된다.
+
+단축키는 `Space` 재생/정지, `Ctrl+L` Song·Pattern 전환, `Ctrl+M` 메트로놈, `Ctrl+S` 저장, `Ctrl+Z`/`Ctrl+Shift+Z` undo/redo, `Ctrl+T` 채널 추가, `Ctrl+P` 패턴 추가, `Ctrl+B` 패턴 배치, `Ctrl+U` 선택 배치 독립화, `Ctrl+↑`/`Ctrl+↓` 패턴 반음 이동이다.
+
+스텝 시퀀서와 피아노롤, 마우스로 하는 플레이리스트 편집, 샘플 브라우저, 믹서 라우팅과 효과는 아직 없다. 타임라인은 Tracktion 예제 컴포넌트를 사용한다.
 
 ## 외부 AI와 협업하기
 
@@ -82,15 +87,31 @@ UI 변경도 감지되면 네이티브 프로젝트와 `state.json`에 저장된
 
 파일은 임시 파일에 완성본을 쓴 뒤 교체하는 방식으로 저장한다. 앱은 250ms 간격으로 확인하고 두 번 연속 동일한 내용을 읽은 뒤 적용하므로 보통 수백 ms의 지연이 있다. 처리량과 시스템 상태에 따른 추가 지연은 가능하다.
 
-지원하는 변경은 템포, MIDI 트랙·클립·노트의 추가/수정/삭제, 트랙 이름·gain/mute/solo, 이미 존재하는 플러그인의 공개 파라미터다. JSON은 전체 원하는 MIDI 상태를 나타낸다. 기존 트랙·클립·노트를 배열에서 빼면 삭제로 해석하므로 의도하지 않은 항목은 보존한다. 기존 객체의 `id`도 유지한다.
+### 문서 구조 (schema 2)
+
+문서는 다섯 가지를 구분한다.
+
+| 키 | 내용 |
+|---|---|
+| `channels` | 악기 채널. `gain_db`, `pan`, `mute`, `solo`, 믹서 `insert` 번호, 플러그인 공개 `parameters` |
+| `patterns` | 이름이 붙은 노트 묶음. 채널마다 `sequences` 항목 하나를 가지며 각 항목에 `notes`가 들어간다 |
+| `playlist.lanes`, `playlist.clips` | 클립은 패턴을 레인의 특정 박 위치에 **배치**한 것이다. 여러 클립이 한 패턴을 참조할 수 있다 |
+| `mixer.inserts` | 번호가 붙은 인서트. 채널이 배정되며 저장되지만, 실제 오디오 라우팅은 아직 채널→Master 직결이다 |
+| `engine` | 모델이 만들어낸 실제 엔진 클립의 읽기 전용 결과. 요청에 넣어도 무시되며, 편집이 재생에 도달했는지 확인하는 용도다 |
+
+클립은 패턴을 참조만 하므로, 패턴을 수정하면 그 패턴의 모든 배치가 함께 바뀌고 Undo 한 번으로 모두 되돌아간다. 한 배치만 따로 바꾸려면 패턴을 새 `id`와 새 노트 `id`로 복제해 그 클립이 복제본을 가리키게 한다. `tools/cocompose.py make-unique`가 같은 일을 한다.
+
+이전의 평평한 `tracks` 모델로 쓴 문서와 그 빌드가 저장한 세션은 열 때 자동으로 변환된다. 트랙·클립·노트의 `id`는 그대로 유지되므로 기존 스크립트의 참조가 깨지지 않는다.
+
+JSON은 전체 원하는 상태를 나타낸다. 기존 항목을 배열에서 빼면 삭제로 해석하므로 의도하지 않은 항목은 보존한다.
 
 - `bpm`: 30–300.
-- `gain_db`: -60–6. 트랙 페이더는 이 값이 우선한다.
-- 클립 `start` / `length`: 박 단위. 노트 `start`는 클립 내부의 상대 박 위치다.
-- 노트 `pitch`: 0–127, `velocity`: 1–127. 노트는 클립 길이를 벗어나지 않아야 한다.
+- `gain_db`: -60–6, `pan`: -1–1. 채널 페이더는 이 값이 우선한다.
+- 클립 `start` / `length`: 박 단위. 노트 `start`는 패턴 내부의 상대 박 위치다.
+- 노트 `pitch`: 0–127, `velocity`: 1–127. 노트는 패턴 길이를 벗어나지 않아야 한다.
 - 파라미터 `value`: 0–1로 정규화한 값. `plugin_id`와 파라미터 `id`는 최신 state에서 가져온다.
 
-현재 상한은 파일 8MB, 트랙 64개, 트랙당 클립 256개, 전체 노트 20,000개다. JSON으로 임의 코드를 실행하거나 새로운 VST를 로드하는 인터페이스는 없다. 플러그인 삽입은 UI에서 하고, 외부 AI는 노출된 파라미터를 읽고 수정한다.
+현재 상한은 파일 8MB, 채널 64개, 패턴 512개, 패턴당 sequence 64개, 레인 128개, 배치 4,096개, 인서트 256개, 전체 노트 20,000개다. JSON으로 임의 코드를 실행하거나 새로운 VST를 로드하는 인터페이스는 없다. 플러그인 삽입은 UI에서 하고, 외부 AI는 노출된 파라미터를 읽고 수정한다.
 
 ## Python helper로 바로 조작하기
 
@@ -108,14 +129,16 @@ python tools/cocompose.py --project 'C:\project_private\my-song\project.json' re
 추가 명령은 다음과 같다. ID는 `inspect` 결과에서 가져오며, 아래 꺾쇠 표기는 실제 값으로 치환한다.
 
 ```text
-transpose <clip_id> <semitones>
-clear-notes <clip_id>
-gain <track_id> <db>
-parameter <track_id> <plugin_id> <parameter_id> <0부터 1까지의 값>
+transpose <pattern_id> <semitones>
+clear-notes <pattern_id>
+place <lane_id> <pattern_id> <시작 박>
+make-unique <clip_id>
+gain <channel_id> <db>
+parameter <channel_id> <plugin_id> <parameter_id> <0부터 1까지의 값>
 quit
 ```
 
-helper는 최신 상태를 읽고 완성된 파일을 교체한 뒤, 요청 ID에 대한 응답을 기다린다. 제어 요청도 요청 ID·session·revision으로 확인한다. `clear-notes`는 해당 클립의 노트를 모두 지우며, `quit`는 앱을 종료한다.
+helper는 최신 상태를 읽고 완성된 파일을 교체한 뒤, 요청 ID에 대한 응답을 기다린다. 제어 요청도 요청 ID·session·revision으로 확인한다. `transpose`와 `clear-notes`는 패턴을 바꾸므로 그 패턴의 모든 배치에 반영된다. 한 배치만 떼어내려면 `make-unique`를 먼저 실행한다. `quit`는 앱을 종료한다.
 
 ## 반영과 오류 확인
 
@@ -133,9 +156,9 @@ helper는 최신 상태를 읽고 완성된 파일을 교체한 뒤, 요청 ID�
 
 ## 진단 옵션과 검증 상태
 
-`--headless`는 창을 숨기고, `--play`는 시작과 함께 재생하며, `--screenshots`는 revision별 UI 상태를 작업 폴더의 `ui.png`에 덮어쓰고 실제 UI 라벨을 `ui-state.json`에 기록한다. 일반 실행에는 필요 없다.
+`--headless`는 창을 숨기고, `--play`는 시작과 함께 재생하며, `--screenshots`는 화면이 바뀔 때마다 UI 상태를 작업 폴더의 `ui.png`에 덮어쓰고 실제 UI 라벨을 `ui-state.json`에 기록한다. 일반 실행에는 필요 없다.
 
-Windows MSVC 19.44.35223 Release 빌드와 실제 앱을 대상으로 한 통합 검사 10개를 통과했다. 같은 Edit에서 음악·UI 변경, 잘못된 입력 거절, undo/redo, 저장 실패 복구 및 정상 종료 후 복원을 확인했다. 상세 결과는 [작업 기록](worklog.ko.md)에 있다. 실제 오디오 청취와 타사 VST3 호환성은 미검증이다.
+Windows MSVC 19.44.35223 Release 빌드와 실제 앱을 대상으로 한 통합 검사 15개를 통과했다. 같은 Edit에서 음악·UI 변경, 잘못된 입력 거절, undo/redo, 저장 실패 복구, 정상 종료 후 복원에 더해 한 패턴의 두 배치가 함께 바뀌고 함께 되돌아가는지, 복제한 배치가 독립하는지, 이전 모델의 세션과 JSON이 변환되는지, 패널 배치가 저장·복원되는지를 확인했다. 상세 결과는 [작업 기록](worklog.ko.md)에 있다. 실제 오디오 청취와 타사 VST3 호환성은 미검증이다.
 
 통합 검사를 다시 실행하려면 현재 CoCompose를 먼저 정상 종료한 뒤 저장소 루트에서 다음을 실행한다. 검사는 새로운 테스트 폴더를 만들고 실제 앱을 숨긴 상태로 실행한다. 검사 중 정상 종료·재실행은 저장 복원 시험이며, 라이브 변경에 재실행이 필요한 것은 아니다.
 

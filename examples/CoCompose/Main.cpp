@@ -3,121 +3,538 @@
 #include "../common/Components.h"
 #include "../common/PluginWindow.h"
 #include "LiveProject.h"
+#include "Workspace.h"
 
 using namespace juce;
 namespace te = tracktion;
 using namespace tracktion::literals;
 
-class Editor final : public Component, private Timer
+namespace commands
+{
+enum
+{
+    playStop = 0x2000, songMode, save, saveCopy, revealFolder, quitApp,
+    undo, redo, addChannel, newPattern, placePattern, makeUnique, transposeUp, transposeDown,
+    metronome, focusNextPanel, scanPlugins, audioSettings, about,
+    togglePanelBase // + panel index
+};
+}
+
+class Editor final : public Component,
+                     public MenuBarModel,
+                     public ApplicationCommandTarget,
+                     private Timer
 {
 public:
     Editor (const File& file, bool playOnStart, bool snapshots)
         : engine ("CoCompose", std::make_unique<ExtendedUIBehaviour>(), nullptr),
-          project (engine, file), selection (engine), timeline (*project.edit, selection),
+          project (engine, file), selection (engine),
+          workspace (*project.model, selection, engine),
           saveSnapshots (snapshots), startPlayback (playOnStart)
     {
-        Helpers::addAndMakeVisible (*this, { &title, &path, &status, &play, &undo, &addTrack,
-            &transposeDown, &transposeUp, &folder, &plugins, &audio, &tempo, &timeline });
-        title.setText ("CoCompose  /  Live session", dontSendNotification);
-        title.setFont (Font (FontOptions (22.0f, Font::bold)));
+        commandManager.registerAllCommandsForTarget (this);
+        addKeyListener (commandManager.getKeyMappings());
+        setWantsKeyboardFocus (true);
+
+        menuBar.setModel (this);
+        title.setText ("CoCompose", dontSendNotification);
+        title.setFont (Font (FontOptions (18.0f, Font::bold)));
         path.setText (file.getFullPathName(), dontSendNotification);
         path.setColour (Label::textColourId, Colours::lightgrey);
+        path.setFont (Font (FontOptions (11.0f)));
+        path.setJustificationType (Justification::centredRight);
+
         tempo.setRange (30, 300, 1);
         tempo.setSliderStyle (Slider::IncDecButtons);
-        tempo.setTextBoxStyle (Slider::TextBoxLeft, false, 70, 28);
+        tempo.setTextBoxStyle (Slider::TextBoxLeft, false, 64, 26);
         tempo.setTextValueSuffix (" BPM");
         tempo.onValueChange = [this]
         {
             project.edit->getUndoManager().beginNewTransaction ("Change tempo");
             project.edit->tempoSequence.getTempo (0)->setBpm (tempo.getValue());
         };
-        play.onClick = [this]
+
+        play.onClick = [this] { commandManager.invokeDirectly (commands::playStop, false); };
+        song.onClick = [this] { commandManager.invokeDirectly (commands::songMode, false); };
+        click.onClick = [this] { commandManager.invokeDirectly (commands::metronome, false); };
+        song.setClickingTogglesState (true);
+        click.setClickingTogglesState (true);
+
+        for (auto* label : std::initializer_list<Label*> { &position, &load, &focus })
         {
-            startPlayback = ! startPlayback;
-            if (startPlayback) project.edit->getTransport().play (false);
-            else project.edit->getTransport().stop (false, false);
-        };
-        undo.onClick = [this] { project.undo(); };
-        addTrack.onClick = [this]
-        {
-            auto& undoManager = project.edit->getUndoManager();
-            undoManager.beginNewTransaction ("Add channel");
-            project.model->addChannel ("Channel " + String (project.model->channels().getNumChildren() + 1),
-                                       &undoManager);
-            project.model->renderIfNeeded();
-        };
-        transposeDown.onClick = [this] { transpose (-1); };
-        transposeUp.onClick = [this] { transpose (1); };
-        folder.onClick = [file] { file.revealToUser(); };
-        audio.onClick = [this] { EngineHelpers::showAudioDeviceSettings (engine); };
-        plugins.onClick = [this]
-        {
-            DialogWindow::LaunchOptions options;
-            options.dialogTitle = "Scan VST3 plugins";
-            options.dialogBackgroundColour = Colours::black;
-            options.useNativeTitleBar = true;
-            options.resizable = true;
-            options.escapeKeyTriggersCloseButton = true;
-            auto* list = new PluginListComponent (engine.getPluginManager().pluginFormatManager,
-                engine.getPluginManager().knownPluginList,
-                engine.getTemporaryFileManager().getTempFile ("PluginScanDeadMansPedal"),
-                std::addressof (engine.getPropertyStorage().getPropertiesFile()), true);
-            list->setSize (800, 600);
-            options.content.setOwned (list);
-            options.launchAsync();
-        };
-        auto& view = timeline.getEditViewState();
-        view.showFooters = true;
-        view.showMidiDevices = false;
-        view.showWaveDevices = false;
-        view.viewX1 = 0s;
-        view.viewX2 = 20s;
-        setSize (1180, 720);
+            label->setColour (Label::textColourId, Colour (0xff8698b6));
+            label->setFont (Font (FontOptions (12.0f)));
+        }
+        position.setJustificationType (Justification::centred);
+        load.setJustificationType (Justification::centred);
+
+        Helpers::addAndMakeVisible (*this, { &menuBar, &title, &path, &play, &song, &tempo, &position,
+                                             &click, &load, &focus, &status, &workspace });
+
+        setSize (1420, 860);
         lastControl = project.source.getSiblingFile ("control.json").loadFileAsString();
+        applyTransportMode();
         startTimer (250);
     }
 
     ~Editor() override
     {
         stopTimer();
+        menuBar.setModel (nullptr);
         project.edit->getTransport().stop (false, false);
-        project.poll();
+        workspace.store();
+        // Layout is not part of the published model, so a session that only changed the
+        // work surface still has to be written out before the app closes.
+        project.save();
     }
 
-    void paint (Graphics& g) override
-    {
-        g.fillAll (Colour (0xff171d28));
-    }
+    void paint (Graphics& g) override { g.fillAll (Colour (0xff141a24)); }
 
     void resized() override
     {
-        auto r = getLocalBounds().reduced (16);
-        title.setBounds (r.removeFromTop (34));
-        path.setBounds (r.removeFromTop (25));
-        r.removeFromTop (8);
-        auto toolbar = r.removeFromTop (34);
-        for (auto* button : { &play, &undo, &addTrack, &transposeDown, &transposeUp, &plugins, &audio, &folder })
-            button->setBounds (toolbar.removeFromLeft (108).reduced (2));
-        tempo.setBounds (toolbar.reduced (2));
-        status.setBounds (r.removeFromTop (38));
-        timeline.setBounds (r);
+        auto r = getLocalBounds();
+        menuBar.setBounds (r.removeFromTop (24));
+
+        auto header = r.removeFromTop (28).reduced (10, 0);
+        title.setBounds (header.removeFromLeft (140));
+        path.setBounds (header);
+
+        auto bar = r.removeFromTop (34).reduced (10, 2);
+        play.setBounds (bar.removeFromLeft (96).reduced (2));
+        song.setBounds (bar.removeFromLeft (96).reduced (2));
+        tempo.setBounds (bar.removeFromLeft (150).reduced (2));
+        position.setBounds (bar.removeFromLeft (120));
+        click.setBounds (bar.removeFromLeft (100).reduced (2));
+        load.setBounds (bar.removeFromLeft (110));
+        focus.setBounds (bar.removeFromLeft (150));
+
+        status.setBounds (r.removeFromTop (26).reduced (10, 0));
+        workspace.setBounds (r.reduced (8, 4));
+    }
+
+    //==============================================================================
+    StringArray getMenuBarNames() override { return { "File", "Edit", "View", "Tools", "Help" }; }
+
+    PopupMenu getMenuForIndex (int index, const String&) override
+    {
+        PopupMenu menu;
+
+        if (index == 0)
+        {
+            for (auto id : { commands::save, commands::saveCopy, commands::revealFolder })
+                menu.addCommandItem (&commandManager, id);
+            menu.addSeparator();
+            menu.addCommandItem (&commandManager, commands::quitApp);
+        }
+        else if (index == 1)
+        {
+            for (auto id : { commands::undo, commands::redo })
+                menu.addCommandItem (&commandManager, id);
+            menu.addSeparator();
+            for (auto id : { commands::addChannel, commands::newPattern, commands::placePattern,
+                             commands::makeUnique, commands::transposeUp, commands::transposeDown })
+                menu.addCommandItem (&commandManager, id);
+        }
+        else if (index == 2)
+        {
+            for (int panel = 0; panel < live::numPanels; ++panel)
+                menu.addCommandItem (&commandManager, commands::togglePanelBase + panel);
+            menu.addSeparator();
+            menu.addCommandItem (&commandManager, commands::focusNextPanel);
+        }
+        else if (index == 3)
+        {
+            for (auto id : { commands::scanPlugins, commands::audioSettings })
+                menu.addCommandItem (&commandManager, id);
+        }
+        else
+        {
+            menu.addCommandItem (&commandManager, commands::about);
+        }
+
+        return menu;
+    }
+
+    void menuItemSelected (int, int) override {}
+
+    //==============================================================================
+    ApplicationCommandTarget* getNextCommandTarget() override { return nullptr; }
+
+    void getAllCommands (Array<CommandID>& ids) override
+    {
+        ids.addArray ({ commands::playStop, commands::songMode, commands::save, commands::saveCopy,
+                        commands::revealFolder, commands::quitApp, commands::undo, commands::redo,
+                        commands::addChannel, commands::newPattern, commands::placePattern,
+                        commands::makeUnique, commands::transposeUp, commands::transposeDown,
+                        commands::metronome, commands::focusNextPanel, commands::scanPlugins,
+                        commands::audioSettings, commands::about });
+        for (int panel = 0; panel < live::numPanels; ++panel)
+            ids.add (commands::togglePanelBase + panel);
+    }
+
+    void getCommandInfo (CommandID id, ApplicationCommandInfo& info) override
+    {
+        const auto panelIndex = static_cast<int> (id) - commands::togglePanelBase;
+        if (panelIndex >= 0 && panelIndex < live::numPanels)
+        {
+            info.setInfo ("Show " + String (live::panelName (panelIndex)), "Show or hide the panel", "View", 0);
+            info.addDefaultKeypress ('1' + panelIndex, ModifierKeys::altModifier);
+            info.setTicked (workspace.isPanelVisible (panelIndex));
+            return;
+        }
+
+        switch (id)
+        {
+            case commands::playStop:
+                info.setInfo ("Play / Stop", "Start or stop the transport", "Transport", 0);
+                info.addDefaultKeypress (KeyPress::spaceKey, ModifierKeys::noModifiers);
+                break;
+            case commands::songMode:
+                info.setInfo ("Song mode", "Loop the whole arrangement instead of the selected pattern", "Transport", 0);
+                info.addDefaultKeypress ('l', ModifierKeys::ctrlModifier);
+                info.setTicked (isSongMode());
+                break;
+            case commands::metronome:
+                info.setInfo ("Metronome", "Toggle the click track", "Transport", 0);
+                info.addDefaultKeypress ('m', ModifierKeys::ctrlModifier);
+                info.setTicked (project.edit->clickTrackEnabled);
+                break;
+            case commands::save:
+                info.setInfo ("Save now", "Write the session and state.json", "File", 0);
+                info.addDefaultKeypress ('s', ModifierKeys::ctrlModifier);
+                break;
+            case commands::saveCopy:
+                info.setInfo ("Save a copy...", "Copy the session into another folder", "File", 0);
+                break;
+            case commands::revealFolder:
+                info.setInfo ("Open project folder", "Show the project folder in Explorer", "File", 0);
+                break;
+            case commands::quitApp:
+                info.setInfo ("Exit", "Close CoCompose", "File", 0);
+                info.addDefaultKeypress ('q', ModifierKeys::ctrlModifier);
+                break;
+            case commands::undo:
+                info.setInfo ("Undo", "Undo the last edit", "Edit", 0);
+                info.addDefaultKeypress ('z', ModifierKeys::ctrlModifier);
+                info.setActive (project.edit->getUndoManager().canUndo());
+                break;
+            case commands::redo:
+                info.setInfo ("Redo", "Redo the last undone edit", "Edit", 0);
+                info.addDefaultKeypress ('z', ModifierKeys::ctrlModifier | ModifierKeys::shiftModifier);
+                info.setActive (project.edit->getUndoManager().canRedo());
+                break;
+            case commands::addChannel:
+                info.setInfo ("Add channel", "Add an instrument channel", "Edit", 0);
+                info.addDefaultKeypress ('t', ModifierKeys::ctrlModifier);
+                break;
+            case commands::newPattern:
+                info.setInfo ("New pattern", "Create an empty pattern", "Edit", 0);
+                info.addDefaultKeypress ('p', ModifierKeys::ctrlModifier);
+                break;
+            case commands::placePattern:
+                info.setInfo ("Place pattern", "Add the selected pattern to the selected lane", "Edit", 0);
+                info.addDefaultKeypress ('b', ModifierKeys::ctrlModifier);
+                info.setActive (canPlace());
+                break;
+            case commands::makeUnique:
+                info.setInfo ("Make placement unique", "Give the selected clip its own copy of the pattern", "Edit", 0);
+                info.addDefaultKeypress ('u', ModifierKeys::ctrlModifier);
+                info.setActive (selectedInstance().isValid());
+                break;
+            case commands::transposeUp:
+                info.setInfo ("Transpose pattern up", "Move every note in the selected pattern up a semitone", "Edit", 0);
+                info.addDefaultKeypress (KeyPress::upKey, ModifierKeys::ctrlModifier);
+                info.setActive (selectedSequence().isValid());
+                break;
+            case commands::transposeDown:
+                info.setInfo ("Transpose pattern down", "Move every note in the selected pattern down a semitone", "Edit", 0);
+                info.addDefaultKeypress (KeyPress::downKey, ModifierKeys::ctrlModifier);
+                info.setActive (selectedSequence().isValid());
+                break;
+            case commands::focusNextPanel:
+                info.setInfo ("Focus next panel", "Move keyboard focus to the next visible panel", "View", 0);
+                info.addDefaultKeypress (KeyPress::F6Key, ModifierKeys::noModifiers);
+                break;
+            case commands::scanPlugins:
+                info.setInfo ("Scan plugins...", "Find installed VST3 plugins", "Tools", 0);
+                break;
+            case commands::audioSettings:
+                info.setInfo ("Audio settings...", "Choose the output device", "Tools", 0);
+                break;
+            default:
+                info.setInfo ("About CoCompose", "Version and documentation", "Help", 0);
+                break;
+        }
+    }
+
+    bool perform (const InvocationInfo& invocation) override
+    {
+        const auto panelIndex = static_cast<int> (invocation.commandID) - commands::togglePanelBase;
+        if (panelIndex >= 0 && panelIndex < live::numPanels)
+        {
+            workspace.togglePanel (panelIndex);
+            menuItemsChanged();
+            return true;
+        }
+
+        auto& undoManager = project.edit->getUndoManager();
+
+        switch (invocation.commandID)
+        {
+            case commands::playStop:
+                startPlayback = ! startPlayback;
+                if (startPlayback) project.edit->getTransport().play (false);
+                else project.edit->getTransport().stop (false, false);
+                return true;
+
+            case commands::songMode:
+                workspace.layout.setProperty (live::layoutIds::patternMode, isSongMode(), nullptr);
+                applyTransportMode();
+                menuItemsChanged();
+                return true;
+
+            case commands::metronome:
+                project.edit->clickTrackEnabled = ! project.edit->clickTrackEnabled;
+                menuItemsChanged();
+                return true;
+
+            case commands::save:
+                project.save();
+                return true;
+
+            case commands::saveCopy:
+                saveCopyAsync();
+                return true;
+
+            case commands::revealFolder:
+                project.source.revealToUser();
+                return true;
+
+            case commands::quitApp:
+                JUCEApplication::getInstance()->systemRequestedQuit();
+                return true;
+
+            case commands::undo:
+                project.undo();
+                return true;
+
+            case commands::redo:
+                undoManager.redo();
+                project.poll();
+                return true;
+
+            case commands::addChannel:
+            {
+                undoManager.beginNewTransaction ("Add channel");
+                auto channel = project.model->addChannel (
+                    "Channel " + String (project.model->channels().getNumChildren() + 1), &undoManager);
+                project.model->renderIfNeeded();
+                workspace.selection.setChannel (live::Model::uidOf (channel));
+                workspace.refresh();
+                return true;
+            }
+
+            case commands::newPattern:
+            {
+                undoManager.beginNewTransaction ("New pattern");
+                auto pattern = project.model->addPattern (
+                    "Pattern " + String (project.model->patterns().getNumChildren() + 1),
+                    live::defaultPatternBeats, &undoManager);
+                project.model->renderIfNeeded();
+                workspace.selection.setPattern (live::Model::uidOf (pattern));
+                workspace.refresh();
+                return true;
+            }
+
+            case commands::placePattern:
+            {
+                if (! canPlace())
+                    return true;
+
+                const auto lane = workspace.selection.lane();
+                undoManager.beginNewTransaction ("Place pattern");
+                project.model->addInstance (lane, workspace.selection.pattern(),
+                                            project.model->laneEndBeat (lane), &undoManager);
+                project.model->renderIfNeeded();
+                workspace.refresh();
+                return true;
+            }
+
+            case commands::makeUnique:
+            {
+                auto instance = selectedInstance();
+                if (! instance.isValid())
+                    return true;
+
+                undoManager.beginNewTransaction ("Make placement unique");
+                auto copy = project.model->makeUnique (instance, &undoManager);
+                project.model->renderIfNeeded();
+                workspace.selection.setPattern (live::Model::uidOf (copy));
+                workspace.refresh();
+                return true;
+            }
+
+            case commands::transposeUp:   transpose (1); return true;
+            case commands::transposeDown: transpose (-1); return true;
+
+            case commands::focusNextPanel:
+                workspace.focusNextPanel();
+                return true;
+
+            case commands::scanPlugins:
+                showPluginScanner();
+                return true;
+
+            case commands::audioSettings:
+                EngineHelpers::showAudioDeviceSettings (engine);
+                return true;
+
+            default:
+                AlertWindow::showMessageBoxAsync (MessageBoxIconType::InfoIcon, "CoCompose 0.1.0",
+                    "Composing with an external AI on Tracktion Engine.\n\n"
+                    "The running app applies edits written to project.json and reports the live "
+                    "result in state.json.\n\nGuide: docs/windows-guide.ko.md");
+                return true;
+        }
     }
 
 private:
     te::Engine engine;
     live::Project project;
     te::SelectionManager selection;
-    EditComponent timeline;
-    Label title, path, status;
-    TextButton play { "Play / Stop" }, undo { "Undo" }, addTrack { "+ Track" },
-        transposeDown { "Notes -1" }, transposeUp { "Notes +1" }, folder { "Project folder" },
-        plugins { "Scan plugins" }, audio { "Audio settings" };
+    live::Workspace workspace;
+    ApplicationCommandManager commandManager;
+    MenuBarComponent menuBar;
+    Label title, path, position, load, focus, status;
+    TextButton play { "Play / Stop" }, song { "Song" }, click { "Metronome" };
     Slider tempo;
     bool saveSnapshots;
     bool startPlayback;
     int startupTicks = 0;
     int lastSnapshotRevision = -1;
-    String lastControl;
+    String lastControl, lastLabels;
+
+    bool isSongMode() const
+    {
+        return ! static_cast<bool> (workspace.layout.getProperty (live::layoutIds::patternMode, false));
+    }
+
+    bool canPlace() const
+    {
+        return project.model->laneFor (workspace.selection.lane()).isValid()
+                && project.model->patternFor (workspace.selection.pattern()).isValid();
+    }
+
+    /** Song mode loops the arrangement; pattern mode loops the selected pattern's first
+        placement, which is what makes the two transport modes audibly different. */
+    void applyTransportMode()
+    {
+        auto& transport = project.edit->getTransport();
+        auto range = te::TimeRange (te::TimePosition(),
+                                    std::max (te::TimePosition::fromSeconds (2.0),
+                                              te::TimePosition::fromSeconds (project.edit->getLength().inSeconds())));
+
+        if (! isSongMode())
+            for (auto instance : project.model->instances())
+                if (instance[live::ids::pattern].toString() == workspace.selection.pattern())
+                {
+                    const auto start = static_cast<double> (instance[live::ids::start]);
+                    const auto length = static_cast<double> (instance[live::ids::length]);
+                    range = { project.edit->tempoSequence.toTime (te::BeatPosition::fromBeats (start)),
+                              project.edit->tempoSequence.toTime (te::BeatPosition::fromBeats (start + length)) };
+                    break;
+                }
+
+        transport.setLoopRange (range);
+        transport.looping = true;
+    }
+
+    ValueTree selectedInstance() const
+    {
+        if (auto* clip = dynamic_cast<te::MidiClip*> (selection.getSelectedObject (0)))
+            return project.model->instanceFor (clip->state[live::ids::clipInstance].toString());
+        return {};
+    }
+
+    ValueTree selectedSequence() const
+    {
+        auto instance = selectedInstance();
+        if (instance.isValid())
+            if (auto* clip = dynamic_cast<te::MidiClip*> (selection.getSelectedObject (0)))
+                return live::Model::findSequence (
+                    project.model->patternFor (instance[live::ids::pattern].toString()),
+                    clip->state[live::ids::clipChannel].toString());
+
+        return live::Model::findSequence (project.model->patternFor (workspace.selection.pattern()),
+                                          workspace.selection.channel());
+    }
+
+    // A clip is a placement of a pattern, so transposing one transposes the pattern and
+    // therefore every other placement of it. Make unique first to detach one.
+    void transpose (int semitones)
+    {
+        auto sequence = selectedSequence();
+
+        if (! sequence.isValid() || sequence.getNumChildren() == 0)
+        {
+            status.setText ("Select a pattern with notes first", dontSendNotification);
+            return;
+        }
+
+        auto& undoManager = project.edit->getUndoManager();
+        undoManager.beginNewTransaction ("Transpose pattern");
+        for (auto note : sequence)
+            note.setProperty (live::ids::pitch,
+                              jlimit (0, 127, static_cast<int> (note[live::ids::pitch]) + semitones),
+                              &undoManager);
+        project.model->renderIfNeeded();
+    }
+
+    void showPluginScanner()
+    {
+        DialogWindow::LaunchOptions options;
+        options.dialogTitle = "Scan VST3 plugins";
+        options.dialogBackgroundColour = Colours::black;
+        options.useNativeTitleBar = true;
+        options.resizable = true;
+        options.escapeKeyTriggersCloseButton = true;
+        auto* list = new PluginListComponent (engine.getPluginManager().pluginFormatManager,
+            engine.getPluginManager().knownPluginList,
+            engine.getTemporaryFileManager().getTempFile ("PluginScanDeadMansPedal"),
+            std::addressof (engine.getPropertyStorage().getPropertiesFile()), true);
+        list->setSize (800, 600);
+        options.content.setOwned (list);
+        options.launchAsync();
+    }
+
+    /** Copies the session and its published state into another folder. The running
+        session keeps working on the original folder. */
+    void saveCopyAsync()
+    {
+        project.save();
+        chooser = std::make_unique<FileChooser> ("Choose an empty folder for the copy",
+                                                 project.source.getParentDirectory());
+        chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectDirectories,
+            [this] (const FileChooser& result)
+            {
+                const auto target = result.getResult();
+                if (target == File() || ! target.isDirectory())
+                    return;
+
+                String failed;
+                for (auto* source : { &project.nativeFile, &project.stateFile })
+                    if (! source->copyFileTo (target.getChildFile (source->getFileName())))
+                        failed = source->getFileName();
+
+                // The copy needs an input file too, seeded from the state it was saved with.
+                if (failed.isEmpty() && ! project.stateFile.copyFileTo (target.getChildFile ("project.json")))
+                    failed = "project.json";
+
+                status.setText (failed.isEmpty() ? "Saved a copy to " + target.getFullPathName()
+                                                 : "Could not write " + failed,
+                                dontSendNotification);
+            });
+    }
 
     void pollControl()
     {
@@ -147,73 +564,45 @@ private:
             { "error", failure }, { "status", failure.isEmpty() ? "applied" : "rejected" } }), false));
     }
 
-    // Clips are placements of a pattern, so transposing one transposes the pattern and
-    // therefore every other placement of it. Use Make unique first to detach one.
-    void transpose (int semitones)
-    {
-        auto sequence = selectedSequence();
-
-        if (! sequence.isValid())
-        {
-            status.setText ("Select a pattern clip first", dontSendNotification);
-            return;
-        }
-
-        auto& undoManager = project.edit->getUndoManager();
-        undoManager.beginNewTransaction ("Transpose pattern");
-        for (auto note : sequence)
-            note.setProperty (live::ids::pitch,
-                              jlimit (0, 127, static_cast<int> (note[live::ids::pitch]) + semitones),
-                              &undoManager);
-        project.model->renderIfNeeded();
-    }
-
-    ValueTree selectedSequence()
-    {
-        auto* clip = dynamic_cast<te::MidiClip*> (selection.getSelectedObject (0));
-        if (clip == nullptr)
-            return {};
-
-        auto instance = project.model->instanceFor (clip->state[live::ids::clipInstance].toString());
-        if (! instance.isValid())
-            return {};
-
-        return live::Model::findSequence (project.model->patternFor (instance[live::ids::pattern].toString()),
-                                          clip->state[live::ids::clipChannel].toString());
-    }
-
     void timerCallback() override
     {
         try
         {
-        // Snapshot the previous completed UI update, after ValueTree listeners have run.
-        if (saveSnapshots && lastSnapshotRevision != project.revision)
-        {
-            auto image = createComponentSnapshot (getLocalBounds());
-            auto output = project.source.getSiblingFile ("ui.png").createOutputStream();
-            if (output != nullptr) { output->setPosition (0); output->truncate(); PNGImageFormat().writeImageToStream (image, *output); }
-            Array<var> labels;
-            collectLabels (*this, labels);
-            live::atomicWrite (project.source.getSiblingFile ("ui-state.json"), JSON::toString (live::object ({
-                { "revision", project.revision }, { "labels", labels } }), false));
-            lastSnapshotRevision = project.revision;
-        }
         project.poll();
         pollControl();
+        workspace.refresh();
+        workspace.store();
         // Some graph rebuilds briefly clear the engine's playing flag. Preserve the
         // user's transport intent while retaining the same Edit and play position.
         if (++startupTicks >= 4 && startPlayback && ! project.edit->getTransport().isPlaying())
             project.edit->getTransport().play (false);
+        if (startupTicks == 2)
+            workspace.focusFirstPanel();
+
         tempo.setValue (project.edit->tempoSequence.getTempo (0)->getBpm(), dontSendNotification);
         play.setButtonText (project.edit->getTransport().isPlaying() ? "Stop" : "Play");
-        undo.setEnabled (project.edit->getUndoManager().canUndo());
+        song.setToggleState (isSongMode(), dontSendNotification);
+        song.setButtonText (isSongMode() ? "Song" : "Pattern");
+        click.setToggleState (project.edit->clickTrackEnabled, dontSendNotification);
+
+        const auto bars = project.edit->tempoSequence.toBarsAndBeats (project.edit->getTransport().getPosition());
+        position.setText (String (bars.bars + 1) + " : " + String (bars.beats.inBeats() + 1.0, 2),
+                          dontSendNotification);
+        load.setText ("CPU " + String (roundToInt (engine.getDeviceManager().getCpuUsage() * 100.0f)) + "%",
+                      dontSendNotification);
+        focus.setText ("Focus: " + workspace.focusedPanelName(), dontSendNotification);
+
         status.setColour (Label::textColourId, project.error.isEmpty() ? Colour (0xff83dec0) : Colour (0xffffad83));
-        status.setText (project.error.isEmpty() ? "Live sync  |  Revision " + String (project.revision)
-            + "  |  Edit project.json externally; changes appear here automatically"
-            : (project.syncState == "applied_unpersisted" ? "Applied; save pending: " : "Sync rejected: ")
-                + project.error, dontSendNotification);
+        if (project.error.isNotEmpty())
+            status.setText ((project.syncState == "applied_unpersisted" ? "Applied; save pending: " : "Sync rejected: ")
+                                + project.error, dontSendNotification);
+        else if (! status.getText().startsWith ("Saved a copy"))
+            status.setText ("Live sync  |  Revision " + String (project.revision)
+                + "  |  Edit project.json externally; changes appear here automatically", dontSendNotification);
+
         project.writeStatus();
-        timeline.repaint();
+        commandManager.commandStatusChanged();
+        writeSnapshot();
         }
         catch (const std::exception& e)
         {
@@ -222,11 +611,36 @@ private:
         }
     }
 
+    /** Captures the finished frame, after the panels have been refreshed, whenever the
+        project or anything the panels display has changed. */
+    void writeSnapshot()
+    {
+        if (! saveSnapshots)
+            return;
+
+        Array<var> labels;
+        collectLabels (*this, labels);
+        const auto signature = JSON::toString (var (labels), true);
+        if (lastSnapshotRevision == project.revision && signature == lastLabels)
+            return;
+
+        lastSnapshotRevision = project.revision;
+        lastLabels = signature;
+
+        auto image = createComponentSnapshot (getLocalBounds());
+        auto output = project.source.getSiblingFile ("ui.png").createOutputStream();
+        if (output != nullptr) { output->setPosition (0); output->truncate(); PNGImageFormat().writeImageToStream (image, *output); }
+        live::atomicWrite (project.source.getSiblingFile ("ui-state.json"), JSON::toString (live::object ({
+            { "revision", project.revision }, { "labels", labels } }), false));
+    }
+
     static void collectLabels (Component& component, Array<var>& labels)
     {
         if (auto* label = dynamic_cast<Label*> (&component)) labels.add (label->getText());
         for (auto* child : component.getChildren()) collectLabels (*child, labels);
     }
+
+    std::unique_ptr<FileChooser> chooser;
 };
 
 class Application final : public JUCEApplication
@@ -265,13 +679,13 @@ private:
     struct Window final : DocumentWindow
     {
         Window (std::unique_ptr<Editor> editor, bool visible)
-            : DocumentWindow ("CoCompose", Colour (0xff171d28), DocumentWindow::allButtons)
+            : DocumentWindow ("CoCompose", Colour (0xff141a24), DocumentWindow::allButtons)
         {
             setUsingNativeTitleBar (true);
             setContentOwned (editor.release(), true);
             setResizable (true, false);
-            setResizeLimits (1100, 500, 4000, 2400);
-            centreWithSize (1180, 720);
+            setResizeLimits (1180, 620, 4000, 2400);
+            centreWithSize (1420, 860);
             setVisible (visible);
         }
         void closeButtonPressed() override { JUCEApplication::getInstance()->systemRequestedQuit(); }

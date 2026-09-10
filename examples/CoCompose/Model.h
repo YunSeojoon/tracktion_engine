@@ -233,6 +233,17 @@ public:
 
     void render() { dirty = true; renderIfNeeded(); }
 
+    /** Where the next placement on a lane should start: after everything already there. */
+    double laneEndBeat (const String& laneID) const
+    {
+        double end = 0.0;
+        for (auto instance : instances())
+            if (instance[ids::lane].toString() == laneID)
+                end = std::max (end, static_cast<double> (instance[ids::start])
+                                      + static_cast<double> (instance[ids::length]));
+        return end;
+    }
+
     te::AudioTrack* trackFor (const String& channelID) const
     {
         for (auto* track : te::getAudioTracks (edit))

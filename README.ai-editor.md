@@ -33,9 +33,32 @@ To build and package a portable ZIP after initializing submodules, run `./tools/
 
 The default session lives in the Windows Documents folder under `CoCompose`. Use `--project 'C:\absolute\song\project.json'` to select a different session folder. Use one folder per song.
 
-Read fresh `state.json`, keep its session ID, revision and object IDs, modify the desired fields, and atomically replace `project.json`. The project file is input-only after initial sample creation; the app never overwrites it. Inspect `sync-status.json` and read `state.json` again to verify the actual engine result. Stale sessions and revisions are rejected. Track/clip/note arrays represent the complete desired MIDI state, so omitted objects are deleted.
+Read fresh `state.json`, keep its session ID, revision and object IDs, modify the desired fields, and atomically replace `project.json`. The project file is input-only after initial sample creation; the app never overwrites it. Inspect `sync-status.json` and read `state.json` again to verify the actual engine result. Stale sessions and revisions are rejected. Every array is the complete desired state, so omitted objects are deleted.
 
-Supported data includes MIDI tracks/clips/notes, tempo, gain/mute/solo, and parameters exposed by existing plugins. UI changes are published to `state.json` and the native session. Invalid input is rejected before mutation; live updates preserve the open Edit. Persistence failures are reported as `applied_unpersisted`, not as successful saves. C++ binary hot replacement is not supported.
+## The project model
+
+The document is schema 2 and separates five things:
+
+- `channels` — one instrument each, with `gain_db`, `pan`, `mute`, `solo`, a mixer `insert` number and the `parameters` its plugins expose.
+- `patterns` — named note collections. A pattern holds one `sequences` entry per channel that plays in it, each with its own `notes`.
+- `playlist.lanes` and `playlist.clips` — a clip is a *placement* of a pattern on a lane at a beat position. Several clips can reference one pattern.
+- `mixer.inserts` — numbered strips that channels are assigned to. Modelled and saved, but the audio still runs from each channel to the master; routing arrives with the mixer work.
+
+Because a clip only references a pattern, editing that pattern changes every placement of it, and one Undo restores all of them. To change a single placement, copy its pattern under a new id with new note ids and point the clip at the copy (`tools/cocompose.py make-unique`).
+
+The engine MIDI clips are derived from that model, never authored directly. `state.json` reports them under a read-only `engine` key: it is ignored when a request is applied, and it is how a script confirms an edit actually reached playback.
+
+Documents written for the earlier flat `tracks` model, and sessions saved by that build, are converted on load with their track, clip and note ids intact.
+
+UI changes are published to `state.json` and the native session, and every panel writes through the same undo manager an external edit uses. Invalid input is rejected before mutation; live updates preserve the open Edit. Persistence failures are reported as `applied_unpersisted`, not as successful saves. C++ binary hot replacement is not supported.
+
+## The work surface
+
+Browser on the left, Channel Rack above the Mixer in the centre, Pattern picker above the Playlist on the right. Drag the bars between them to resize, and use the View menu (or `Alt+1`...`Alt+5`) to hide and restore a panel; `F6` moves keyboard focus to the next one. Panel sizes, visibility and the current selection are stored in the session, so a reopened project comes back to the same surface.
+
+`Space` starts and stops, `Ctrl+L` switches between Song and Pattern loops, `Ctrl+M` toggles the metronome, `Ctrl+T` adds a channel, `Ctrl+P` a pattern, `Ctrl+B` places the selected pattern, and `Ctrl+U` gives the selected placement its own copy.
+
+Step sequencing and the piano roll, playlist editing with the mouse, the sample browser, and mixer routing with effects are not built yet.
 
 Use the standard-library Python helper while the app is running:
 
@@ -45,13 +68,13 @@ python tools/cocompose.py --project 'C:\absolute\song\project.json' tempo 108
 python tools/cocompose.py --project 'C:\absolute\song\project.json' play
 ```
 
-It also supports transpose, clear-notes, gain, parameter, stop, undo, redo and quit. Transport/history commands use `control.json` and request-correlated `control-status.json` acknowledgements.
+It also supports transpose, clear-notes, place, make-unique, gain, parameter, stop, undo, redo and quit. `transpose` and `clear-notes` take a pattern id and therefore change every placement of that pattern. Transport/history commands use `control.json` and request-correlated `control-status.json` acknowledgements.
 
 ## Documentation
 
 - [Windows 실행 및 외부 AI 협업 가이드](docs/windows-guide.ko.md)
 - [작업 단위와 검증 기록](docs/worklog.ko.md)
 
-The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 10 real-app integration checks passed. Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. Details are in the work log. Real audio listening and third-party VST3 compatibility remain unverified. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
+The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 15 real-app integration checks passed. Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. Details are in the work log. Real audio listening and third-party VST3 compatibility remain unverified. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
 
 Keep upstream license notices intact. Tracktion Engine and JUCE have separate licenses; see the upstream README and JUCE license files.
