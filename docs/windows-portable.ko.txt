@@ -1,22 +1,40 @@
 CoCompose 0.1.0 / Windows x64
 
+바로 쓰기
 1. ZIP을 폴더에 모두 압축 해제합니다.
 2. CoCompose.exe를 더블클릭합니다. PowerShell이나 Python은 앱 실행에 필요 없습니다.
-3. Play로 재생하고 Audio Settings에서 출력 장치를 선택합니다.
+3. Play로 재생하고 Tools > Audio settings에서 출력 장치를 선택합니다.
 
-프로젝트는 Windows 문서 폴더의 CoCompose에 저장됩니다.
-앱의 프로젝트 폴더 버튼으로 실제 저장 위치를 열 수 있습니다.
-업데이트할 때 앱을 종료하고 새 ZIP을 별도 폴더에 풀어 실행하세요.
-프로젝트 데이터는 배포 폴더 밖에 있으므로 유지됩니다.
+설치해서 쓰기(선택)
+Install.cmd를 실행하면 %LOCALAPPDATA%\Programs\CoCompose로 복사하고 시작 메뉴에
+바로가기를 만듭니다. 관리자 권한은 필요 없습니다. 지울 때는 설치 폴더의
+Uninstall.cmd를 실행합니다. 프로그램과 바로가기만 지우고 프로젝트는 남깁니다.
 
-외부 AI 연동: state.json을 읽고 변경한 전체 상태를 project.json에 씁니다.
-실행 중인 앱에 반영되며 프로젝트를 다시 열 필요가 없습니다.
-tools/cocompose.py는 선택적 Python 도구이며 앱 실행에는 필요 없습니다.
+프로젝트 위치
+Windows 문서 폴더의 CoCompose에 저장됩니다. 앱의 프로젝트 폴더 버튼으로 실제 위치를
+열 수 있습니다. 설치 폴더 밖이므로 업데이트해도 작업물은 그대로입니다.
 
-실행/빌드 가이드와 소스:
+업데이트
+앱을 종료하고 새 ZIP을 받아 압축을 풉니다. 이식형으로 쓰던 사람은 새 폴더에서 실행하고,
+설치해서 쓰던 사람은 새로 푼 폴더의 Install.cmd를 다시 실행합니다. 자동 업데이트는
+없습니다.
+
+이 빌드가 무엇인지 확인하기
+BUILD-INFO.json에 버전, 만들어진 커밋, 빌드 시각, 실행 파일의 SHA-256이 있습니다.
+배포물 옆의 SHA256SUMS.txt와 내려받은 ZIP을 비교할 수 있습니다.
+  Get-FileHash CoCompose-0.1.0-windows-x64.zip -Algorithm SHA256
+verification 폴더에 이 빌드에 실제로 돌린 검사 결과와 문서가 들어 있습니다.
+
+외부 AI 연동
+state.json을 읽고 변경한 전체 상태를 project.json에 씁니다. 실행 중인 앱에 반영되며
+프로젝트를 다시 열 필요가 없습니다. tools/cocompose.py는 선택적 Python 도구이며
+앱 실행에는 필요 없습니다.
+
+가이드와 소스
 https://github.com/YunSeojoon/tracktion_engine/tree/ai-editor
-docs/windows-guide.ko.md
+docs/windows-guide.ko.md, docs/release.ko.md
 
-현재 빌드는 코드 서명이 없습니다. 설치 프로그램/자동 업데이트는 포함하지 않습니다.
-타사 VST3별 호환성과 청음 검증은 별도로 필요합니다.
+알려진 제약
+코드 서명이 없어 처음 실행할 때 SmartScreen 경고가 뜹니다. 추가 정보 > 실행을 누르면
+됩니다. 자동 업데이트는 없습니다. 한 번에 한 프로젝트만 엽니다.
 오픈소스 고지는 licenses 폴더와 해당 소스 저장소를 참고하세요.

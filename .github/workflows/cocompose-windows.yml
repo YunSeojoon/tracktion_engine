@@ -48,6 +48,23 @@ jobs:
         shell: pwsh
         run: ./tools/test_portable_start.ps1 -Exe (Resolve-Path build-cocompose/unpacked/CoCompose.exe)
 
+      # Installing, replacing the install with another copy, and removing it again.
+      # What has to survive the middle step is the work, which lives outside the
+      # installed folder; what has to survive the last one is the same.
+      - name: Check installing, updating and removing
+        shell: pwsh
+        run: ./tools/test_install_and_update.ps1 -Unpacked (Resolve-Path build-cocompose/unpacked)
+
+      # Only now, with every check passed, does the distribution get its report and
+      # its hash. The hash is of the file people would actually download.
+      - name: Seal the distribution
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem build-cocompose/dist/CoCompose-*-windows-x64.zip | Select-Object -First 1
+          ./tools/finish_release.ps1 -Zip $zip.FullName `
+                                     -Report build-cocompose/ci-check/test-report.json `
+                                     -Extra docs/release.ko.md, docs/compatibility-2026-09-10.ko.md
+
       - name: Collect the check report
         if: always()
         uses: actions/upload-artifact@v4
@@ -63,5 +80,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: CoCompose-windows-x64
-          path: build-cocompose/dist/CoCompose-*-windows-x64.zip
+          path: |
+            build-cocompose/dist/CoCompose-*-windows-x64.zip
+            build-cocompose/dist/SHA256SUMS.txt
           if-no-files-found: error

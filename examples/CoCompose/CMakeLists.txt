@@ -24,6 +24,14 @@ install(FILES ../../docs/windows-portable.ko.txt DESTINATION . RENAME README.txt
 install(FILES ../../LICENSE.md DESTINATION licenses RENAME Tracktion-LICENSE.md COMPONENT Runtime)
 install(FILES ../../modules/juce/LICENSE.md DESTINATION licenses RENAME JUCE-LICENSE.md COMPONENT Runtime)
 install(FILES ../../tools/cocompose.py DESTINATION tools COMPONENT Runtime)
+install(FILES ../../docs/CHANGELOG.md DESTINATION . COMPONENT Runtime)
+# Copied in rather than run from the ZIP: the installed folder needs its own copy of
+# the uninstaller. Both are plain batch so a machine with nothing installed can run them.
+install(PROGRAMS ../../packaging/Install.cmd ../../packaging/Uninstall.cmd
+        DESTINATION . COMPONENT Runtime)
+# Written by tools/build-windows.ps1 just before packaging, so the version, the commit
+# it came from and the executable's hash travel inside the ZIP.
+install(FILES ${CMAKE_BINARY_DIR}/BUILD-INFO.json DESTINATION . COMPONENT Runtime)
 set(CPACK_COMPONENTS_ALL Runtime)
 set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
 set(CPACK_COMPONENTS_GROUPING ALL_COMPONENTS_IN_ONE)
