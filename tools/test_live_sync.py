@@ -50,6 +50,25 @@ def engine_clips(state, pattern_id=None):
     return found
 
 
+def settled(folder, quiet=0.4, timeout=20):
+    """state.json is written a tick after an action runs, and rendering the result can
+    take another tick, so wait until the published revision has stopped moving."""
+    deadline = time.monotonic() + timeout
+    last = None
+
+    while time.monotonic() < deadline:
+        status = read(folder / "sync-status.json")
+        state = read(folder / "state.json")
+
+        if state["revision"] == status["revision"] and state["revision"] == last:
+            return state
+
+        last = status["revision"]
+        time.sleep(quiet)
+
+    raise TimeoutError("CoCompose kept changing; state never settled")
+
+
 def run(exe, folder):
     folder.mkdir(parents=True, exist_ok=False)
     project = folder / "project.json"
@@ -268,6 +287,7 @@ def run(exe, folder):
         checks.append(check_arrangement_built_in_the_ui(exe, folder))
         checks.append(check_audio_clips_and_assets(exe, folder))
         checks.append(check_mixer_routing_and_effects(exe, folder))
+        checks.append(check_automation_and_render(exe, folder))
 
         report = {"passed": checks, "folder": str(folder), "executable": str(exe)}
         atomic_write(folder / "test-report.json", report)
@@ -509,7 +529,7 @@ def check_arrangement_built_in_the_ui(exe, folder):
                           and read(sub / "ui-script-status.json").get("finished")), timeout=90)
         status = read(sub / "ui-script-status.json")
         assert not status["error"], status
-        return read(sub / "state.json")
+        return settled(sub)
 
     startup = subprocess.STARTUPINFO()
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -631,7 +651,7 @@ def check_audio_clips_and_assets(exe, folder):
                           and read(sub / "ui-script-status.json").get("finished")), timeout=90)
         status = read(sub / "ui-script-status.json")
         assert not status["error"], status
-        return read(sub / "state.json")
+        return settled(sub)
 
     startup = subprocess.STARTUPINFO()
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -748,7 +768,7 @@ def check_mixer_routing_and_effects(exe, folder):
                           and read(sub / "ui-script-status.json").get("finished")), timeout=90)
         status = read(sub / "ui-script-status.json")
         assert not status["error"], status
-        return read(sub / "state.json")
+        return settled(sub)
 
     startup = subprocess.STARTUPINFO()
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -883,6 +903,154 @@ def check_mixer_routing_and_effects(exe, folder):
             process.wait(timeout=10)
 
     return "Three instruments through their inserts, a drum bus with a reverb send, and the six effects"
+
+
+def read_wav(path):
+    """Peak, rms and length of a rendered file, using only the standard library."""
+    with wave.open(str(path), "rb") as stream:
+        frames = stream.getnframes()
+        rate = stream.getframerate()
+        channels = stream.getnchannels()
+        width = stream.getsampwidth()
+        raw = stream.readframes(frames)
+
+    if width == 2:
+        samples = struct.unpack("<%dh" % (len(raw) // 2), raw)
+        scale = 32768.0
+    elif width == 3:
+        samples = [int.from_bytes(raw[i:i + 3], "little", signed=True) for i in range(0, len(raw), 3)]
+        scale = 8388608.0
+    else:
+        samples = struct.unpack("<%di" % (len(raw) // 4), raw)
+        scale = 2147483648.0
+
+    peak = max((abs(s) for s in samples), default=0) / scale
+    total = math.sqrt(sum((s / scale) ** 2 for s in samples) / max(1, len(samples)))
+    return {"seconds": frames / rate, "peak": peak, "rms": total, "channels": channels}
+
+
+def check_automation_and_render(exe, folder):
+    """Automates a synth filter and a channel fader, records into an armed channel,
+    then renders the arrangement and its stems and checks the files are real audio."""
+    sub = folder / "automation"
+    sub.mkdir()
+    project = sub / "project.json"
+    script = sub / "ui-script.json"
+    stage = {"round": 0}
+
+    def run(actions):
+        stage["round"] += 1
+        atomic_write(script, actions)
+        wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
+                          and read(sub / "ui-script-status.json").get("finished")), timeout=180)
+        status = read(sub / "ui-script-status.json")
+        assert not status["error"], status
+        return settled(sub)
+
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+    process = subprocess.Popen([str(exe), "--project", str(project), "--headless", "--play",
+                                "--screenshots", "--ui-script", str(script)], startupinfo=startup)
+    try:
+        wait_for(lambda: read(sub / "sync-status.json").get("playing"), timeout=40)
+        session = read(sub / "sync-status.json")["session_id"]
+        state = read(sub / "state.json")
+        channel = state["channels"][0]
+        filter_param = next(p for p in channel["parameters"] if p["id"] == "filterFreq")
+
+        # A filter sweep across the first eight bars, written through the model.
+        state = run([{"automation": [0, filter_param["plugin_id"], "filterFreq",
+                                     0.0, 0.15, 8.0, 0.9, 16.0, 0.3, 31.0, 0.75]}])
+        curve = state["automation"]["curves"][0]
+        assert curve["parameter"] == "filterFreq", curve
+        assert len(curve["points"]) == 4, curve["points"]
+        assert curve["engine_points"] == 4, "The curve never reached the engine"
+        assert [round(p["time"], 3) for p in curve["points"]] == [0.0, 8.0, 16.0, 31.0]
+
+        # Editing it from outside lands in the same curve and the same engine parameter.
+        data = read(sub / "state.json")
+        data["automation"]["curves"][0]["points"].append(
+            {"id": "extra-point", "time": 24.0, "value": 0.05, "curve": 0.0})
+        state = submit(project, data)
+        curve = state["automation"]["curves"][0]
+        assert len(curve["points"]) == 5 and curve["engine_points"] == 5, curve
+
+        # One undo takes the point away again, from the model and the engine.
+        control(project, "undo")
+        time.sleep(0.5)
+        curve = read(sub / "state.json")["automation"]["curves"][0]
+        assert len(curve["points"]) == 4 and curve["engine_points"] == 4, curve
+
+        # A curve naming a parameter that is not there is refused before anything moves.
+        before = read(sub / "state.json")
+        bad = read(sub / "state.json")
+        bad["automation"]["curves"][0]["parameter"] = "notAParameter"
+        atomic_write(project, bad)
+        wait_for(lambda: "parameter that does not exist" in read(sub / "sync-status.json").get("error", ""))
+        assert read(sub / "state.json") == before, "A refused curve changed the project"
+
+        # Arming a channel and recording with nothing plugged in must not break anything.
+        state = run([{"arm": [0, True]}])
+        assert state["channels"][0]["arm"], state["channels"][0]
+        state = run([{"arm": [0, False]}])
+        assert not state["channels"][0]["arm"]
+
+        # Render the arrangement, then the stems. A render runs on its own thread and
+        # reports through render-status.json.
+        def render(what):
+            (sub / "render-status.json").unlink(missing_ok=True)
+            run([{"export": what}])
+            wait_for(lambda: read(sub / "render-status.json").get("running") is False, timeout=180)
+            result = read(sub / "render-status.json")
+            assert result["files"], result
+            return result
+
+        render("mix")
+        mix = sub / "mix.wav"
+        assert mix.exists(), "No mix was written"
+        rendered = read_wav(mix)
+        assert rendered["seconds"] > 10.0, rendered
+        assert rendered["peak"] > 0.001, ("The render is silent", rendered)
+        assert rendered["peak"] <= 1.0, ("The render clips", rendered)
+
+        render("stems")
+        stems = sorted((sub / "stems").glob("*.wav"))
+        assert len(stems) == len(read(sub / "state.json")["channels"]), stems
+        stem = read_wav(stems[0])
+        assert stem["peak"] > 0.001 and stem["peak"] <= 1.0, stem
+
+        # The automation is audible: the same range rendered with the sweep flattened
+        # to its lowest point comes out quieter than the sweep does.
+        data = read(sub / "state.json")
+        for point in data["automation"]["curves"][0]["points"]:
+            point["value"] = 0.02
+        submit(project, data)
+        render("mix")
+        flattened = read_wav(sub / "mix.wav")
+        assert flattened["rms"] < rendered["rms"], (flattened, rendered)
+
+        assert read(sub / "sync-status.json")["session_id"] == session, "The project was reopened"
+
+        control(project, "quit")
+        assert process.wait(timeout=30) == 0
+
+        # The curve comes back with the session.
+        process = subprocess.Popen([str(exe), "--project", str(project), "--headless"], startupinfo=startup)
+        wait_for(lambda: read(sub / "sync-status.json")["session_id"] != session, timeout=40)
+        time.sleep(0.8)
+        reopened = read(sub / "state.json")
+        assert len(reopened["automation"]["curves"]) == 1, reopened["automation"]
+        assert reopened["automation"]["curves"][0]["engine_points"] == 4, reopened["automation"]
+        control(project, "quit")
+        assert process.wait(timeout=20) == 0
+        process = None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+    return "A filter sweep automates, records arm and disarm, and the mix and stems render as real audio"
 
 
 if __name__ == "__main__":

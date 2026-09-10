@@ -23,7 +23,8 @@ namespace ids
     const Identifier COCOMPOSE ("COCOMPOSE"), CHANNELS ("CHANNELS"), CHANNEL ("CHANNEL"),
         PATTERNS ("PATTERNS"), PATTERN ("PATTERN"), SEQUENCE ("SEQUENCE"), NOTE ("NOTE"),
         PLAYLIST ("PLAYLIST"), LANES ("LANES"), LANE ("LANE"), CLIPS ("CLIPS"), INSTANCE ("INSTANCE"),
-        MIXER ("MIXER"), INSERT ("INSERT"), AUDIO ("AUDIO"), EFFECT ("EFFECT"), SEND ("SEND");
+        MIXER ("MIXER"), INSERT ("INSERT"), AUDIO ("AUDIO"), EFFECT ("EFFECT"), SEND ("SEND"),
+        AUTOMATION ("AUTOMATION"), LANE_AUTOMATION ("CURVE"), POINT ("POINT");
 
     const Identifier uid ("id"), name ("name"), schema ("schema"), channel ("channel"),
         pattern ("pattern"), lane ("lane"), start ("start"), length ("length"), pitch ("pitch"),
@@ -32,7 +33,8 @@ namespace ids
         instrument ("instrument"), sample ("sample"), stepPitch ("stepPitch"), stepLength ("stepLength"),
         offset ("offset"), file ("file"), fadeIn ("fadeIn"), fadeOut ("fadeOut"), speed ("speed"),
         type ("type"), bypass ("bypass"), wet ("wet"), target ("target"), level ("level"),
-        output ("output");
+        output ("output"), plugin ("plugin"), parameter ("parameter"), time ("time"),
+        value ("value"), curve ("curve"), arm ("arm"), source ("source");
 
     // Written onto engine clips so a derived clip can be matched back to the model.
     const Identifier clipInstance ("coComposeInstance"), clipChannel ("coComposeChannel"),
@@ -118,7 +120,7 @@ public:
         {
             state = ValueTree (ids::COCOMPOSE);
             state.setProperty (ids::schema, modelSchema, nullptr);
-            for (auto child : { ids::CHANNELS, ids::PATTERNS, ids::PLAYLIST, ids::MIXER })
+            for (auto child : { ids::CHANNELS, ids::PATTERNS, ids::PLAYLIST, ids::MIXER, ids::AUTOMATION })
                 state.appendChild (ValueTree (child), nullptr);
             for (auto child : { ids::LANES, ids::CLIPS })
                 state.getChildWithName (ids::PLAYLIST).appendChild (ValueTree (child), nullptr);
@@ -127,6 +129,10 @@ public:
 
         require (static_cast<int> (state.getProperty (ids::schema, 0)) == modelSchema,
                  "Unsupported project model schema");
+
+        // Added after schema 2 shipped, so a saved session may not have it yet.
+        if (! automation().isValid())
+            state.appendChild (ValueTree (ids::AUTOMATION), nullptr);
 
         if (isNew)
             migrateExistingClips();
@@ -146,6 +152,7 @@ public:
     ValueTree lanes()    const { return playlist().getChildWithName (ids::LANES); }
     ValueTree instances() const { return playlist().getChildWithName (ids::CLIPS); }
     ValueTree mixer()    const { return state.getChildWithName (ids::MIXER); }
+    ValueTree automation() const { return state.getChildWithName (ids::AUTOMATION); }
 
     static String uidOf (ValueTree v) { return v[ids::uid].toString(); }
 
@@ -345,6 +352,60 @@ public:
         return false;
     }
 
+    /** A curve for one plugin parameter, addressed the way state.json reports it.
+        `owner` is the channel or insert whose track carries the plugin. */
+    ValueTree curveFor (const String& ownerID, const String& pluginID, const String& parameterID,
+                        UndoManager* undo)
+    {
+        for (auto child : automation())
+            if (child[ids::source].toString() == ownerID
+                 && child[ids::plugin].toString() == pluginID
+                 && child[ids::parameter].toString() == parameterID)
+                return child;
+
+        if (undo == nullptr)
+            return {};
+
+        ValueTree lane (ids::LANE_AUTOMATION);
+        lane.setProperty (ids::uid, Uuid().toString(), nullptr);
+        lane.setProperty (ids::source, ownerID, nullptr);
+        lane.setProperty (ids::plugin, pluginID, nullptr);
+        lane.setProperty (ids::parameter, parameterID, nullptr);
+        automation().appendChild (lane, undo);
+        return lane;
+    }
+
+    ValueTree addAutomationPoint (ValueTree lane, double beat, double normalisedValue,
+                                  double curveShape, UndoManager* undo)
+    {
+        ValueTree point (ids::POINT);
+        point.setProperty (ids::uid, Uuid().toString(), nullptr);
+        point.setProperty (ids::time, beat, nullptr);
+        point.setProperty (ids::value, jlimit (0.0, 1.0, normalisedValue), nullptr);
+        point.setProperty (ids::curve, jlimit (-1.0, 1.0, curveShape), nullptr);
+        lane.appendChild (point, undo);
+        return point;
+    }
+
+    /** The track that carries a curve's plugin: a channel's, or an insert bus. */
+    te::AudioTrack* trackForAutomationSource (const String& ownerID) const
+    {
+        if (auto* channelTrack = trackFor (ownerID))
+            return channelTrack;
+        return trackFor (insertTrackID (ownerID));
+    }
+
+    te::AutomatableParameter* automatableParameter (const String& ownerID, const String& pluginID,
+                                                    const String& parameterID) const
+    {
+        if (auto* track = trackForAutomationSource (ownerID))
+            for (auto* plugin : track->pluginList)
+                if (plugin->itemID.toString() == pluginID)
+                    if (auto found = plugin->getAutomatableParameterByID (parameterID))
+                        return found.get();
+        return nullptr;
+    }
+
     ValueTree addPattern (const String& patternName, double lengthBeats, UndoManager* undo)
     {
         ValueTree pattern (ids::PATTERN);
@@ -489,6 +550,7 @@ public:
 
 private:
     bool dirty = false;
+    std::map<String, String> renderedCurves;
 
     void valueTreePropertyChanged (ValueTree&, const Identifier&) override { dirty = true; }
     void valueTreeChildAdded (ValueTree&, ValueTree&) override             { dirty = true; }
@@ -683,6 +745,7 @@ private:
                 edit.deleteTrack (track);
 
         syncRouting();
+        syncAutomation();
 
         te::AudioTrack* previous = nullptr;
         int position = 0;
@@ -885,6 +948,50 @@ private:
                 aux->busNumber = bus;
             track.pluginList.insertPlugin (*created, 0, nullptr);
         }
+    }
+
+    /** The curves are the model's; the engine's automation is rebuilt from them. A
+        parameter with no points keeps whatever value it was left at. */
+    void syncAutomation()
+    {
+        for (auto lane : automation())
+        {
+            auto* parameter = automatableParameter (lane[ids::source].toString(),
+                                                    lane[ids::plugin].toString(),
+                                                    lane[ids::parameter].toString());
+            if (parameter == nullptr)
+                continue;
+
+            auto& engineCurve = parameter->getCurve();
+            const auto signature = pointSignature (lane);
+
+            if (signature == renderedCurves[uidOf (lane)])
+                continue;
+
+            renderedCurves[uidOf (lane)] = signature;
+            engineCurve.clear (nullptr);
+
+            for (auto point : lane)
+            {
+                if (! point.hasType (ids::POINT))
+                    continue;
+
+                const auto at = atBeat (static_cast<double> (point[ids::time]));
+                const auto normalised = jlimit (0.0f, 1.0f, static_cast<float> (point[ids::value]));
+                engineCurve.addPoint (at, parameter->valueRange.convertFrom0to1 (normalised),
+                                      static_cast<float> (point.getProperty (ids::curve, 0.0)), nullptr);
+            }
+        }
+    }
+
+    String pointSignature (ValueTree lane) const
+    {
+        String signature;
+        for (auto point : lane)
+            if (point.hasType (ids::POINT))
+                signature << point[ids::time].toString() << ":" << point[ids::value].toString()
+                          << ":" << point[ids::curve].toString() << ";";
+        return signature;
     }
 
     /** One derived MIDI clip per (instance, channel that plays in its pattern). */

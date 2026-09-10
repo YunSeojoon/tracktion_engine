@@ -28,7 +28,15 @@ def atomic_write(path, value):
         stream.flush()
         os.fsync(stream.fileno())
     try:
-        os.replace(temporary, path)
+        # Windows can briefly deny the replace while the app has the file open.
+        for attempt in range(40):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 39:
+                    raise
+                time.sleep(0.025)
     finally:
         temporary.unlink(missing_ok=True)
 

@@ -51,7 +51,7 @@ inline var upgradeToSchema2 (const var& root)
         channels.add (object ({ { "id", channelID }, { "name", trackName },
             { "gain_db", track["gain_db"] }, { "pan", 0.0 }, { "mute", track["mute"] },
             { "solo", track["solo"] }, { "insert", slot }, { "instrument", builtInSynth },
-            { "sample", "" }, { "step_pitch", 60 }, { "step_length", stepBeats },
+            { "sample", "" }, { "step_pitch", 60 }, { "step_length", stepBeats }, { "arm", false },
             { "parameters", track["parameters"].isArray() ? track["parameters"] : var (Array<var>()) } }));
         inserts.add (object ({ { "id", channelID + "-insert" }, { "index", slot },
             { "name", trackName }, { "gain_db", 0.0 }, { "pan", 0.0 }, { "mute", false },
@@ -185,6 +185,7 @@ public:
                 { "sample", channel[ids::sample].toString() },
                 { "step_pitch", static_cast<int> (channel.getProperty (ids::stepPitch, 60)) },
                 { "step_length", static_cast<double> (channel.getProperty (ids::stepLength, stepBeats)) },
+                { "arm", static_cast<bool> (channel.getProperty (ids::arm, false)) },
                 { "parameters", parameters } }));
         }
 
@@ -289,7 +290,37 @@ public:
                          { "channels", channels }, { "patterns", patterns },
                          { "playlist", object ({ { "lanes", lanes }, { "clips", clips }, { "audio", audio } }) },
                          { "mixer", object ({ { "inserts", inserts } }) },
+                         { "automation", automationSnapshot() },
                          { "engine", engineReadback() } });
+    }
+
+    /** Every automation curve, and what the engine currently makes of it. */
+    var automationSnapshot()
+    {
+        Array<var> curves;
+        for (auto lane : model->automation())
+        {
+            Array<var> points;
+            for (auto point : lane)
+                if (point.hasType (ids::POINT))
+                    points.add (object ({ { "id", Model::uidOf (point) },
+                        { "time", static_cast<double> (point[ids::time]) },
+                        { "value", static_cast<double> (point[ids::value]) },
+                        { "curve", static_cast<double> (point.getProperty (ids::curve, 0.0)) } }));
+
+            auto* parameter = model->automatableParameter (lane[ids::source].toString(),
+                                                           lane[ids::plugin].toString(),
+                                                           lane[ids::parameter].toString());
+
+            curves.add (object ({ { "id", Model::uidOf (lane) },
+                { "source", lane[ids::source].toString() },
+                { "plugin_id", lane[ids::plugin].toString() },
+                { "parameter", lane[ids::parameter].toString() },
+                { "engine_points", parameter != nullptr ? parameter->getCurve().getNumPoints() : 0 },
+                { "points", points } }));
+        }
+
+        return object ({ { "curves", curves } });
     }
 
     /** What the engine is actually going to play: the MIDI clips derived from the
@@ -368,7 +399,11 @@ public:
             // UI and undo both edit the model; the engine is re-derived before readback.
             model->renderIfNeeded();
             const auto current = text (snapshot());
-            const bool pluginStateChanged = (++ticks % 8 == 0 && pluginSignature() != lastPlugins);
+            // Automation moves parameters while the transport runs, so a plugin's own
+            // state changes constantly and means nothing. The check is for a person
+            // turning a knob in a plugin window, so it runs when playback is stopped.
+            const bool pluginStateChanged = ! edit->getTransport().isPlaying()
+                                             && (++ticks % 8 == 0 && pluginSignature() != lastPlugins);
             if (current != lastModel || pluginStateChanged)
             {
                 ++revision;
@@ -527,7 +562,7 @@ public:
         return object ({ { "schema", modelSchema }, { "revision", 0 }, { "bpm", 120.0 },
             { "channels", Array<var> { object ({ { "id", "synth-1" }, { "name", "CoCompose Synth" },
                 { "gain_db", -12.0 }, { "pan", 0.0 }, { "mute", false }, { "solo", false },
-                { "insert", 1 }, { "parameters", Array<var>() } }) } },
+                { "insert", 1 }, { "arm", false }, { "parameters", Array<var>() } }) } },
             { "patterns", Array<var> { object ({ { "id", "phrase-1" }, { "name", "8 bars" },
                 { "length", 32.0 },
                 { "sequences", Array<var> { object ({ { "channel", "synth-1" }, { "notes", notes } }) } } }) } },
@@ -591,7 +626,8 @@ private:
     {
         // "engine" is a readback of what the model produced; it is accepted so a tool can
         // send state.json straight back, and ignored so it can never author anything.
-        knownFields (root, "schema revision session_id request_id bpm channels patterns playlist mixer engine");
+        knownFields (root, "schema revision session_id request_id bpm channels patterns playlist mixer "
+                           "automation engine");
         require (static_cast<int> (number (root, "schema", modelSchema, modelSchema, true)) == modelSchema,
                  "Unsupported schema");
         number (root, "bpm", 30, 300);
@@ -601,7 +637,7 @@ private:
         for (const auto& channel : *root["channels"].getArray())
         {
             knownFields (channel, "id name gain_db pan mute solo insert instrument sample "
-                                  "step_pitch step_length parameters");
+                                  "step_pitch step_length arm parameters");
             require (channelIDs.insert (id (channel)).second, "Duplicate channel id");
             require (channel["name"].isString() && channel["name"].toString().length() <= 200, "Invalid channel name");
             number (channel, "gain_db", -60, 6);
@@ -722,6 +758,40 @@ private:
                 if (clip.hasProperty ("fade_in"))  number (clip, "fade_in", 0, 600);
                 if (clip.hasProperty ("fade_out")) number (clip, "fade_out", 0, 600);
                 if (clip.hasProperty ("speed"))    number (clip, "speed", 0.1, 10);
+            }
+        }
+
+        if (root.hasProperty ("automation"))
+        {
+            const auto automationState = root["automation"];
+            knownFields (automationState, "curves");
+            require (automationState["curves"].isArray() && automationState["curves"].size() <= 256,
+                     "curves must be an array (max 256)");
+
+            std::set<String> curveIDs;
+            for (const auto& curve : *automationState["curves"].getArray())
+            {
+                knownFields (curve, "id source plugin_id parameter engine_points points");
+                require (curveIDs.insert (id (curve)).second, "Duplicate automation curve id");
+                require (curve["source"].isString() && curve["source"].toString().isNotEmpty(),
+                         "An automation curve needs a source");
+                require (curve["plugin_id"].isString() && curve["parameter"].isString(),
+                         "An automation curve needs a plugin and a parameter");
+                require (model->automatableParameter (curve["source"].toString(), curve["plugin_id"].toString(),
+                                                      curve["parameter"].toString()) != nullptr,
+                         "Automation names a parameter that does not exist");
+                require (curve["points"].isArray() && curve["points"].size() <= 2048,
+                         "points must be an array (max 2048)");
+
+                std::set<String> pointIDs;
+                for (const auto& point : *curve["points"].getArray())
+                {
+                    knownFields (point, "id time value curve");
+                    require (pointIDs.insert (id (point)).second, "Duplicate automation point id");
+                    number (point, "time", 0, 100000);
+                    number (point, "value", 0, 1);
+                    if (point.hasProperty ("curve")) number (point, "curve", -1, 1);
+                }
             }
         }
 
@@ -849,6 +919,8 @@ private:
                                channel.setProperty (ids::stepPitch, static_cast<int> (desired["step_pitch"]), um);
                            if (desired.hasProperty ("step_length"))
                                channel.setProperty (ids::stepLength, static_cast<double> (desired["step_length"]), um);
+                           if (desired.hasProperty ("arm"))
+                               channel.setProperty (ids::arm, static_cast<bool> (desired["arm"]), um);
                        });
 
             applyList (model->patterns(), ids::PATTERN, root["patterns"], undo,
@@ -897,6 +969,25 @@ private:
                            clip.setProperty (ids::speed, desired.hasProperty ("speed")
                                                              ? static_cast<double> (desired["speed"]) : 1.0, um);
                        });
+
+            if (root.hasProperty ("automation"))
+                applyList (model->automation(), ids::LANE_AUTOMATION, root["automation"]["curves"], undo,
+                           [] (ValueTree lane, const var& desired, UndoManager* um)
+                           {
+                               lane.setProperty (ids::source, desired["source"].toString(), um);
+                               lane.setProperty (ids::plugin, desired["plugin_id"].toString(), um);
+                               lane.setProperty (ids::parameter, desired["parameter"].toString(), um);
+
+                               applyList (lane, ids::POINT, desired["points"], *um,
+                                          [] (ValueTree point, const var& wanted, UndoManager* undoManager)
+                                          {
+                                              point.setProperty (ids::time, static_cast<double> (wanted["time"]), undoManager);
+                                              point.setProperty (ids::value, static_cast<double> (wanted["value"]), undoManager);
+                                              point.setProperty (ids::curve, wanted.hasProperty ("curve")
+                                                                                 ? static_cast<double> (wanted["curve"]) : 0.0,
+                                                                 undoManager);
+                                          });
+                           });
 
             // The model owns the channel fader, so render it before the explicit
             // parameter edits that are read back from the engine.
@@ -952,8 +1043,8 @@ private:
     /** Replaces every child of one type, leaving other types in the same parent alone,
         which is what lets pattern placements and audio clips share the playlist. */
     template <typename Update>
-    void applyList (ValueTree parent, const Identifier& type, const var& desiredList,
-                    UndoManager& undo, Update update)
+    static void applyList (ValueTree parent, const Identifier& type, const var& desiredList,
+                           UndoManager& undo, Update update)
     {
         StringArray order;
         for (const auto& desired : *desiredList.getArray())

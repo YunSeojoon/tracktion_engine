@@ -3,6 +3,7 @@
 #include "../common/Components.h"
 #include "../common/PluginWindow.h"
 #include "LiveProject.h"
+#include "Recording.h"
 #include "Workspace.h"
 
 using namespace juce;
@@ -13,7 +14,8 @@ namespace commands
 {
 enum
 {
-    playStop = 0x2000, songMode, save, saveCopy, collectSamples, revealFolder, quitApp,
+    playStop = 0x2000, songMode, save, saveCopy, collectSamples, exportMix, exportStems,
+    revealFolder, quitApp, armChannel, recordToggle, countIn,
     undo, redo, addChannel, newPattern, placePattern, makeUnique, splitClip, duplicateClip,
     transposeUp, transposeDown,
     metronome, focusNextPanel, scanPlugins, audioSettings, about,
@@ -128,7 +130,7 @@ public:
         if (index == 0)
         {
             for (auto id : { commands::save, commands::saveCopy, commands::collectSamples,
-                             commands::revealFolder })
+                             commands::exportMix, commands::exportStems, commands::revealFolder })
                 menu.addCommandItem (&commandManager, id);
             menu.addSeparator();
             menu.addCommandItem (&commandManager, commands::quitApp);
@@ -152,6 +154,9 @@ public:
         }
         else if (index == 3)
         {
+            for (auto id : { commands::armChannel, commands::recordToggle, commands::countIn })
+                menu.addCommandItem (&commandManager, id);
+            menu.addSeparator();
             for (auto id : { commands::scanPlugins, commands::audioSettings })
                 menu.addCommandItem (&commandManager, id);
         }
@@ -171,7 +176,9 @@ public:
     void getAllCommands (Array<CommandID>& ids) override
     {
         ids.addArray ({ commands::playStop, commands::songMode, commands::save, commands::saveCopy,
-                        commands::collectSamples, commands::revealFolder, commands::quitApp,
+                        commands::collectSamples, commands::exportMix, commands::exportStems,
+                        commands::revealFolder, commands::quitApp,
+                        commands::armChannel, commands::recordToggle, commands::countIn,
                         commands::undo, commands::redo,
                         commands::addChannel, commands::newPattern, commands::placePattern,
                         commands::makeUnique, commands::splitClip, commands::duplicateClip,
@@ -219,6 +226,27 @@ public:
             case commands::collectSamples:
                 info.setInfo ("Collect samples", "Copy every sample the project uses into its own folder",
                               "File", 0);
+                break;
+            case commands::exportMix:
+                info.setInfo ("Export WAV", "Render the arrangement, or the loop range, to a WAV file", "File", 0);
+                break;
+            case commands::exportStems:
+                info.setInfo ("Export stems", "Render one WAV per channel", "File", 0);
+                break;
+            case commands::armChannel:
+                info.setInfo ("Arm channel for recording", "Point the enabled inputs at the selected channel",
+                              "Record", 0);
+                info.setTicked (recorder.isArmed (workspace.selection.channel()));
+                info.setActive (project.model->channelFor (workspace.selection.channel()).isValid());
+                break;
+            case commands::recordToggle:
+                info.setInfo ("Record", "Start or stop recording into the armed channels", "Record", 0);
+                info.addDefaultKeypress ('r', ModifierKeys::ctrlModifier | ModifierKeys::shiftModifier);
+                info.setTicked (project.edit->getTransport().isRecording());
+                break;
+            case commands::countIn:
+                info.setInfo ("Count in one bar", "Click a bar before recording starts", "Record", 0);
+                info.setTicked (recorder.getCountIn() > 0);
                 break;
             case commands::revealFolder:
                 info.setInfo ("Open project folder", "Show the project folder in Explorer", "File", 0);
@@ -335,6 +363,42 @@ public:
                 workspace.refresh();
                 return true;
 
+            case commands::exportMix:
+                status.setText (exporter.startMix (project.source.getSiblingFile ("mix.wav"), renderRange())
+                                  ? "Rendering the mix..." : "A render is already running",
+                                dontSendNotification);
+                return true;
+
+            case commands::exportStems:
+                status.setText (exporter.startStems (project.source.getSiblingFile ("stems"), renderRange())
+                                  ? "Rendering stems..." : "A render is already running",
+                                dontSendNotification);
+                return true;
+
+            case commands::armChannel:
+                recorder.arm (workspace.selection.channel(), ! recorder.isArmed (workspace.selection.channel()));
+                project.model->renderIfNeeded();
+                workspace.refresh();
+                return true;
+
+            case commands::recordToggle:
+                if (project.edit->getTransport().isRecording())
+                {
+                    status.setText (recorder.stopRecording(), dontSendNotification);
+                    startPlayback = false;
+                }
+                else if (! recorder.startRecording())
+                {
+                    status.setText ("Arm a channel before recording", dontSendNotification);
+                }
+                workspace.refresh();
+                return true;
+
+            case commands::countIn:
+                recorder.setCountIn (recorder.getCountIn() > 0 ? 0 : 1);
+                menuItemsChanged();
+                return true;
+
             case commands::revealFolder:
                 project.source.revealToUser();
                 return true;
@@ -437,6 +501,8 @@ public:
 private:
     te::Engine engine;
     live::Project project;
+    live::Recorder recorder { *project.model };
+    live::Exporter exporter { *project.model };
     live::Workspace workspace;
     ApplicationCommandManager commandManager;
     MenuBarComponent menuBar;
@@ -452,10 +518,22 @@ private:
     File scriptFile;
     var script;
     int scriptStep = 0, scriptRound = 0;
+    bool renderWasBusy = false;
 
     bool isSongMode() const
     {
         return ! static_cast<bool> (workspace.layout.getProperty (live::layoutIds::patternMode, false));
+    }
+
+    /** The loop range when one covers part of the arrangement, otherwise the whole
+        thing, which is what "render the selected range" means here. */
+    te::TimeRange renderRange() const
+    {
+        const auto whole = exporter.arrangementRange();
+        const auto loop = project.edit->getTransport().getLoopRange();
+
+        return loop.getLength().inSeconds() > 0.1 && loop.getEnd() <= whole.getEnd()
+                ? loop : whole;
     }
 
     bool canPlace() const
@@ -627,10 +705,12 @@ private:
         if (project.error.isNotEmpty())
             status.setText ((project.syncState == "applied_unpersisted" ? "Applied; save pending: " : "Sync rejected: ")
                                 + project.error, dontSendNotification);
-        else if (! status.getText().startsWith ("Saved a copy") && ! status.getText().startsWith ("Collected"))
+        else if (! status.getText().startsWith ("Saved a copy") && ! status.getText().startsWith ("Collected")
+                  && ! status.getText().startsWith ("Rendered") && ! status.getText().startsWith ("Recorded"))
             status.setText ("Live sync  |  Revision " + String (project.revision)
                 + "  |  Edit project.json externally; changes appear here automatically", dontSendNotification);
 
+        collectRenderResult();
         project.writeStatus();
         commandManager.commandStatusChanged();
         runScriptStep();
@@ -641,6 +721,32 @@ private:
             project.error = e.what();
             status.setText ("I/O error: " + project.error, dontSendNotification);
         }
+    }
+
+    /** A render runs on its own thread; this picks up the result and reports it,
+        also to a file so an external tool can wait for it. */
+    void collectRenderResult()
+    {
+        if (auto result = exporter.takeResult())
+        {
+            status.setText (result->message, dontSendNotification);
+            Array<var> files;
+            for (const auto& file : result->files)
+                files.add (file);
+
+            live::atomicWrite (project.source.getSiblingFile ("render-status.json"),
+                               JSON::toString (live::object ({ { "running", false },
+                                                               { "message", result->message },
+                                                               { "files", files } }), false));
+        }
+        else if (exporter.isBusy() && ! renderWasBusy)
+        {
+            live::atomicWrite (project.source.getSiblingFile ("render-status.json"),
+                               JSON::toString (live::object ({ { "running", true }, { "message", "Rendering" },
+                                                               { "files", Array<var>() } }), false));
+        }
+
+        renderWasBusy = exporter.isBusy();
     }
 
     /** Replays recorded work-surface actions against the real panels, one per tick, so
@@ -756,6 +862,46 @@ private:
 
         if (action.hasProperty ("split_clip"))
             return workspace.playlistGrid().splitSelectionAt (static_cast<double> (action["split_clip"]));
+
+        if (action.hasProperty ("arm"))
+        {
+            const auto arm = action["arm"];
+            if (! arm.isArray() || arm.size() != 2)
+                return false;
+
+            auto channel = project.model->channels().getChild (static_cast<int> (arm[0]));
+            return channel.isValid()
+                    && recorder.arm (live::Model::uidOf (channel), static_cast<bool> (arm[1]));
+        }
+
+        if (action.hasProperty ("automation"))
+        {
+            const auto curve = action["automation"];
+            if (! curve.isArray() || curve.size() < 4)
+                return false;
+
+            auto channel = project.model->channels().getChild (static_cast<int> (curve[0]));
+            if (! channel.isValid())
+                return false;
+
+            auto& undoManager = project.edit->getUndoManager();
+            undoManager.beginNewTransaction ("Edit automation");
+            auto lane = project.model->curveFor (live::Model::uidOf (channel), curve[1].toString(),
+                                                 curve[2].toString(), &undoManager);
+
+            for (int i = 3; i + 1 < curve.size(); i += 2)
+                project.model->addAutomationPoint (lane, static_cast<double> (curve[i]),
+                                                   static_cast<double> (curve[i + 1]), 0.0, &undoManager);
+
+            project.model->renderIfNeeded();
+            workspace.refresh();
+            return true;
+        }
+
+        if (action.hasProperty ("export"))
+            return action["export"].toString() == "stems"
+                     ? exporter.startStems (project.source.getSiblingFile ("stems"), renderRange())
+                     : exporter.startMix (project.source.getSiblingFile ("mix.wav"), renderRange());
 
         if (action.hasProperty ("audio"))
         {

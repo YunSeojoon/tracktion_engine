@@ -43,6 +43,7 @@ The document is schema 2 and separates five things:
 - `patterns` — named note collections. A pattern holds one `sequences` entry per channel that plays in it, each with its own `notes`.
 - `playlist.lanes` and `playlist.clips` — a clip is a *placement* of a pattern on a lane at a beat position. Several clips can reference one pattern. A clip's `offset` says how far into the pattern it starts, so a clip can be a slice of a pattern; a clip longer than its pattern repeats it.
 - `playlist.audio` — audio clips on a lane, each with its file, `start`, `length`, `offset` into the file, `gain_db`, `fade_in`, `fade_out` and `speed`. A `missing` flag says the file is not where the project last saw it.
+- `automation.curves` — one curve per plugin parameter, naming the channel or insert that owns the plugin and holding `points` of `time` (in beats), a normalised `value` and a `curve` shape. `engine_points` reports how many of them the engine is playing.
 - `mixer.inserts` — numbered strips that channels are assigned to. Each has a fader, pan, mute, an `output` naming the insert it feeds (or `master`), an ordered `effects` chain and a list of `sends` that tap a copy of it into another insert.
 
 Because a clip only references a pattern, editing that pattern changes every placement of it, and one Undo restores all of them. To change a single placement, copy its pattern under a new id with new note ids and point the clip at the copy (`tools/cocompose.py make-unique`).
@@ -67,7 +68,9 @@ Drop a WAV onto a lane — from the Browser or from Explorer — and it becomes 
 
 Every channel plays through its numbered insert, an insert plays through whatever it is routed to, and everything reaches the master. `FX` on a strip adds one of six effects — EQ, limiter, saturation, delay, chorus, reverb — opens its window, bypasses it, moves it along the chain or removes it, and sets up a send; the button under it chooses where the strip is routed. Routing that would feed a signal back into itself is refused. Only saturation had to be written; the rest are the engine's own plugins.
 
-Automation, recording and rendering are not built yet.
+A curve automates any parameter `state.json` reports, and the engine plays it. `Tools > Arm channel` points the enabled inputs at the selected channel, `Ctrl+Shift+R` records into the armed channels with an optional bar of count-in, and a take becomes a pattern placed where it was played — so it is edited like anything else. `File > Export WAV` renders the arrangement, or the loop range when one is set over it, and `File > Export stems` renders one file per channel through that channel's own chain. Renders run on their own thread and report through `render-status.json`.
+
+MIDI learn and hardware control surfaces are not wired up.
 
 Use the standard-library Python helper while the app is running:
 
@@ -84,6 +87,6 @@ It also supports transpose, clear-notes, place, make-unique, gain, parameter, st
 - [Windows 실행 및 외부 AI 협업 가이드](docs/windows-guide.ko.md)
 - [작업 단위와 검증 기록](docs/worklog.ko.md)
 
-The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 19 real-app integration checks passed. Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. Details are in the work log. Real audio listening and third-party VST3 compatibility remain unverified. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
+The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 20 real-app integration checks passed. Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. Details are in the work log. Real audio listening and third-party VST3 compatibility remain unverified. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
 
 Keep upstream license notices intact. Tracktion Engine and JUCE have separate licenses; see the upstream README and JUCE license files.
