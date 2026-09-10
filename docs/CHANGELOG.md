@@ -4,6 +4,15 @@ Dates are the day the work landed on the `ai-editor` branch. Each release record
 the commit it was built from; `BUILD-INFO.json` inside the ZIP carries the exact
 one for the copy you have.
 
+## 0.1.0 — 2026-09-11 (release candidate 1)
+
+Designated from commit e928b5c. What was run against that exact binary, where, and
+what is still unverified is in `docs/release-candidate.ko.md`. Since the first draft
+of these notes the second review's P0 to P4 landed: a render never replaces a good
+file before its replacement exists, the release seal reads the report it is given
+instead of trusting it, uninstalling says whether it worked, automation curves have
+a shape that the engine plays, a knob can be learnt, and the surface has one palette.
+
 ## 0.1.0 — 2026-09-10
 
 The first packaged build. A Windows DAW on Tracktion Engine whose open project an
@@ -44,17 +53,21 @@ outside tool edits live through JSON files, with no restart used as a sync step.
 
 ### Known limits
 
-- One project open at a time.
-- MIDI learn is not implemented.
-- Automation curve shapes are straight lines on screen; the curve value is set from
-  the model or an outside edit.
+- One project open at a time. Opening a second brings the first to the front and says
+  which project it is already on.
 - Only VST3 is scanned, from the default locations.
-- The build is not code-signed. See `docs/release.ko.md`.
+- Presets only load onto the same kind of instrument, and say what they are for when
+  they do not fit.
+- The build is not code-signed and there is no auto-update. See `docs/release.ko.md`.
+- Listening to the output, recording from a real keyboard, and switching devices
+  mid-playback are a person's steps and are not claimed. See
+  `docs/acceptance-2026-09-10.ko.md`.
 
 ### Verified
 
-- 26 integration checks against the real packaged executable, in CI on every push,
-  and the ZIP is only published when they pass.
+- 28 integration checks against the real packaged executable, in CI on every push,
+  and the ZIP is only published when they pass. The seal ties each report to the
+  binary it actually ran against.
 - The 23 VST3 plugins installed on the development machine, plus its audio device,
   three display scales, repeated save/undo and 65 minutes of continuous playback.
   See `docs/compatibility-2026-09-10.ko.md`.
