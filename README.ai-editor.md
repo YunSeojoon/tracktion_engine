@@ -68,7 +68,12 @@ Drop a WAV onto a lane — from the Browser or from Explorer — and it becomes 
 
 Every channel plays through its numbered insert, an insert plays through whatever it is routed to, and everything reaches the master. `FX` on a strip adds one of six effects — EQ, limiter, saturation, delay, chorus, reverb — opens its window, bypasses it, moves it along the chain or removes it, and sets up a send; the button under it chooses where the strip is routed. Routing that would feed a signal back into itself is refused. Only saturation had to be written; the rest are the engine's own plugins.
 
-A curve automates any parameter `state.json` reports, and the engine plays it. `Tools > Arm channel` points the enabled inputs at the selected channel, `Ctrl+Shift+R` records into the armed channels with an optional bar of count-in, and a take becomes a pattern placed where it was played — so it is edited like anything else. Every way of stopping goes through the same path, so a take is kept whether the app, a shortcut, an outside `stop` or closing the window ended the recording.
+A curve automates any parameter `state.json` reports, and the engine plays it. `Automate`
+in the Playlist toolbar lists the selected channel's instrument and fader and the effects
+on the insert it plays through; choosing one opens a curve row under the arrangement.
+Click an empty spot to add a point, drag it to move it in time and value, right-click to
+take one away, and `Delete` removes the selected one. `P` on a channel row saves and
+recalls that instrument's settings, and `Tools` has the same two as commands. `Tools > Arm channel` points the enabled inputs at the selected channel, `Ctrl+Shift+R` records into the armed channels with an optional bar of count-in, and a take becomes a pattern placed where it was played — so it is edited like anything else. Every way of stopping goes through the same path, so a take is kept whether the app, a shortcut, an outside `stop` or closing the window ended the recording.
 
 The project keeps rolling backups beside the session, written every minute while it changes and immediately after a take is kept or the app closes. `File > Restore a backup...` picks one to open next time, keeping the current session beside it. If the session file is gone or unreadable, the newest backup that opens is loaded instead and `sync-status.json` says which one. That file also lists the backups and names any sample a clip can no longer find. `File > Export WAV` renders the arrangement, or the loop range when one is set over it, and `File > Export stems` renders one file per channel through that channel's own chain. Renders run on their own thread, from a copy of the project taken when the render
 started, so the arrangement can keep being edited while one is running. The file it
@@ -124,6 +129,6 @@ It also supports transpose, clear-notes, place, make-unique, gain, parameter, st
 - [Windows 실행 및 외부 AI 협업 가이드](docs/windows-guide.ko.md)
 - [작업 단위와 검증 기록](docs/worklog.ko.md)
 
-The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 25 real-app integration checks passed. Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. Details are in the work log. Real audio listening and third-party VST3 compatibility remain unverified. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
+The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 26 real-app integration checks passed. Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. Details are in the work log. Real audio listening and third-party VST3 compatibility remain unverified. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
 
 Keep upstream license notices intact. Tracktion Engine and JUCE have separate licenses; see the upstream README and JUCE license files.

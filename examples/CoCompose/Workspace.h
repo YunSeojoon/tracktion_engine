@@ -251,9 +251,11 @@ public:
 
         sample.onClick = [this] { chooseSample(); };
         stepSettings.onClick = [this] { showStepSettings(); };
+        presets.onClick = [this] { showPresets(); };
 
         for (auto* child : std::initializer_list<Component*> { &name, &mute, &solo, &gain, &pan, &insert,
-                                                              &instrument, &openInstrument, &sample, &stepSettings, &steps })
+                                                              &instrument, &openInstrument, &sample, &stepSettings,
+                                                              &presets, &steps })
             addAndMakeVisible (*child);
     }
 
@@ -278,10 +280,11 @@ public:
         pan.setBounds (r.removeFromLeft (32));
         insert.setBounds (r.removeFromLeft (62).reduced (1));
         stepSettings.setBounds (r.removeFromLeft (40).reduced (1));
+        presets.setBounds (r.removeFromLeft (30).reduced (1));
         steps.setBounds (r.withTrimmedLeft (8));
     }
 
-    static constexpr int controlsWidth = 510;
+    static constexpr int controlsWidth = 540;
 
     int preferredWidth() const { return controlsWidth + steps.preferredWidth(); }
 
@@ -356,6 +359,125 @@ private:
         model.renderIfNeeded();
     }
 
+    File presetFolder() const
+    {
+        return File::getSpecialLocation (File::userApplicationDataDirectory)
+                 .getChildFile ("CoCompose").getChildFile ("presets");
+    }
+
+    /** Keeps an instrument's settings under a name so another channel, or another
+        song, can start from it. The file is the plugin's own state, so it only loads
+        back onto the same kind of instrument. */
+    void showPresets()
+    {
+        auto tree = channel();
+        auto* track = model.trackFor (id);
+        auto* instrumentPlugin = track != nullptr ? Model::instrumentOf (*track) : nullptr;
+
+        if (! tree.isValid() || instrumentPlugin == nullptr)
+            return;
+
+        presetFiles = presetFolder().findChildFiles (File::findFiles, false, "*.cocomposepreset");
+
+        PopupMenu menu;
+        menu.addItem (1, "Save preset...");
+
+        if (! presetFiles.isEmpty())
+        {
+            PopupMenu load;
+            for (int i = 0; i < presetFiles.size(); ++i)
+                load.addItem (100 + i, presetFiles[i].getFileNameWithoutExtension());
+
+            menu.addSubMenu ("Load preset", load);
+        }
+
+        menu.addItem (2, "Open the presets folder", ! presetFiles.isEmpty());
+
+        menu.showMenuAsync (PopupMenu::Options().withTargetComponent (presets),
+            [this] (int choice)
+            {
+                if (choice == 1) savePreset();
+                else if (choice == 2) presetFolder().revealToUser();
+                else if (choice >= 100 && isPositiveAndBelow (choice - 100, presetFiles.size()))
+                    loadPreset (presetFiles[choice - 100]);
+            });
+    }
+
+public:
+    /** Saves the instrument's settings under a name derived from the channel. */
+    File savePreset()
+    {
+        auto* track = model.trackFor (id);
+        auto* instrumentPlugin = track != nullptr ? Model::instrumentOf (*track) : nullptr;
+        if (instrumentPlugin == nullptr || ! presetFolder().createDirectory().wasOk())
+            return {};
+
+        instrumentPlugin->flushPluginStateToValueTree();
+
+        auto state = instrumentPlugin->state.createCopy();
+        state.setProperty ("coComposePresetFor", Model::kindOf (instrumentPlugin), nullptr);
+        state.removeProperty ("id", nullptr);
+
+        auto file = presetFolder().getChildFile (File::createLegalFileName (
+                        channel()[ids::name].toString() + " " + instrumentPlugin->getName()) + ".cocomposepreset");
+
+        for (int suffix = 2; file.existsAsFile(); ++suffix)
+            file = presetFolder().getChildFile (File::createLegalFileName (
+                       channel()[ids::name].toString() + " " + instrumentPlugin->getName()
+                         + " " + String (suffix)) + ".cocomposepreset");
+
+        if (auto xml = state.createXml())
+            if (xml->writeTo (file))
+                return file;
+
+        return {};
+    }
+
+    bool loadPreset (const File& file)
+    {
+        auto* track = model.trackFor (id);
+        auto* instrumentPlugin = track != nullptr ? Model::instrumentOf (*track) : nullptr;
+        if (instrumentPlugin == nullptr)
+            return false;
+
+        auto xml = parseXML (file);
+        if (xml == nullptr)
+            return false;
+
+        auto state = ValueTree::fromXml (*xml);
+        if (! state.isValid())
+            return false;
+
+        // A preset for a different instrument would restore nothing useful.
+        if (state["coComposePresetFor"].toString() != Model::kindOf (instrumentPlugin))
+            return false;
+
+        auto& undo = model.edit.getUndoManager();
+        undo.beginNewTransaction ("Load preset");
+
+        for (int i = 0; i < state.getNumProperties(); ++i)
+        {
+            const auto property = state.getPropertyName (i);
+            if (property != Identifier ("id") && property != Identifier ("coComposePresetFor"))
+                instrumentPlugin->state.setProperty (property, state[property], &undo);
+        }
+
+        instrumentPlugin->restorePluginStateFromValueTree (instrumentPlugin->state);
+        model.renderIfNeeded();
+        if (changed != nullptr) changed();
+        return true;
+    }
+
+    File newestPreset() const
+    {
+        auto found = presetFolder().findChildFiles (File::findFiles, false, "*.cocomposepreset");
+        std::sort (found.begin(), found.end(), [] (const File& a, const File& b)
+                   { return a.getLastModificationTime() > b.getLastModificationTime(); });
+        return found.isEmpty() ? File() : found.getFirst();
+    }
+
+private:
+
     /** What a step writes: how long the note is and which pitch it plays. A drum
         channel wants a short note on its own key; a bass channel a longer one. */
     void showStepSettings()
@@ -424,11 +546,13 @@ private:
     Selection& selection;
     std::function<void()> changed;
     Label name;
-    TextButton mute { "M" }, solo { "S" }, openInstrument { "..." }, sample { "WAV" }, stepSettings { "1/16" };
+    TextButton mute { "M" }, solo { "S" }, openInstrument { "..." }, sample { "WAV" },
+               stepSettings { "1/16" }, presets { "P" };
     ComboBox instrument;
     Slider gain, pan, insert;
     StepGrid steps;
     Array<std::pair<String, String>> instruments;
+    Array<File> presetFiles;
     std::unique_ptr<FileChooser> chooser;
     bool refreshing = false;
 };
@@ -514,6 +638,30 @@ public:
             row->refresh();
 
         layoutRows(); // The step grid grows and shrinks with the selected pattern.
+    }
+
+    ChannelRow* selectedRow() const
+    {
+        for (auto* row : channelRows)
+            if (row->id == selection.channel())
+                return row;
+        return nullptr;
+    }
+
+    bool saveSelectedPreset() const
+    {
+        auto* row = selectedRow();
+        return row != nullptr && row->savePreset().existsAsFile();
+    }
+
+    bool loadNewestPresetOnSelected() const
+    {
+        auto* row = selectedRow();
+        if (row == nullptr)
+            return false;
+
+        const auto newest = row->newestPreset();
+        return newest.existsAsFile() && row->loadPreset (newest);
     }
 
     /** Drives one step button, for the diagnostic UI script. */
@@ -1192,6 +1340,7 @@ public:
         duplicate.onClick = [this] { grid->duplicateSelection(); };
         makeUnique.onClick = [this] { grid->makeSelectionUnique(); };
         remove.onClick = [this] { grid->deleteSelection(); };
+        automate.onClick = [this] { showAutomateMenu(); };
 
         for (const auto& choice : { std::pair<const char*, double> { "Bar", 4.0 },
                                     { "1/2", 2.0 }, { "1/4", 1.0 }, { "1/8", 0.5 }, { "Off", 0.0 } })
@@ -1222,13 +1371,14 @@ public:
     {
         auto r = getLocalBounds();
         auto bar = r.removeFromBottom (26);
-        addLane.setBounds (bar.removeFromLeft (62).reduced (1));
-        removeLane.setBounds (bar.removeFromLeft (62).reduced (1));
-        muteLane.setBounds (bar.removeFromLeft (52).reduced (1));
-        duplicate.setBounds (bar.removeFromLeft (74).reduced (1));
-        makeUnique.setBounds (bar.removeFromLeft (74).reduced (1));
-        remove.setBounds (bar.removeFromLeft (62).reduced (1));
-        snap.setBounds (bar.removeFromLeft (92).reduced (1));
+        addLane.setBounds (bar.removeFromLeft (52).reduced (1));
+        removeLane.setBounds (bar.removeFromLeft (52).reduced (1));
+        muteLane.setBounds (bar.removeFromLeft (46).reduced (1));
+        duplicate.setBounds (bar.removeFromLeft (48).reduced (1));
+        makeUnique.setBounds (bar.removeFromLeft (56).reduced (1));
+        remove.setBounds (bar.removeFromLeft (48).reduced (1));
+        automate.setBounds (bar.removeFromLeft (72).reduced (1));
+        snap.setBounds (bar.removeFromLeft (80).reduced (1));
         zoom.setBounds (bar.reduced (2, 1));
         viewport.setBounds (r);
         layOutGrid();
@@ -1252,6 +1402,86 @@ public:
 private:
     void notify() { if (changed != nullptr) changed(); }
 
+    /** Offers the parameters worth automating: the selected channel's instrument and
+        fader, and the effects on the insert it plays through. Choosing one opens a
+        curve for it under the arrangement. */
+    void showAutomateMenu()
+    {
+        auto channel = model.channelFor (selection.channel());
+        if (! channel.isValid())
+            return;
+
+        automatable.clear();
+        PopupMenu menu;
+
+        if (auto* track = model.trackFor (Model::uidOf (channel)))
+            addParameters (menu, Model::uidOf (channel), channel[ids::name].toString(), *track);
+
+        auto insert = model.insertForSlot (static_cast<int> (channel[ids::insert]));
+        if (insert.isValid())
+            if (auto* track = model.trackFor (Model::insertTrackID (Model::uidOf (insert))))
+                addParameters (menu, Model::uidOf (insert),
+                               String (static_cast<int> (insert[ids::index])) + " " + insert[ids::name].toString(),
+                               *track);
+
+        auto curves = model.automation();
+        if (curves.getNumChildren() > 0)
+        {
+            PopupMenu existing;
+            for (int i = 0; i < curves.getNumChildren(); ++i)
+                existing.addItem (10000 + i, curves.getChild (i)[ids::parameter].toString());
+
+            menu.addSeparator();
+            menu.addSubMenu ("Remove automation", existing);
+        }
+
+        menu.showMenuAsync (PopupMenu::Options().withTargetComponent (automate),
+            [this] (int choice)
+            {
+                if (choice <= 0)
+                    return;
+
+                if (choice >= 10000)
+                {
+                    grid->removeCurve (choice - 10000);
+                    notify();
+                    return;
+                }
+
+                if (isPositiveAndBelow (choice - 1, automatable.size()))
+                {
+                    const auto& entry = automatable.getReference (choice - 1);
+                    grid->automate (entry.owner, entry.plugin, entry.parameter);
+                    notify();
+                }
+            });
+    }
+
+    void addParameters (PopupMenu& menu, const String& ownerID, const String& ownerName, te::AudioTrack& track)
+    {
+        PopupMenu group;
+
+        for (auto* plugin : track.pluginList)
+        {
+            PopupMenu perPlugin;
+
+            for (auto* parameter : plugin->getAutomatableParameters())
+            {
+                automatable.add ({ ownerID, plugin->itemID.toString(), parameter->paramID });
+                perPlugin.addItem (automatable.size(), parameter->getParameterName());
+            }
+
+            if (perPlugin.containsAnyActiveItems())
+                group.addSubMenu (plugin->getName(), perPlugin);
+        }
+
+        if (group.containsAnyActiveItems())
+            menu.addSubMenu (ownerName, group);
+    }
+
+    struct Automatable { String owner, plugin, parameter; };
+    Array<Automatable> automatable;
+
     void layOutGrid()
     {
         grid->setSize (std::max (grid->preferredWidth(), viewport.getWidth() - viewport.getScrollBarThickness()),
@@ -1264,7 +1494,8 @@ private:
     std::unique_ptr<PlaylistGrid> grid;
     Viewport viewport;
     TextButton addLane { "+ Lane" }, removeLane { "- Lane" }, muteLane { "Mute" },
-               duplicate { "Duplicate" }, makeUnique { "Unique" }, remove { "Delete" };
+               duplicate { "Copy" }, makeUnique { "Unique" }, remove { "Delete" },
+               automate { "Automate" };
     ComboBox snap;
     Slider zoom;
     Array<double> snapChoices;
@@ -1461,6 +1692,9 @@ public:
     bool toggleStep (int channelIndex, int step) { return rack->toggleStep (channelIndex, step); }
 
     PlaylistGrid& playlistGrid() const { return playlist->getGrid(); }
+
+    bool saveInstrumentPreset() const { return rack->saveSelectedPreset(); }
+    bool loadInstrumentPreset() const { return rack->loadNewestPresetOnSelected(); }
 
     /** The open note editor, so --screenshots can capture it too. */
     Component* pianoRollContent() const

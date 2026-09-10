@@ -18,7 +18,7 @@ enum
     revealFolder, restoreBackup, quitApp, armChannel, recordToggle, countIn,
     undo, redo, addChannel, newPattern, placePattern, makeUnique, splitClip, duplicateClip,
     transposeUp, transposeDown,
-    metronome, focusNextPanel, scanPlugins, audioSettings, about,
+    metronome, focusNextPanel, scanPlugins, audioSettings, savePreset, loadPreset, about,
     togglePanelBase // + panel index
 };
 }
@@ -171,7 +171,8 @@ public:
             for (auto id : { commands::armChannel, commands::recordToggle, commands::countIn })
                 menu.addCommandItem (&commandManager, id);
             menu.addSeparator();
-            for (auto id : { commands::scanPlugins, commands::audioSettings })
+            for (auto id : { commands::savePreset, commands::loadPreset,
+                             commands::scanPlugins, commands::audioSettings })
                 menu.addCommandItem (&commandManager, id);
         }
         else
@@ -198,7 +199,8 @@ public:
                         commands::makeUnique, commands::splitClip, commands::duplicateClip,
                         commands::transposeUp, commands::transposeDown,
                         commands::metronome, commands::focusNextPanel, commands::scanPlugins,
-                        commands::audioSettings, commands::about });
+                        commands::audioSettings, commands::savePreset, commands::loadPreset,
+                        commands::about });
         for (int panel = 0; panel < live::numPanels; ++panel)
             ids.add (commands::togglePanelBase + panel);
     }
@@ -275,15 +277,23 @@ public:
                 info.addDefaultKeypress ('q', ModifierKeys::ctrlModifier);
                 break;
             case commands::undo:
-                info.setInfo ("Undo", "Undo the last edit", "Edit", 0);
+            {
+                const auto what = project.edit->getUndoManager().getUndoDescription();
+                info.setInfo (what.isEmpty() ? "Undo" : "Undo " + what.toLowerCase(),
+                              "Undo the last edit", "Edit", 0);
                 info.addDefaultKeypress ('z', ModifierKeys::ctrlModifier);
                 info.setActive (project.edit->getUndoManager().canUndo());
                 break;
+            }
             case commands::redo:
-                info.setInfo ("Redo", "Redo the last undone edit", "Edit", 0);
+            {
+                const auto what = project.edit->getUndoManager().getRedoDescription();
+                info.setInfo (what.isEmpty() ? "Redo" : "Redo " + what.toLowerCase(),
+                              "Redo the last undone edit", "Edit", 0);
                 info.addDefaultKeypress ('z', ModifierKeys::ctrlModifier | ModifierKeys::shiftModifier);
                 info.setActive (project.edit->getUndoManager().canRedo());
                 break;
+            }
             case commands::addChannel:
                 info.setInfo ("Add channel", "Add an instrument channel", "Edit", 0);
                 info.addDefaultKeypress ('t', ModifierKeys::ctrlModifier);
@@ -325,6 +335,16 @@ public:
             case commands::focusNextPanel:
                 info.setInfo ("Focus next panel", "Move keyboard focus to the next visible panel", "View", 0);
                 info.addDefaultKeypress (KeyPress::F6Key, ModifierKeys::noModifiers);
+                break;
+            case commands::savePreset:
+                info.setInfo ("Save instrument preset", "Keep the selected channel's instrument settings",
+                              "Tools", 0);
+                info.setActive (project.model->channelFor (workspace.selection.channel()).isValid());
+                break;
+            case commands::loadPreset:
+                info.setInfo ("Load latest instrument preset",
+                              "Put the most recently saved settings on the selected channel", "Tools", 0);
+                info.setActive (project.model->channelFor (workspace.selection.channel()).isValid());
                 break;
             case commands::scanPlugins:
                 info.setInfo ("Scan plugins...", "Find installed VST3 plugins", "Tools", 0);
@@ -504,6 +524,18 @@ public:
 
             case commands::focusNextPanel:
                 workspace.focusNextPanel();
+                return true;
+
+            case commands::savePreset:
+                status.setText (workspace.saveInstrumentPreset() ? "Saved the instrument preset"
+                                                                 : "Could not save a preset for this channel",
+                                dontSendNotification);
+                return true;
+
+            case commands::loadPreset:
+                status.setText (workspace.loadInstrumentPreset() ? "Loaded the latest instrument preset"
+                                                                 : "No preset for this instrument yet",
+                                dontSendNotification);
                 return true;
 
             case commands::scanPlugins:
@@ -782,7 +814,9 @@ private:
         else if (! status.getText().startsWith ("Saved a copy") && ! status.getText().startsWith ("Collected")
                   && ! status.getText().startsWith ("Rendered") && ! status.getText().startsWith ("Recorded")
                   && ! status.getText().startsWith ("Recovered") && ! status.getText().startsWith ("Restored")
-                  && ! status.getText().startsWith ("Cannot find") && ! status.getText().startsWith ("Nothing was recorded"))
+                  && ! status.getText().startsWith ("Cannot find") && ! status.getText().startsWith ("Nothing was recorded")
+                  && ! status.getText().startsWith ("Saved the") && ! status.getText().startsWith ("Loaded the")
+                  && ! status.getText().startsWith ("No preset") && ! status.getText().startsWith ("Could not"))
             status.setText ("Live sync  |  Revision " + String (project.revision)
                 + "  |  Edit project.json externally; changes appear here automatically", dontSendNotification);
 
@@ -892,15 +926,24 @@ private:
     {
         if (action.hasProperty ("command"))
         {
+            // Some menu items say what they would do — "Undo place pattern" — so a
+            // name that starts the label counts as a match.
             const auto wanted = action["command"].toString();
+            CommandID exact = 0, prefixed = 0;
+
             for (auto id : allCommands())
             {
                 ApplicationCommandInfo info (id);
                 getCommandInfo (id, info);
+
                 if (info.shortName == wanted)
-                    return commandManager.invokeDirectly (id, false);
+                    exact = id;
+                else if (prefixed == 0 && info.shortName.startsWith (wanted))
+                    prefixed = id;
             }
-            return false;
+
+            const auto found = exact != 0 ? exact : prefixed;
+            return found != 0 && commandManager.invokeDirectly (found, false);
         }
 
         if (action.hasProperty ("select_channel"))
@@ -957,6 +1000,44 @@ private:
             auto channel = project.model->channels().getChild (static_cast<int> (arm[0]));
             return channel.isValid()
                     && recorder.arm (live::Model::uidOf (channel), static_cast<bool> (arm[1]));
+        }
+
+        if (action.hasProperty ("automate"))
+        {
+            const auto request = action["automate"];
+            if (! request.isArray() || request.size() != 3)
+                return false;
+
+            auto channel = project.model->channels().getChild (static_cast<int> (request[0]));
+            return channel.isValid()
+                    && workspace.playlistGrid().automate (live::Model::uidOf (channel),
+                                                          request[1].toString(), request[2].toString());
+        }
+
+        if (action.hasProperty ("curve_click"))
+        {
+            const auto at = action["curve_click"];
+            return at.isArray() && at.size() == 3
+                    && workspace.playlistGrid().clickCurve (static_cast<int> (at[0]),
+                                                            static_cast<double> (at[1]),
+                                                            static_cast<double> (at[2]));
+        }
+
+        if (action.hasProperty ("curve_drag"))
+        {
+            const auto drag = action["curve_drag"];
+            return drag.isArray() && drag.size() == 3
+                    && workspace.playlistGrid().dragCurvePoint (static_cast<int> (drag[0]),
+                                                                static_cast<double> (drag[1]),
+                                                                static_cast<double> (drag[2]));
+        }
+
+        if (action.hasProperty ("curve_remove"))
+        {
+            const auto request = action["curve_remove"];
+            return request.isArray() && request.size() == 2
+                    && workspace.playlistGrid().removeCurvePoint (static_cast<int> (request[0]),
+                                                                  static_cast<double> (request[1]));
         }
 
         if (action.hasProperty ("take"))

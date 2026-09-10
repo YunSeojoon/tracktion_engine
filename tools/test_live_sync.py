@@ -294,6 +294,7 @@ def run(exe, folder):
         checks.append(check_survives_the_rough_edges(exe, folder))
         checks.append(check_render_output_is_never_lost(exe, folder))
         checks.append(check_recording_and_recovery(exe, folder))
+        checks.append(check_a_song_made_only_on_screen(exe, folder))
 
         report = {"passed": checks, "folder": str(folder), "executable": str(exe)}
         atomic_write(folder / "test-report.json", report)
@@ -1747,6 +1748,120 @@ def check_recording_and_recovery(exe, folder):
             process.wait(timeout=10)
 
     return "A take survives an outside stop, backups roll, a lost session recovers, and a missing sample is named"
+
+
+def check_a_song_made_only_on_screen(exe, folder):
+    """Everything from a sample to a finished WAV, using only what the work surface
+    offers: no JSON written by hand. Then an outside edit lands in that same open
+    project while it plays."""
+    sub = folder / "on-screen"
+    sub.mkdir()
+    project = sub / "project.json"
+    script = sub / "ui-script.json"
+    sample = write_wav(sub / "loop.wav", seconds=1.5, frequency=180.0)
+    stage = {"round": 0}
+
+    def run(actions):
+        stage["round"] += 1
+        atomic_write(script, [{"comment": stage["round"]}] + list(actions))
+        wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
+                          and read(sub / "ui-script-status.json").get("finished")), timeout=240)
+        status = read(sub / "ui-script-status.json")
+        assert not status["error"], status
+        return settled(sub)
+
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+    process = subprocess.Popen([str(exe), "--project", str(project), "--headless",
+                                "--screenshots", "--ui-script", str(script)], startupinfo=startup)
+    try:
+        wait_for(lambda: read(sub / "state.json"), timeout=40)
+
+        # A drum channel and a bass channel, both written with the step grid.
+        state = run([{"command": "Add channel"}, {"command": "New pattern"}, {"select_pattern": 1},
+                     {"select_channel": 0}] + [{"step": [0, step]} for step in (0, 4, 8, 12)]
+                    + [{"select_channel": 1}] + [{"step": [1, step]} for step in (0, 6, 10)])
+        written = state["patterns"][1]
+        assert len(written["sequences"]) == 2, written
+
+        # A melody in the piano roll on a third channel.
+        state = run([{"command": "Add channel"}, {"select_channel": 2}]
+                    + [{"note": note} for note in ([72, 0.0, 1.0, 100], [76, 1.0, 1.0, 96],
+                                                   [79, 2.0, 2.0, 104])])
+        assert len(state["patterns"][1]["sequences"]) == 3, state["patterns"][1]
+
+        # Eight bars of it in the playlist, and a sample dropped on a lane.
+        state = run([{"select_lane": 0}] + [{"place": [0, bar * 4.0]} for bar in range(8)]
+                    + [{"audio": [0, str(sample), 32.0]}])
+        assert len(engine_clips(state, written["id"])) >= 3, "The arrangement did not reach the engine"
+        assert len(state["playlist"]["audio"]) == 1, state["playlist"]["audio"]
+
+        # A curve drawn on the grid, with the points placed, moved and one removed —
+        # all through the same code a click and a drag use.
+        volume = next(p for p in state["channels"][0]["parameters"] if p["id"] == "volume")
+        state = run([{"select_channel": 0},
+                     {"automate": [0, volume["plugin_id"], "volume"]},
+                     {"curve_click": [0, 0.0, 0.2]},
+                     {"curve_click": [0, 16.0, 0.9]},
+                     {"curve_click": [0, 24.0, 0.5]},
+                     {"curve_drag": [0, 24.0, 0.35]},
+                     {"curve_click": [0, 28.0, 0.7]},
+                     {"curve_remove": [0, 28.0]}])
+
+        assert len(state["automation"]["curves"]) == 1, state["automation"]
+        curve = state["automation"]["curves"][0]
+        assert curve["parameter"] == "volume", curve
+        assert [round(p["time"], 3) for p in sorted(curve["points"], key=lambda p: p["time"])] \
+            == [0.0, 16.0, 24.0], curve["points"]
+        moved = next(p for p in curve["points"] if round(p["time"], 3) == 24.0)
+        assert abs(moved["value"] - 0.35) < 0.06, moved
+        assert curve["engine_points"] == 3, curve
+
+        # One undo takes the last point back, and the engine follows.
+        control(project, "undo")
+        time.sleep(0.5)
+        after_undo = settled(sub)["automation"]["curves"][0]
+        assert len(after_undo["points"]) == 4, after_undo["points"]
+        control(project, "redo")
+        time.sleep(0.5)
+        assert len(settled(sub)["automation"]["curves"][0]["points"]) == 3
+
+        # A preset keeps the instrument's settings and puts them on another channel.
+        state = run([{"select_channel": 0}, {"command": "Save instrument preset"}])
+
+        # Play it, then render it, from the surface.
+        run([{"command": "Play / Stop"}])
+        wait_for(lambda: read(sub / "sync-status.json")["playing"], timeout=30)
+
+        (sub / "render-status.json").unlink(missing_ok=True)
+        run([{"export": "mix"}])
+        wait_for(lambda: read(sub / "render-status.json").get("running") is False, timeout=240)
+        assert read(sub / "render-status.json")["files"], read(sub / "render-status.json")
+        mix = read_wav(sub / "mix.wav")
+        assert mix["peak"] > 0.001 and mix["peak"] <= 1.0, mix
+
+        # And an outside edit still lands in the open project while it plays.
+        session = read(sub / "sync-status.json")["session_id"]
+
+        def outside(live):
+            live["patterns"][1]["sequences"][0]["notes"].append(
+                {"id": "from-outside", "pitch": 40, "velocity": 100, "start": 2.0, "length": 0.5})
+
+        after, _ = apply_change(project, outside)
+        assert any(n["id"] == "from-outside"
+                   for n in after["patterns"][1]["sequences"][0]["notes"]), after["patterns"][1]
+        assert read(sub / "sync-status.json")["session_id"] == session, "The project was reopened"
+
+        control(project, "quit")
+        assert process.wait(timeout=30) == 0
+        process = None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+    return "A song written, arranged, automated and rendered from the surface alone, still open to outside edits"
 
 
 if __name__ == "__main__":

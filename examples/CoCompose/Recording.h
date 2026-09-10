@@ -267,16 +267,25 @@ public:
         return true;
     }
 
-    /** The result of the last finished render, once. */
+    /** The result of the last finished render, once. Called on the message thread,
+        which is also where the rendering Edit is let go. */
     std::optional<Result> takeResult()
     {
-        const juce::ScopedLock lock (resultLock);
+        Result outcome;
 
-        if (! finished)
-            return {};
+        {
+            const juce::ScopedLock lock (resultLock);
 
-        finished = false;
-        return result;
+            if (! finished)
+                return {};
+
+            finished = false;
+            outcome = result;
+        }
+
+        waitForThreadToExit (-1);
+        renderEdit.reset();
+        return outcome;
     }
 
     /** Takes a copy of the project as it is right now. The render runs from that copy
@@ -289,7 +298,13 @@ public:
 
         renderRange = range;
         startedAtRevision = revision;
-        snapshot = model.edit.state.createCopy();
+
+        // The copy is opened here, on the message thread, because that is where an Edit
+        // is built and taken down. The worker only runs the render over it.
+        renderEdit = te::loadEditFromState (model.edit.engine, model.edit.state.createCopy(),
+                                            te::Edit::EditRole::forRendering);
+        if (renderEdit == nullptr)
+            return false;
 
         // The channels are what a stem is per, and the copy has no model wrapper, so
         // the plan is made here where the live model is safe to read.
@@ -327,8 +342,7 @@ private:
         Result outcome;
         outcome.revision = startedAtRevision;
 
-        auto rendering = te::loadEditFromState (model.edit.engine, snapshot,
-                                                te::Edit::EditRole::forRendering);
+        auto* rendering = renderEdit.get();
 
         if (rendering == nullptr)
         {
@@ -499,7 +513,7 @@ private:
 
     Model& model;
     File target;
-    ValueTree snapshot;
+    std::unique_ptr<te::Edit> renderEdit;
     Array<PlannedStem> plannedStems;
     te::TimeRange renderRange;
     int startedAtRevision = 0;

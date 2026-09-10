@@ -26,7 +26,7 @@ public:
 
     ~PlaylistGrid() override { stopTimer(); }
 
-    static constexpr int laneWidth = 96, rulerHeight = 22, laneHeight = 30;
+    static constexpr int laneWidth = 96, rulerHeight = 22, laneHeight = 30, curveHeight = 46;
 
     double beatWidth() const { return zoom; }
     void setZoom (double pixelsPerBeat) { zoom = jlimit (1.5, 40.0, pixelsPerBeat); resized(); repaint(); }
@@ -37,7 +37,25 @@ public:
 
     /** Wide enough for the arrangement plus a bar of room to extend it. */
     int preferredWidth() const { return laneWidth + roundToInt ((arrangementBeats() + 8.0) * beatWidth()) + 20; }
-    int preferredHeight() const { return rulerHeight + std::max (1, model.lanes().getNumChildren()) * laneHeight + 8; }
+    int preferredHeight() const
+    {
+        return clipAreaBottom() + model.automation().getNumChildren() * curveHeight + 8;
+    }
+
+    int clipAreaBottom() const
+    {
+        return rulerHeight + std::max (1, model.lanes().getNumChildren()) * laneHeight;
+    }
+
+    /** Which automation curve a point on the surface belongs to, or -1 for the clips. */
+    int curveIndexAt (int y) const
+    {
+        if (y < clipAreaBottom())
+            return -1;
+
+        const auto index = (y - clipAreaBottom()) / curveHeight;
+        return index < model.automation().getNumChildren() ? index : -1;
+    }
 
     double arrangementBeats() const
     {
@@ -59,6 +77,7 @@ public:
         paintGrid (g, beats);
         paintLanes (g);
         paintClips (g);
+        paintCurves (g);
         paintRuler (g, beats);
         paintPlayhead (g);
 
@@ -77,6 +96,12 @@ public:
     void mouseDown (const MouseEvent& e) override
     {
         grabKeyboardFocus();
+
+        if (const auto curve = curveIndexAt (e.y); curve >= 0)
+        {
+            editCurve (curve, e.getPosition(), e.mods.isRightButtonDown());
+            return;
+        }
 
         if (e.y < rulerHeight)
         {
@@ -149,6 +174,12 @@ public:
 
     void mouseDrag (const MouseEvent& e) override
     {
+        if (dragMode == curvePoint)
+        {
+            movePoint (e.getPosition());
+            return;
+        }
+
         if (dragMode == loop)
         {
             setLoopRange (std::min (loopAnchor, beatAt (e.x)), std::max (loopAnchor, beatAt (e.x)));
@@ -228,7 +259,12 @@ public:
 
     bool keyPressed (const KeyPress& key) override
     {
-        if (key == KeyPress::deleteKey || key == KeyPress::backspaceKey) { deleteSelection(); return true; }
+        if (key == KeyPress::deleteKey || key == KeyPress::backspaceKey)
+        {
+            if (! deleteSelectedPoint())
+                deleteSelection();
+            return true;
+        }
         if (key == KeyPress ('d', ModifierKeys::ctrlModifier, 0)) { duplicateSelection(); return true; }
         if (key == KeyPress ('u', ModifierKeys::ctrlModifier, 0)) { makeSelectionUnique(); return true; }
         return false;
@@ -489,6 +525,178 @@ public:
         return true;
     }
 
+    //==========================================================================
+    /** Automation points are edited where they play: click an empty spot to add one,
+        drag it to move it in time and value, right-click to take it away. */
+    void editCurve (int index, Point<int> position, bool remove)
+    {
+        auto curve = model.automation().getChild (index);
+        if (! curve.isValid())
+            return;
+
+        selectedCurve = index;
+        const auto area = curveArea (index);
+        auto hit = pointAt (curve, area, position);
+
+        if (remove)
+        {
+            if (hit.isValid())
+            {
+                undo().beginNewTransaction ("Delete automation point");
+                curve.removeChild (hit, &undo());
+                selectedPoint.clear();
+                model.renderIfNeeded();
+                notify();
+            }
+            return;
+        }
+
+        if (! hit.isValid())
+        {
+            undo().beginNewTransaction ("Add automation point");
+            hit = model.addAutomationPoint (curve, std::max (0.0, snapped (beatAt (position.x))),
+                                            valueAt (area, position.y), 0.0, &undo());
+            model.renderIfNeeded();
+        }
+
+        selectedPoint = Model::uidOf (hit);
+        dragMode = curvePoint;
+        notify();
+    }
+
+    void movePoint (Point<int> position)
+    {
+        auto curve = model.automation().getChild (selectedCurve);
+        if (! curve.isValid())
+            return;
+
+        auto point = Model::withID (curve, ids::POINT, selectedPoint);
+        if (! point.isValid())
+            return;
+
+        const auto area = curveArea (selectedCurve);
+        undo().beginNewTransaction ("Move automation point");
+        point.setProperty (ids::time, std::max (0.0, snapped (beatAt (position.x))), &undo());
+        point.setProperty (ids::value, valueAt (area, position.y), &undo());
+        model.renderIfNeeded();
+        notify();
+    }
+
+    ValueTree pointAt (ValueTree curve, Rectangle<int> area, Point<int> position) const
+    {
+        for (auto point : curve)
+        {
+            if (! point.hasType (ids::POINT))
+                continue;
+
+            if (pointPosition (area, point).getDistanceFrom (position.toFloat()) < 7.0f)
+                return point;
+        }
+        return {};
+    }
+
+    bool deleteSelectedPoint()
+    {
+        auto curve = model.automation().getChild (selectedCurve);
+        auto point = curve.isValid() ? Model::withID (curve, ids::POINT, selectedPoint) : ValueTree();
+        if (! point.isValid())
+            return false;
+
+        undo().beginNewTransaction ("Delete automation point");
+        curve.removeChild (point, &undo());
+        selectedPoint.clear();
+        model.renderIfNeeded();
+        notify();
+        return true;
+    }
+
+public:
+    /** Adds a curve for a parameter and shows it, which is how the Automate button and
+        the diagnostic script both start one. */
+    bool automate (const String& ownerID, const String& pluginID, const String& parameterID)
+    {
+        if (model.automatableParameter (ownerID, pluginID, parameterID) == nullptr)
+            return false;
+
+        undo().beginNewTransaction ("Automate parameter");
+        auto curve = model.curveFor (ownerID, pluginID, parameterID, &undo());
+        model.renderIfNeeded();
+        selectedCurve = model.automation().indexOf (curve);
+        notify();
+        return true;
+    }
+
+    /** Drives the curve editing the way a click and a drag do. */
+    bool clickCurve (int index, double beat, double value)
+    {
+        auto curve = model.automation().getChild (index);
+        if (! curve.isValid())
+            return false;
+
+        editCurve (index, positionOf (index, beat, value), false);
+        dragMode = none;
+        return true;
+    }
+
+    /** Where a beat and a normalised value sit inside a curve row. */
+    Point<int> positionOf (int index, double beat, double value) const
+    {
+        const auto area = curveArea (index);
+        return { xForBeat (beat),
+                 roundToInt (area.getY() + 5 + (1.0 - jlimit (0.0, 1.0, value)) * (area.getHeight() - 12)) };
+    }
+
+    /** Drags the selected point somewhere else, the way the mouse does. */
+    bool dragCurvePoint (int index, double beat, double value)
+    {
+        if (index != selectedCurve || selectedPoint.isEmpty())
+            return false;
+
+        movePoint (positionOf (index, beat, value));
+        return true;
+    }
+
+    bool removeCurvePoint (int index, double beat)
+    {
+        auto curve = model.automation().getChild (index);
+        if (! curve.isValid())
+            return false;
+
+        const auto area = curveArea (index);
+        auto point = pointAt (curve, area, { xForBeat (beat), area.getCentreY() });
+
+        // A click only lands on a point when the value matches too, so search by time.
+        if (! point.isValid())
+            for (auto candidate : curve)
+                if (candidate.hasType (ids::POINT)
+                     && std::abs (static_cast<double> (candidate[ids::time]) - beat) < 1.0e-6)
+                    point = candidate;
+
+        if (! point.isValid())
+            return false;
+
+        selectedCurve = index;
+        selectedPoint = Model::uidOf (point);
+        return deleteSelectedPoint();
+    }
+
+    bool removeCurve (int index)
+    {
+        auto curve = model.automation().getChild (index);
+        if (! curve.isValid())
+            return false;
+
+        undo().beginNewTransaction ("Remove automation");
+        model.automation().removeChild (curve, &undo());
+        selectedCurve = -1;
+        selectedPoint.clear();
+        model.renderIfNeeded();
+        notify();
+        return true;
+    }
+
+    int selectedCurveIndex() const { return selectedCurve; }
+
     /** Entry points for the diagnostic UI script, in grid coordinates. */
     bool placeAt (int laneIndex, double beat)
     {
@@ -536,7 +744,7 @@ public:
 
 private:
     struct Start { String id; double start, length; int lane; };
-    enum DragMode { none, move, resize, rubber, loop };
+    enum DragMode { none, move, resize, rubber, loop, curvePoint };
 
     UndoManager& undo() const { return model.edit.getUndoManager(); }
     void notify() { if (changed != nullptr) changed(); repaint(); }
@@ -771,6 +979,93 @@ private:
         return result;
     }
 
+    /** One row per automation curve, drawn in song time under the clips, with its
+        points editable in place. */
+    void paintCurves (Graphics& g)
+    {
+        auto curves = model.automation();
+
+        for (int index = 0; index < curves.getNumChildren(); ++index)
+        {
+            auto curve = curves.getChild (index);
+            const auto area = curveArea (index);
+
+            g.setColour (index == selectedCurve ? Colour (0xff1f2b3a) : Colour (0xff181f2b));
+            g.fillRect (area);
+            g.setColour (Colour (0xff222a38));
+            g.fillRect (area.getX(), area.getBottom() - 1, getWidth(), 1);
+
+            g.setColour (index == selectedCurve ? Colour (0xff2b3f4d) : Colour (0xff1b2330));
+            g.fillRect (0, area.getY(), laneWidth - 2, area.getHeight() - 1);
+            // The parameter first: it is what tells two curves on one channel apart.
+            g.setColour (Colours::white.withAlpha (0.9f));
+            g.setFont (Font (FontOptions (11.0f, Font::bold)));
+            g.drawText (curve[ids::parameter].toString(), 6, area.getY() + 6, laneWidth - 12, 13,
+                        Justification::centredLeft);
+            g.setColour (Colour (0xff8698b6));
+            g.setFont (Font (FontOptions (10.0f)));
+            g.drawText (curveOwnerName (curve), 6, area.getY() + 20, laneWidth - 12, 12,
+                        Justification::centredLeft);
+
+            // The line the engine will follow, then the points that shape it.
+            Path line;
+            bool started = false;
+            for (auto point : curve)
+            {
+                if (! point.hasType (ids::POINT))
+                    continue;
+
+                const auto at = pointPosition (area, point);
+                if (! started) { line.startNewSubPath (at); started = true; }
+                else           line.lineTo (at);
+            }
+
+            if (started)
+            {
+                g.setColour (Colour (0xffffd479).withAlpha (0.85f));
+                g.strokePath (line, PathStrokeType (1.4f));
+            }
+
+            for (auto point : curve)
+            {
+                if (! point.hasType (ids::POINT))
+                    continue;
+
+                const auto at = pointPosition (area, point);
+                const auto picked = selectedCurve == index
+                                     && selectedPoint == Model::uidOf (point);
+                g.setColour (picked ? Colours::white : Colour (0xffffd479));
+                g.fillEllipse (at.x - 3.5f, at.y - 3.5f, 7.0f, 7.0f);
+            }
+        }
+    }
+
+    Rectangle<int> curveArea (int index) const
+    {
+        return { 0, clipAreaBottom() + index * curveHeight, getWidth(), curveHeight };
+    }
+
+    Point<float> pointPosition (Rectangle<int> area, ValueTree point) const
+    {
+        const auto value = jlimit (0.0, 1.0, static_cast<double> (point[ids::value]));
+        return { static_cast<float> (xForBeat (static_cast<double> (point[ids::time]))),
+                 static_cast<float> (area.getY() + 5 + (1.0 - value) * (area.getHeight() - 12)) };
+    }
+
+    double valueAt (Rectangle<int> area, int y) const
+    {
+        return jlimit (0.0, 1.0, 1.0 - (y - area.getY() - 5.0) / std::max (1, area.getHeight() - 12));
+    }
+
+    String curveOwnerName (ValueTree curve) const
+    {
+        auto owner = model.channelFor (curve[ids::source].toString());
+        if (! owner.isValid())
+            owner = model.insertFor (curve[ids::source].toString());
+
+        return owner.isValid() ? owner[ids::name].toString() : String ("?");
+    }
+
     void paintRuler (Graphics& g, double beats)
     {
         g.setColour (Colour (0xff10161f));
@@ -852,6 +1147,7 @@ private:
     AudioThumbnailCache thumbnailCache;
     std::map<String, std::unique_ptr<AudioThumbnail>> thumbnails;
     double zoom = 9.0, snap = 1.0, loopAnchor = 0.0;
-    int lastPlayheadX = 0;
+    int lastPlayheadX = 0, selectedCurve = -1;
+    String selectedPoint;
 };
 }
