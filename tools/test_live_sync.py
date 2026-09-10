@@ -1373,6 +1373,7 @@ def check_survives_the_rough_edges(exe, folder):
         assert not read(sub / "ui-script-status.json")["error"], read(sub / "ui-script-status.json")
         state = settled(sub)
         baseline = read_png_size(sub / "ui.png")
+        baseline_labels = len(read(sub / "ui-state.json")["labels"])
         # Every later launch reads this file too, so leave nothing in it to replay.
         atomic_write(script, [])
         control(project, "quit")
@@ -1394,10 +1395,14 @@ def check_survives_the_rough_edges(exe, folder):
             wait_for(lambda: (sub / "ui.png").exists(), timeout=60)
             time.sleep(2.0)
             scaled = read_png_size(sub / "ui.png")
+            # How small the window ends up depends on the screen it is on, so the test
+            # is not a number: it fits the display, it is not degenerate, and it still
+            # lays out everything it lays out at 100%.
             assert scaled[0] <= baseline[0] and scaled[1] <= baseline[1], (scale, scaled, baseline)
-            assert scaled[0] >= 620 and scaled[1] >= 340, (scale, scaled)
+            assert scaled[0] >= 240 and scaled[1] >= 160, (scale, scaled)
             labels = read(sub / "ui-state.json")["labels"]
             assert any("Live sync" in str(label) for label in labels), (scale, labels)
+            assert len(labels) == baseline_labels, (scale, len(labels), baseline_labels)
             assert not read(sub / "sync-status.json")["error"], (scale, read(sub / "sync-status.json"))
             control(project, "quit")
             assert process.wait(timeout=30) == 0
