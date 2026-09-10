@@ -23,6 +23,18 @@ enum
 };
 }
 
+class Editor;
+
+/** The engine hands incoming MIDI controllers to whichever Edit it believes has focus,
+    and the default answer is none, which is why nothing was ever learnable. This app has
+    exactly one project open, so the answer is always that one. */
+struct CoComposeUIBehaviour final : ExtendedUIBehaviour
+{
+    explicit CoComposeUIBehaviour (Editor& e) : owner (e) {}
+    te::Edit* getLastFocusedEdit() override;
+    Editor& owner;
+};
+
 class Editor final : public Component,
                      public MenuBarModel,
                      public ApplicationCommandTarget,
@@ -30,7 +42,7 @@ class Editor final : public Component,
 {
 public:
     Editor (const File& file, bool playOnStart, bool snapshots, const File& uiScript)
-        : engine ("CoCompose", std::make_unique<ExtendedUIBehaviour>(), nullptr),
+        : engine ("CoCompose", std::make_unique<CoComposeUIBehaviour> (*this), nullptr),
           project (engine, file), workspace (*project.model),
           saveSnapshots (snapshots), startPlayback (playOnStart)
     {
@@ -80,16 +92,18 @@ public:
                                              &click, &load, &focus, &status, &workspace });
 
         setSize (1420, 860);
+        workspace.setMidiLearnHandlers ([this] (const String& source, const String& plugin, const String& parameter)
+                                        { startMidiLearn (source, plugin, parameter); },
+                                        [this] { cancelMidiLearn(); });
         lastControl = project.source.getSiblingFile ("control.json").loadFileAsString();
         applyTransportMode();
 
         if (project.recoveredFrom.isNotEmpty())
-            status.setText ("Recovered from " + project.recoveredFrom, dontSendNotification);
+            say ("Recovered from " + project.recoveredFrom);
         else if (const auto missing = project.missingAssets(); ! missing.isEmpty())
-            status.setText ("Cannot find " + String (missing.size())
+            say ("Cannot find " + String (missing.size())
                               + (missing.size() == 1 ? " sample: " : " samples: ")
-                              + missing.joinIntoString (", ") + " - use Find in the Browser",
-                            dontSendNotification);
+                              + missing.joinIntoString (", ") + " - use Find in the Browser");
         startTimer (250);
     }
 
@@ -404,20 +418,18 @@ public:
                 return true;
 
             case commands::collectSamples:
-                status.setText (project.collectSamples(), dontSendNotification);
+                say (project.collectSamples());
                 workspace.refresh();
                 return true;
 
             case commands::exportMix:
-                status.setText (exporter.startMix (project.source.getSiblingFile ("mix.wav"), renderRange(), project.revision)
-                                  ? "Rendering the mix..." : "A render is already running",
-                                dontSendNotification);
+                say (exporter.startMix (project.source.getSiblingFile ("mix.wav"), renderRange(), project.revision)
+                                  ? "Rendering the mix..." : "A render is already running");
                 return true;
 
             case commands::exportStems:
-                status.setText (exporter.startStems (project.source.getSiblingFile ("stems"), renderRange(), project.revision)
-                                  ? "Rendering stems..." : "A render is already running",
-                                dontSendNotification);
+                say (exporter.startStems (project.source.getSiblingFile ("stems"), renderRange(), project.revision)
+                       ? "Rendering stems..." : "A render is already running");
                 return true;
 
             case commands::armChannel:
@@ -430,7 +442,7 @@ public:
                 if (project.edit->getTransport().isRecording())
                     stopTransport();
                 else if (! recorder.startRecording())
-                    status.setText ("Arm a channel before recording", dontSendNotification);
+                    say ("Arm a channel before recording");
 
                 workspace.refresh();
                 return true;
@@ -527,16 +539,17 @@ public:
                 return true;
 
             case commands::savePreset:
-                status.setText (workspace.saveInstrumentPreset() ? "Saved the instrument preset"
-                                                                 : "Could not save a preset for this channel",
-                                dontSendNotification);
+                say (workspace.saveInstrumentPreset() ? "Saved the instrument preset"
+                                                                 : "Could not save a preset for this channel");
                 return true;
 
             case commands::loadPreset:
-                status.setText (workspace.loadInstrumentPreset() ? "Loaded the latest instrument preset"
-                                                                 : "No preset for this instrument yet",
-                                dontSendNotification);
+            {
+                // Says what went wrong rather than only that something did.
+                const auto reason = workspace.loadInstrumentPreset();
+                say (reason.isEmpty() ? "Loaded the latest instrument preset" : reason);
                 return true;
+            }
 
             case commands::scanPlugins:
                 showPluginScanner();
@@ -610,7 +623,7 @@ private:
             [this, backups] (int choice)
             {
                 if (choice > 0 && choice <= backups.size())
-                    status.setText (project.restoreBackup (backups[choice - 1]), dontSendNotification);
+                    say (project.restoreBackup (backups[choice - 1]));
             });
     }
 
@@ -626,7 +639,7 @@ private:
             return;
         }
 
-        status.setText (recorder.stopRecording(), dontSendNotification);
+        say (recorder.stopRecording());
         keepWhatWasRecorded();
     }
 
@@ -710,7 +723,7 @@ private:
 
         if (! sequence.isValid() || sequence.getNumChildren() == 0)
         {
-            status.setText ("Select a pattern with notes first", dontSendNotification);
+            say ("Select a pattern with notes first");
             return;
         }
 
@@ -721,6 +734,127 @@ private:
                               jlimit (0, 127, static_cast<int> (note[live::ids::pitch]) + semitones),
                               &undoManager);
         project.model->renderIfNeeded();
+    }
+
+    friend struct CoComposeUIBehaviour;
+
+    te::Edit* focusedEdit() const { return project.edit.get(); }
+
+    /** Everything the app says to the person goes through here, so the same words also
+        reach sync-status.json and an outside tool can read what happened. */
+    void say (const String& message)
+    {
+        status.setText (message, dontSendNotification);
+        project.uiMessage = message;
+        messageAt = Time::getMillisecondCounter();
+    }
+
+    /** MIDI learn. The engine already keeps controller mappings in the Edit and already
+        listens for a controller once a row is armed, but a row only gets its parameter
+        through a menu it draws itself. So the mapping is written into the Edit first,
+        with a placeholder controller, and the row that produces is the one armed. When a
+        controller arrives it replaces the placeholder; if nothing arrives, the mapping
+        is taken away again so an armed learn never leaves a wrong one behind. */
+    bool startMidiLearn (const String& source, const String& pluginID, const String& parameterID)
+    {
+        auto* parameter = project.model->automatableParameter (source, pluginID, parameterID);
+        if (parameter == nullptr)
+            return false;
+
+        cancelMidiLearn();
+
+        auto& mappings = project.edit->getParameterControlMappings();
+        mappings.removeParameterMapping (*parameter);
+
+        auto state = project.edit->state.getOrCreateChildWithName (te::IDs::CONTROLLERMAPPINGS, nullptr);
+        ValueTree entry (te::IDs::MAP);
+        // 1 is a placeholder: loadFromEdit drops a mapping whose controller is zero, and
+        // the first controller the person moves overwrites it.
+        entry.setProperty (te::IDs::id, 1, nullptr);
+        entry.setProperty (te::IDs::channel, 1, nullptr);
+        entry.setProperty (te::IDs::param, parameter->getFullName(), nullptr);
+        parameter->getOwnerID().setProperty (entry, te::IDs::pluginID, nullptr);
+        state.appendChild (entry, nullptr);
+
+        mappings.loadFromEdit();
+
+        for (int row = 0; row < mappings.getNumControllerIDs(); ++row)
+            if (mappings.getMappingForRow (row).parameter == parameter)
+            {
+                learningRow = row;
+                learningParameter = parameter;
+                learningName = parameter->getFullName();
+                mappings.listenToRow (row);
+                say ("MIDI learn: move a control for " + learningName);
+                return true;
+            }
+
+        return false;
+    }
+
+    /** Polled while a learn is armed. The engine records the controller as it arrives;
+        this is what commits it and stops listening. */
+    void continueMidiLearn()
+    {
+        if (learningRow < 0 || project.edit == nullptr)
+            return;
+
+        auto& mappings = project.edit->getParameterControlMappings();
+
+        if (mappings.getRowBeingListenedTo() != learningRow)
+        {
+            learningRow = -1;
+            return;
+        }
+
+        // The row's own text says what it has heard so far, and says nothing until a
+        // controller has actually moved.
+        if (mappings.getTextForRow (learningRow).first.contains (":"))
+        {
+            mappings.setLearntParam (false);
+            mappings.saveToEdit();
+            const auto mapping = mappings.getMappingForRow (learningRow);
+            say ("MIDI learn: CC " + String (mapping.controllerID)
+                              + " on channel " + String (mapping.channelID)
+                              + " now moves " + learningName);
+            learningRow = -1;
+            learningParameter = nullptr;
+            workspace.refresh();
+        }
+    }
+
+    /** Stops an armed learn and takes the placeholder mapping away with it. */
+    bool cancelMidiLearn()
+    {
+        if (learningRow < 0 || project.edit == nullptr)
+            return false;
+
+        auto& mappings = project.edit->getParameterControlMappings();
+        mappings.listenToRow (-1);
+
+        if (learningParameter != nullptr)
+        {
+            mappings.removeParameterMapping (*learningParameter);
+            mappings.saveToEdit();
+        }
+
+        learningRow = -1;
+        learningParameter = nullptr;
+        say ("MIDI learn cancelled");
+        return true;
+    }
+
+    bool forgetMidiMapping (const String& source, const String& pluginID, const String& parameterID)
+    {
+        auto* parameter = project.model->automatableParameter (source, pluginID, parameterID);
+        if (parameter == nullptr || project.edit == nullptr)
+            return false;
+
+        auto& mappings = project.edit->getParameterControlMappings();
+        const auto removed = mappings.removeParameterMapping (*parameter);
+        mappings.saveToEdit();
+        workspace.refresh();
+        return removed;
     }
 
     /** Scans for plugins one file per tick, so the app stays alive and a check can
@@ -828,9 +962,8 @@ private:
                 if (failed.isEmpty() && ! project.stateFile.copyFileTo (target.getChildFile ("project.json")))
                     failed = "project.json";
 
-                status.setText (failed.isEmpty() ? "Saved a copy to " + target.getFullPathName()
-                                                 : "Could not write " + failed,
-                                dontSendNotification);
+                say (failed.isEmpty() ? "Saved a copy to " + target.getFullPathName()
+                                                 : "Could not write " + failed);
             });
     }
 
@@ -886,7 +1019,7 @@ private:
         if (startupTicks == 2)
             workspace.focusFirstPanel();
 
-        tempo.setValue (project.edit->tempoSequence.getTempo (0)->getBpm(), dontSendNotification);
+        tempo.setValue (project.edit->tempoSequence.getTempo (0)->getBpm());
         play.setButtonText (project.edit->getTransport().isPlaying() ? "Stop" : "Play");
         song.setToggleState (isSongMode(), dontSendNotification);
         song.setButtonText (isSongMode() ? "Song" : "Pattern");
@@ -901,19 +1034,19 @@ private:
 
         status.setColour (Label::textColourId, project.error.isEmpty() ? Colour (0xff83dec0) : Colour (0xffffad83));
         if (project.error.isNotEmpty())
-            status.setText ((project.syncState == "applied_unpersisted" ? "Applied; save pending: " : "Sync rejected: ")
-                                + project.error, dontSendNotification);
-        else if (! status.getText().startsWith ("Saved a copy") && ! status.getText().startsWith ("Collected")
-                  && ! status.getText().startsWith ("Rendered") && ! status.getText().startsWith ("Recorded")
-                  && ! status.getText().startsWith ("Recovered") && ! status.getText().startsWith ("Restored")
-                  && ! status.getText().startsWith ("Cannot find") && ! status.getText().startsWith ("Nothing was recorded")
-                  && ! status.getText().startsWith ("Saved the") && ! status.getText().startsWith ("Loaded the")
-                  && ! status.getText().startsWith ("No preset") && ! status.getText().startsWith ("Could not"))
+            say ((project.syncState == "applied_unpersisted" ? "Applied; save pending: " : "Sync rejected: ")
+                                + project.error);
+        else if (Time::getMillisecondCounter() - messageAt > 8000)
+            // The idle line, once whatever was last said has had time to be read. It is
+            // not itself a message, so it does not go through say() and does not become
+            // the last thing an outside tool sees the app report.
             status.setText ("Live sync  |  Revision " + String (project.revision)
-                + "  |  Edit project.json externally; changes appear here automatically", dontSendNotification);
+                              + "  |  Edit project.json externally; changes appear here automatically",
+                            dontSendNotification);
 
         collectRenderResult();
         continuePluginScan();
+        continueMidiLearn();
         updateTransportModeIfNeeded();
         project.writeBackupIfDue();
         project.writeStatus();
@@ -924,7 +1057,7 @@ private:
         catch (const std::exception& e)
         {
             project.error = e.what();
-            status.setText ("I/O error: " + project.error, dontSendNotification);
+            say ("I/O error: " + project.error);
         }
     }
 
@@ -934,7 +1067,7 @@ private:
     {
         if (auto result = exporter.takeResult())
         {
-            status.setText (result->message, dontSendNotification);
+            say (result->message);
             Array<var> files;
             for (const auto& file : result->files)
                 files.add (file);
@@ -1135,6 +1268,47 @@ private:
                                                                 static_cast<double> (drag[2]));
         }
 
+        if (action.hasProperty ("midi_learn"))
+        {
+            const auto learn = action["midi_learn"];
+            return learn.isArray() && learn.size() == 3
+                    && startMidiLearn (learn[0].toString(), learn[1].toString(), learn[2].toString());
+        }
+
+        if (action.hasProperty ("midi_learn_cancel"))
+            return cancelMidiLearn();
+
+        if (action.hasProperty ("midi_cc"))
+        {
+            // Enters where a MIDI device's controller messages enter, so a check drives
+            // the same path a knob does rather than a path of its own.
+            const auto cc = action["midi_cc"];
+            if (! cc.isArray() || cc.size() != 3)
+                return false;
+
+            project.edit->getParameterControlMappings()
+                .sendChange (static_cast<int> (cc[0]),
+                             static_cast<float> (static_cast<double> (cc[2])),
+                             static_cast<int> (cc[1]));
+            return true;
+        }
+
+        if (action.hasProperty ("midi_forget"))
+        {
+            const auto forget = action["midi_forget"];
+            return forget.isArray() && forget.size() == 3
+                    && forgetMidiMapping (forget[0].toString(), forget[1].toString(), forget[2].toString());
+        }
+
+        if (action.hasProperty ("curve_bend"))
+        {
+            const auto bend = action["curve_bend"];
+            return bend.isArray() && bend.size() == 3
+                    && workspace.playlistGrid().bendCurve (static_cast<int> (bend[0]),
+                                                           static_cast<double> (bend[1]),
+                                                           static_cast<double> (bend[2]));
+        }
+
         if (action.hasProperty ("curve_remove"))
         {
             const auto request = action["curve_remove"];
@@ -1161,7 +1335,7 @@ private:
 
         if (action.hasProperty ("keep_takes"))
         {
-            status.setText (recorder.keepTakes(), dontSendNotification);
+            say (recorder.keepTakes());
             keepWhatWasRecorded();
             workspace.refresh();
             return true;
@@ -1287,7 +1461,17 @@ private:
     std::unique_ptr<PluginDirectoryScanner> scanner;
     int scanned = 0;
     String lastTransportKey;
+    uint32 messageAt = 0;
+    int learningRow = -1;
+    te::AutomatableParameter* learningParameter = nullptr;
+    String learningName;
 };
+
+te::Edit* CoComposeUIBehaviour::getLastFocusedEdit()
+{
+    return owner.focusedEdit();
+}
+
 
 class Application final : public JUCEApplication
 {

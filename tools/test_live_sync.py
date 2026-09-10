@@ -310,9 +310,15 @@ def run(exe, folder):
         process = launch()
         wait_for(lambda: status()["session_id"] != identity[0], timeout=30)
         reopened = live_state()
-        for section in ("channels", "patterns", "playlist", "mixer", "engine"):
+        for section in ("channels", "patterns", "playlist", "mixer"):
             assert equivalent(reopened[section], final[section]), \
                 "Saved %s changed beyond floating-point roundoff" % section
+        # The engine tracks are derived from the saved project and have to match.
+        # The device beside them is a fact about the machine, not part of the project:
+        # the MIDI inputs are still being enumerated moments after a launch, so
+        # comparing them would be comparing how fast Windows listed the hardware.
+        assert equivalent(reopened["engine"]["tracks"], final["engine"]["tracks"]), \
+            "Saved engine changed beyond floating-point roundoff"
         assert reopened["bpm"] == final["bpm"]
         checks.append("Graceful exit and native session save/reload preserve music and plugin state")
         control(project, "quit")
@@ -332,6 +338,7 @@ def run(exe, folder):
         checks.append(check_render_output_is_never_lost(exe, folder))
         checks.append(check_render_boundaries(exe, folder))
         checks.append(check_recording_and_recovery(exe, folder))
+        checks.append(check_the_last_editing_gaps(exe, folder))
         checks.append(check_a_song_made_only_on_screen(exe, folder))
 
         write_report(exe, folder, checks, None)
@@ -2086,6 +2093,159 @@ def check_recording_and_recovery(exe, folder):
     return ("A take survives an outside stop, backups roll, a lost session recovers, and a missing "
             "sample is named" + ("" if transport_records
                                  else " (no audio device: the recording transport was not exercised)"))
+
+
+def check_the_last_editing_gaps(exe, folder):
+    """The three things the surface could not do on its own: bend an automation curve,
+    map a knob to a parameter, and be told why a preset does not fit. Each is driven the
+    way the mouse and the menu drive it, and each is checked against the engine rather
+    than against the model that asked for it."""
+    sub = folder / "editing-gaps"
+    sub.mkdir()
+    project = sub / "project.json"
+    script = sub / "ui-script.json"
+    stage = {"round": 0}
+    atomic_write(script, [])
+
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+
+    def launch():
+        return subprocess.Popen([str(exe), "--project", str(project), "--headless",
+                                 "--screenshots", "--ui-script", str(script)], startupinfo=startup)
+
+    def run(actions, timeout=180):
+        stage["round"] += 1
+        atomic_write(script, [{"comment": stage["round"]}] + list(actions))
+        wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
+                          and read(sub / "ui-script-status.json").get("finished")), timeout=timeout)
+        assert not read(sub / "ui-script-status.json")["error"], read(sub / "ui-script-status.json")
+        return settled(sub)
+
+    def parameter_of(state, which):
+        return next(p for p in state["channels"][0]["parameters"]
+                    if p["plugin_name"] == "Volume & Pan Plugin" and p["id"] == which)
+
+    process = launch()
+    try:
+        wait_for(lambda: read(sub / "state.json"), timeout=60)
+        run([{"select_channel": 0}] + [{"step": [0, step]} for step in (0, 4, 8, 12)])
+        state = run([{"select_lane": 0}, {"place": [0, 0.0]}])
+        target = parameter_of(state, "volume")
+        channel = state["channels"][0]["id"]
+
+        # --- an automation curve with a shape, not just corners ----------------------
+        run([{"automate": [0, target["plugin_id"], target["id"]]},
+             {"curve_click": [0, 0.0, 0.1]}, {"curve_click": [0, 8.0, 0.9]}])
+        straight = settled(sub)["automation"]["curves"][0]
+        assert straight["parameter_found"] and straight["engine_points"] == 2, straight
+        assert len(straight["engine_samples"]) == 9, straight
+
+        # A segment with no shape reads as a straight line all the way across.
+        middle = straight["engine_samples"][4]
+        expected = (straight["engine_samples"][0] + straight["engine_samples"][-1]) / 2.0
+        assert abs(middle - expected) < 0.01, ("A curve with no shape is not straight", straight)
+
+        run([{"curve_bend": [0, 4.0, 0.8]}])
+        bent = settled(sub)["automation"]["curves"][0]
+        assert bent["points"][0]["curve"] > 0.3, ("The drag did not bend the segment", bent)
+        assert bent["engine_samples"][0] == straight["engine_samples"][0], bent
+        assert bent["engine_samples"][-1] == straight["engine_samples"][-1], bent
+        assert abs(bent["engine_samples"][4] - middle) > 0.05, ("The shape never reached the engine",
+                                                                straight["engine_samples"],
+                                                                bent["engine_samples"])
+
+        # Bending the other way has to go the other way.
+        run([{"curve_bend": [0, 4.0, -1.6]}])
+        other = settled(sub)["automation"]["curves"][0]
+        assert other["points"][0]["curve"] < -0.3, other
+        assert other["engine_samples"][4] > bent["engine_samples"][4], (bent["engine_samples"],
+                                                                        other["engine_samples"])
+
+        # One Undo puts the shape back where it was.
+        control(project, "undo")
+        time.sleep(0.5)
+        undone = settled(sub)["automation"]["curves"][0]
+        assert undone["points"][0]["curve"] > 0.3, ("Undo did not put the shape back", undone)
+
+        # --- a knob that moves a parameter ------------------------------------------
+        assert settled(sub)["automation"]["midi_mappings"] == [], "Something was mapped already"
+        run([{"midi_learn": [channel, target["plugin_id"], target["id"]]}])
+        time.sleep(0.8)
+        run([{"midi_cc": [74, 1, 0.5]}])
+        time.sleep(1.5)
+        learned = settled(sub)["automation"]["midi_mappings"]
+        assert len(learned) == 1, ("The controller was not learnt", learned)
+        assert learned[0]["controller"] == 74 and learned[0]["channel"] == 1, learned
+
+        before = parameter_of(settled(sub), "volume")["value"]
+        run([{"midi_cc": [74, 1, 0.25]}])
+        time.sleep(1.0)
+        assert abs(parameter_of(settled(sub), "volume")["value"] - before) > 0.01, \
+            "The mapped knob moved nothing"
+
+        # A learn that is armed and then cancelled must leave nothing behind.
+        pan = parameter_of(settled(sub), "pan")
+        run([{"midi_learn": [channel, pan["plugin_id"], pan["id"]]}])
+        time.sleep(0.8)
+        run([{"midi_learn_cancel": True}])
+        time.sleep(0.8)
+        after_cancel = settled(sub)["automation"]["midi_mappings"]
+        assert [m["parameter"] for m in after_cancel] == ["volume"], \
+            ("A cancelled learn left a mapping behind", after_cancel)
+
+        control(project, "quit")
+        assert process.wait(timeout=30) == 0
+        process = None
+
+        # The mapping is part of the project, so it has to come back with it.
+        atomic_write(script, [])
+        stage["round"] = 0
+        process = launch()
+        wait_for(lambda: read(sub / "state.json"), timeout=60)
+        time.sleep(1.0)
+        restored = settled(sub)["automation"]["midi_mappings"]
+        assert len(restored) == 1 and restored[0]["controller"] == 74, \
+            ("The mapping did not survive a reopen", restored)
+
+        moved = parameter_of(settled(sub), "volume")["value"]
+        run([{"midi_cc": [74, 1, 0.9]}])
+        time.sleep(1.0)
+        assert abs(parameter_of(settled(sub), "volume")["value"] - moved) > 0.01, \
+            "The restored mapping moves nothing"
+
+        # --- a preset that does not fit says so -------------------------------------
+        run([{"command": "Save instrument preset"}])
+        time.sleep(0.5)
+        run([{"command": "Load latest instrument preset"}])
+        time.sleep(0.5)
+        assert read(sub / "sync-status.json")["message"] == "Loaded the latest instrument preset",             read(sub / "sync-status.json")["message"]
+
+        # Now the same preset against a different instrument. Refusing is right; refusing
+        # without saying why is what this is here to stop.
+        def to_sampler(live):
+            live["channels"][0]["instrument"] = "sampler"
+
+        apply_change(project, to_sampler)
+        time.sleep(2.0)
+        assert settled(sub)["channels"][0]["instrument"] == "sampler", settled(sub)["channels"][0]
+        run([{"command": "Load latest instrument preset"}])
+        time.sleep(0.8)
+        refusal = read(sub / "sync-status.json")["message"]
+        assert "is for" in refusal and "Sampler" in refusal,             ("A preset for another instrument was not explained", refusal)
+
+        control(project, "quit")
+        assert process.wait(timeout=30) == 0
+        process = None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+    return ("A curve is bent on screen and the engine plays the shape, a knob is learnt and "
+            "still moves its parameter after a reopen, and a preset for another instrument "
+            "says what it is for")
 
 
 def check_a_song_made_only_on_screen(exe, folder):

@@ -99,7 +99,8 @@ public:
 
         if (const auto curve = curveIndexAt (e.y); curve >= 0)
         {
-            editCurve (curve, e.getPosition(), e.mods.isRightButtonDown());
+            editCurve (curve, e.getPosition(), e.mods.isRightButtonDown(),
+                       e.mods.isCtrlDown() || e.mods.isAltDown());
             return;
         }
 
@@ -174,6 +175,12 @@ public:
 
     void mouseDrag (const MouseEvent& e) override
     {
+        if (dragMode == curveShape)
+        {
+            bendSegment (e.getPosition());
+            return;
+        }
+
         if (dragMode == curvePoint)
         {
             movePoint (e.getPosition());
@@ -527,8 +534,10 @@ public:
 
     //==========================================================================
     /** Automation points are edited where they play: click an empty spot to add one,
-        drag it to move it in time and value, right-click to take it away. */
-    void editCurve (int index, Point<int> position, bool remove)
+        drag it to move it in time and value, right-click to take it away. Holding a
+        modifier and dragging the line between two points bends that segment instead,
+        which is the shape the engine plays through. */
+    void editCurve (int index, Point<int> position, bool remove, bool bend = false)
     {
         auto curve = model.automation().getChild (index);
         if (! curve.isValid())
@@ -537,6 +546,20 @@ public:
         selectedCurve = index;
         const auto area = curveArea (index);
         auto hit = pointAt (curve, area, position);
+
+        if (bend && ! hit.isValid())
+        {
+            auto segment = segmentAt (curve, position);
+            if (segment.isValid())
+            {
+                selectedPoint = Model::uidOf (segment);
+                bendAnchor = position;
+                bendStart = static_cast<double> (segment.getProperty (ids::curve, 0.0));
+                dragMode = curveShape;
+                notify();
+                return;
+            }
+        }
 
         if (remove)
         {
@@ -578,6 +601,44 @@ public:
         undo().beginNewTransaction ("Move automation point");
         point.setProperty (ids::time, std::max (0.0, snapped (beatAt (position.x))), &undo());
         point.setProperty (ids::value, valueAt (area, position.y), &undo());
+        model.renderIfNeeded();
+        notify();
+    }
+
+    /** The point that starts the segment under this position. A segment's shape lives
+        on the point at its left-hand end, which is where the engine keeps it too. */
+    ValueTree segmentAt (ValueTree curve, Point<int> position) const
+    {
+        const auto beat = beatAt (position.x);
+        ValueTree before, after;
+
+        for (auto point : curve)
+        {
+            if (! point.hasType (ids::POINT))
+                continue;
+
+            const auto time = static_cast<double> (point[ids::time]);
+            if (time <= beat && (! before.isValid() || time >= static_cast<double> (before[ids::time])))
+                before = point;
+            if (time > beat && (! after.isValid() || time < static_cast<double> (after[ids::time])))
+                after = point;
+        }
+
+        return after.isValid() ? before : ValueTree();
+    }
+
+    /** Dragging up bends the segment one way and down the other, over the height of the
+        row. The engine reads -1 to 1, and 0 is the straight line. */
+    void bendSegment (Point<int> position)
+    {
+        auto curve = model.automation().getChild (selectedCurve);
+        auto point = Model::withID (curve, ids::POINT, selectedPoint);
+        if (! point.isValid())
+            return;
+
+        const auto travel = (bendAnchor.y - position.y) / static_cast<double> (std::max (8, curveHeight / 2));
+        undo().beginNewTransaction ("Bend automation curve");
+        point.setProperty (ids::curve, jlimit (-1.0, 1.0, bendStart + travel), &undo());
         model.renderIfNeeded();
         notify();
     }
@@ -654,6 +715,41 @@ public:
 
         movePoint (positionOf (index, beat, value));
         return true;
+    }
+
+    /** Bends the segment that covers this beat, the way holding a modifier and dragging
+        the line does. `amount` is the distance dragged as a share of the row height. */
+    bool bendCurve (int index, double beat, double amount)
+    {
+        auto curve = model.automation().getChild (index);
+        if (! curve.isValid())
+            return false;
+
+        auto segment = segmentAt (curve, positionOf (index, beat, 0.5));
+        if (! segment.isValid())
+            return false;
+
+        selectedCurve = index;
+        selectedPoint = Model::uidOf (segment);
+        bendAnchor = positionOf (index, beat, 0.5);
+        bendStart = static_cast<double> (segment.getProperty (ids::curve, 0.0));
+        bendSegment (bendAnchor.translated (0, -roundToInt (amount * std::max (8, curveHeight / 2))));
+        dragMode = none;
+        return true;
+    }
+
+    /** What the engine will play at this beat, read back through the same path the
+        drawing uses. A check can compare it with what the row shows. */
+    double curveValueAt (int index, double beat) const
+    {
+        auto curve = model.automation().getChild (index);
+        auto* parameter = curve.isValid() ? parameterFor (curve) : nullptr;
+        if (parameter == nullptr)
+            return -1.0;
+
+        const auto time = model.edit.tempoSequence.toTime (te::BeatPosition::fromBeats (beat));
+        return parameter->valueRange.convertTo0to1 (
+                   parameter->getCurve().getValueAt (time, parameter->getCurrentBaseValue()));
     }
 
     bool removeCurvePoint (int index, double beat)
@@ -744,7 +840,7 @@ public:
 
 private:
     struct Start { String id; double start, length; int lane; };
-    enum DragMode { none, move, resize, rubber, loop, curvePoint };
+    enum DragMode { none, move, resize, rubber, loop, curvePoint, curveShape };
 
     UndoManager& undo() const { return model.edit.getUndoManager(); }
     void notify() { if (changed != nullptr) changed(); repaint(); }
@@ -1007,20 +1103,16 @@ private:
             g.drawText (curveOwnerName (curve), 6, area.getY() + 20, laneWidth - 12, 12,
                         Justification::centredLeft);
 
-            // The line the engine will follow, then the points that shape it.
+            // The line is read out of the engine rather than worked out again here, so
+            // a bent segment is drawn exactly as it will be played. Where the plugin is
+            // missing there is nothing to ask, and the points are joined straight.
             Path line;
-            bool started = false;
-            for (auto point : curve)
-            {
-                if (! point.hasType (ids::POINT))
-                    continue;
+            if (auto* parameter = parameterFor (curve))
+                buildLineFromEngine (line, area, *parameter);
+            else
+                buildLineFromPoints (line, area, curve);
 
-                const auto at = pointPosition (area, point);
-                if (! started) { line.startNewSubPath (at); started = true; }
-                else           line.lineTo (at);
-            }
-
-            if (started)
+            if (! line.isEmpty())
             {
                 g.setColour (Colour (0xffffd479).withAlpha (0.85f));
                 g.strokePath (line, PathStrokeType (1.4f));
@@ -1037,6 +1129,54 @@ private:
                 g.setColour (picked ? Colours::white : Colour (0xffffd479));
                 g.fillEllipse (at.x - 3.5f, at.y - 3.5f, 7.0f, 7.0f);
             }
+        }
+    }
+
+    te::AutomatableParameter* parameterFor (ValueTree curve) const
+    {
+        return model.automatableParameter (curve[ids::source].toString(),
+                                           curve[ids::plugin].toString(),
+                                           curve[ids::parameter].toString());
+    }
+
+    /** Samples what the engine will actually play, one reading per pixel across the
+        visible beats. Straight segments come out straight and bent ones come out bent,
+        because the shape is the engine's answer rather than a second opinion. */
+    void buildLineFromEngine (Path& line, Rectangle<int> area, te::AutomatableParameter& parameter) const
+    {
+        const auto& engineCurve = parameter.getCurve();
+        if (engineCurve.getNumPoints() == 0)
+            return;
+
+        const auto range = parameter.valueRange;
+        const auto fallback = parameter.getCurrentBaseValue();
+        const auto left = std::max (laneWidth, 0);
+
+        for (int x = left; x < getWidth(); ++x)
+        {
+            const auto beat = beatAt (x);
+            const auto time = model.edit.tempoSequence.toTime (te::BeatPosition::fromBeats (beat));
+            const auto value = jlimit (0.0f, 1.0f,
+                                       range.convertTo0to1 (engineCurve.getValueAt (time, fallback)));
+            const Point<float> at (static_cast<float> (x),
+                                   static_cast<float> (area.getY() + 5 + (1.0 - value) * (area.getHeight() - 12)));
+
+            if (x == left) line.startNewSubPath (at);
+            else           line.lineTo (at);
+        }
+    }
+
+    void buildLineFromPoints (Path& line, Rectangle<int> area, ValueTree curve) const
+    {
+        bool started = false;
+        for (auto point : curve)
+        {
+            if (! point.hasType (ids::POINT))
+                continue;
+
+            const auto at = pointPosition (area, point);
+            if (! started) { line.startNewSubPath (at); started = true; }
+            else           line.lineTo (at);
         }
     }
 
@@ -1141,6 +1281,8 @@ private:
     StringArray selected;
     Array<Start> starts;
     DragMode dragMode = none;
+    Point<int> bendAnchor;
+    double bendStart = 0.0;
     Point<int> dragAnchor, rubberStart;
     Rectangle<int> rubberBand;
     DropPreview dropPreview;

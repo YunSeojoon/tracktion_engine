@@ -384,9 +384,20 @@ private:
 
         if (! presetFiles.isEmpty())
         {
+            const auto wanted = Model::kindOf (instrumentPlugin);
+
             PopupMenu load;
             for (int i = 0; i < presetFiles.size(); ++i)
-                load.addItem (100 + i, presetFiles[i].getFileNameWithoutExtension());
+            {
+                const auto savedFor = presetInstrument (presetFiles[i]);
+                const auto fits = savedFor == wanted;
+                // One that does not fit is still shown, so it is clear it exists and what
+                // it is for, rather than quietly missing from the list.
+                load.addItem (100 + i,
+                              presetFiles[i].getFileNameWithoutExtension()
+                                + (fits ? String() : "  (for " + readableInstrument (savedFor) + ")"),
+                              fits);
+            }
 
             menu.addSubMenu ("Load preset", load);
         }
@@ -433,24 +444,59 @@ public:
         return {};
     }
 
-    bool loadPreset (const File& file)
+    /** What a preset file was saved from, or an empty string if it is not one. */
+    static String presetInstrument (const File& file)
+    {
+        if (auto xml = parseXML (file))
+            if (auto state = ValueTree::fromXml (*xml); state.isValid())
+                return state["coComposePresetFor"].toString();
+
+        return {};
+    }
+
+    /** A short name for an instrument identifier, for saying what a preset is for. */
+    String readableInstrument (const String& identifier) const
+    {
+        if (identifier == builtInSynth)   return "4OSC";
+        if (identifier == builtInSampler) return "Sampler";
+
+        for (const auto& available : model.availableInstruments())
+            if (available.first == identifier)
+                return available.second;
+
+        // A plugin that is not installed here still has its name inside the identifier,
+        // which is more use than showing the whole thing.
+        const auto parts = StringArray::fromTokens (identifier, "-", {});
+        return parts.size() >= 2 ? parts[1] : identifier;
+    }
+
+    /** Empty when it loaded, otherwise why it did not. Presets carry a plugin's own
+        state, so one only means anything on the instrument it came from. */
+    String loadPresetWithReason (const File& file)
     {
         auto* track = model.trackFor (id);
         auto* instrumentPlugin = track != nullptr ? Model::instrumentOf (*track) : nullptr;
         if (instrumentPlugin == nullptr)
-            return false;
+            return "This channel has no instrument to load a preset onto";
 
         auto xml = parseXML (file);
         if (xml == nullptr)
-            return false;
+            return file.getFileName() + " is not a preset file";
 
         auto state = ValueTree::fromXml (*xml);
         if (! state.isValid())
-            return false;
+            return file.getFileName() + " could not be read";
+
+        const auto savedFor = state["coComposePresetFor"].toString();
+        const auto wanted = Model::kindOf (instrumentPlugin);
+
+        if (savedFor.isEmpty())
+            return file.getFileNameWithoutExtension() + " does not say which instrument it is for";
 
         // A preset for a different instrument would restore nothing useful.
-        if (state["coComposePresetFor"].toString() != Model::kindOf (instrumentPlugin))
-            return false;
+        if (savedFor != wanted)
+            return file.getFileNameWithoutExtension() + " is for " + readableInstrument (savedFor)
+                     + ", and this channel is playing " + readableInstrument (wanted);
 
         auto& undo = model.edit.getUndoManager();
         undo.beginNewTransaction ("Load preset");
@@ -465,8 +511,10 @@ public:
         instrumentPlugin->restorePluginStateFromValueTree (instrumentPlugin->state);
         model.renderIfNeeded();
         if (changed != nullptr) changed();
-        return true;
+        return {};
     }
+
+    bool loadPreset (const File& file) { return loadPresetWithReason (file).isEmpty(); }
 
     File newestPreset() const
     {
@@ -677,14 +725,19 @@ public:
         return row != nullptr && row->savePreset().existsAsFile();
     }
 
-    bool loadNewestPresetOnSelected() const
+    /** Empty when it loaded, otherwise why not, so the app can say rather than do
+        nothing when a preset does not fit the instrument that is there. */
+    String loadNewestPresetOnSelected() const
     {
         auto* row = selectedRow();
         if (row == nullptr)
-            return false;
+            return "No channel is selected";
 
         const auto newest = row->newestPreset();
-        return newest.existsAsFile() && row->loadPreset (newest);
+        if (! newest.existsAsFile())
+            return "There are no saved presets yet";
+
+        return row->loadPresetWithReason (newest);
     }
 
     /** Drives one step button, for the diagnostic UI script. */
@@ -1453,6 +1506,20 @@ private:
                                String (static_cast<int> (insert[ids::index])) + " " + insert[ids::name].toString(),
                                *track);
 
+        // The same parameters again, this time to be moved by a knob rather than a curve.
+        const auto firstLearnItem = 20000;
+        PopupMenu learn;
+        for (int i = 0; i < automatable.size(); ++i)
+            learn.addItem (firstLearnItem + i, automatable.getReference (i).parameter);
+
+        if (learn.containsAnyActiveItems())
+        {
+            menu.addSeparator();
+            menu.addSubMenu ("MIDI learn", learn);
+            if (onCancelLearn)
+                menu.addItem (30000, "Cancel MIDI learn");
+        }
+
         auto curves = model.automation();
         if (curves.getNumChildren() > 0)
         {
@@ -1469,6 +1536,23 @@ private:
             {
                 if (choice <= 0)
                     return;
+
+                if (choice == 30000)
+                {
+                    if (onCancelLearn)
+                        onCancelLearn();
+                    return;
+                }
+
+                if (choice >= 20000)
+                {
+                    if (onLearn && isPositiveAndBelow (choice - 20000, automatable.size()))
+                    {
+                        const auto& entry = automatable.getReference (choice - 20000);
+                        onLearn (entry.owner, entry.plugin, entry.parameter);
+                    }
+                    return;
+                }
 
                 if (choice >= 10000)
                 {
@@ -1510,6 +1594,13 @@ private:
 
     struct Automatable { String owner, plugin, parameter; };
     Array<Automatable> automatable;
+
+public:
+    /** Set by the editor, which owns the engine's controller mappings. */
+    std::function<void (const String&, const String&, const String&)> onLearn;
+    std::function<void()> onCancelLearn;
+
+private:
 
     void layOutGrid()
     {
@@ -1722,10 +1813,18 @@ public:
 
     PlaylistGrid& playlistGrid() const { return playlist->getGrid(); }
 
+    /** The editor owns the engine's controller mappings, so the menu asks it to learn. */
+    void setMidiLearnHandlers (std::function<void (const String&, const String&, const String&)> learn,
+                               std::function<void()> cancel)
+    {
+        playlist->onLearn = std::move (learn);
+        playlist->onCancelLearn = std::move (cancel);
+    }
+
     bool openInstrumentWindow() const { return rack->openSelectedPlugin(); }
     bool closePluginWindows() const { return rack->closePluginWindows(); }
     bool saveInstrumentPreset() const { return rack->saveSelectedPreset(); }
-    bool loadInstrumentPreset() const { return rack->loadNewestPresetOnSelected(); }
+    String loadInstrumentPreset() const { return rack->loadNewestPresetOnSelected(); }
 
     /** The open note editor, so --screenshots can capture it too. */
     Component* pianoRollContent() const

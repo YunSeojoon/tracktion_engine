@@ -160,7 +160,7 @@ public:
             edit->getTransport().looping = true;
         }
         edit->getUndoManager().clearUndoHistory();
-        lastModel = text (snapshot());
+        lastModel = text (snapshot (false));
         if (error.isNotEmpty()) syncState = "rejected";
         publish();
         if (! source.existsAsFile()) atomicWrite (source, stateFile.loadFileAsString());
@@ -176,7 +176,7 @@ public:
     String syncState = "synced";
     int revision = 0, applied = 0;
 
-    var snapshot()
+    var snapshot (bool includeDevice = true)
     {
         Array<var> channels;
         for (auto channel : model->channels())
@@ -312,7 +312,7 @@ public:
                          { "playlist", object ({ { "lanes", lanes }, { "clips", clips }, { "audio", audio } }) },
                          { "mixer", object ({ { "inserts", inserts } }) },
                          { "automation", automationSnapshot() },
-                         { "engine", engineReadback() } });
+                         { "engine", engineReadback (includeDevice) } });
     }
 
     /** Every automation curve, and what the engine currently makes of it. */
@@ -339,16 +339,69 @@ public:
                 { "parameter", lane[ids::parameter].toString() },
                 { "parameter_found", parameter != nullptr },
                 { "engine_points", parameter != nullptr ? parameter->getCurve().getNumPoints() : 0 },
+                { "engine_samples", engineSamples (parameter) },
                 { "points", points } }));
         }
 
-        return object ({ { "curves", curves } });
+        return object ({ { "curves", curves }, { "midi_mappings", midiMappings() } });
+    }
+
+    /** The MIDI controllers that move parameters. Kept by the engine inside the Edit, so
+        they are saved and restored with the project; reported here so a tool can see what
+        is mapped without opening a dialog. */
+    var midiMappings()
+    {
+        Array<var> mappings;
+        auto& controls = edit->getParameterControlMappings();
+
+        for (int row = 0; row < controls.getNumControllerIDs(); ++row)
+        {
+            const auto mapping = controls.getMappingForRow (row);
+            if (mapping.parameter == nullptr)
+                continue;
+
+            mappings.add (object ({ { "parameter", mapping.parameter->paramID },
+                                    { "name", mapping.parameter->getFullName() },
+                                    { "plugin_id", mapping.parameter->getOwnerID().toString() },
+                                    { "controller", mapping.controllerID },
+                                    { "channel", mapping.channelID } }));
+        }
+
+        return mappings;
+    }
+
+    /** Readings taken across the curve from the engine itself, evenly spaced between
+        its first and last point. A straight segment reads as a straight line and a bent
+        one does not, which is how a tool can tell that a shape reached the engine
+        rather than only the model. */
+    var engineSamples (te::AutomatableParameter* parameter)
+    {
+        Array<var> samples;
+        if (parameter == nullptr)
+            return samples;
+
+        const auto& curve = parameter->getCurve();
+        if (curve.getNumPoints() < 2)
+            return samples;
+
+        const auto from = curve.getPointTime (0).inSeconds();
+        const auto to = curve.getPointTime (curve.getNumPoints() - 1).inSeconds();
+        const auto fallback = parameter->getCurrentBaseValue();
+
+        for (int step = 0; step <= 8; ++step)
+        {
+            const auto at = from + (to - from) * (step / 8.0);
+            samples.add (parameter->valueRange.convertTo0to1 (
+                             curve.getValueAt (te::TimePosition::fromSeconds (at), fallback)));
+        }
+
+        return samples;
     }
 
     /** What the engine is actually going to play: the MIDI clips derived from the
         playlist. Read-only — it is ignored when a request is applied — but it is the
         only way an external tool can tell that a model edit reached the engine. */
-    var engineReadback()
+    var engineReadback (bool includeDevice = true)
     {
         Array<var> tracks;
         for (auto* track : te::getAudioTracks (*edit))
@@ -403,6 +456,9 @@ public:
                                   { "plugins", plugins },
                                   { "clips", clips }, { "audio", waves } }));
         }
+        if (! includeDevice)
+            return object ({ { "tracks", tracks } });
+
         return object ({ { "tracks", tracks }, { "device", deviceReadback() } });
     }
 
@@ -463,7 +519,11 @@ public:
             }
             // UI and undo both edit the model; the engine is re-derived before readback.
             model->renderIfNeeded();
-            const auto current = text (snapshot());
+            // The audio device and the MIDI inputs are facts about the machine, not the
+            // song. They are published so a tool can see them, but a keyboard being
+            // plugged in is not an edit and must not make outstanding requests stale.
+            // The inputs in particular arrive a second or so after the app starts.
+            const auto current = text (snapshot (false));
             // Automation moves parameters while the transport runs, so a plugin's own
             // state changes constantly and means nothing. The check is for a person
             // turning a knob in a plugin window, so it runs when playback is stopped.
@@ -501,7 +561,7 @@ public:
             changed = true;
             error.clear();
             syncState = "synced";
-            lastModel = text (snapshot()); // Read back the live engine, not the input.
+            lastModel = text (snapshot (false)); // Read back the live engine, not the input.
             publish();
         }
         catch (const std::exception& e)
@@ -682,12 +742,16 @@ public:
     void save()
     {
         model->renderIfNeeded();
-        lastModel = text (snapshot());
+        lastModel = text (snapshot (false));
         publish();
         error.clear();
         syncState = "synced";
         writeStatus();
     }
+
+    /** The last thing the app told the person, so a tool can read what happened rather
+        than guess from what did not. Set by the editor. */
+    String uiMessage;
 
     void writeStatus()
     {
@@ -704,6 +768,7 @@ public:
             { "undo", edit->getUndoManager().getUndoDescription() },
             { "undo_actions", edit->getUndoManager().getNumActionsInCurrentTransaction() },
             { "change", lastChange },
+            { "message", uiMessage },
             { "recovered_from", recoveredFrom },
             { "backups", backupNames() },
             { "missing_assets", missingAssets().joinIntoString (", ") },
@@ -994,14 +1059,15 @@ private:
         if (root.hasProperty ("automation"))
         {
             const auto automationState = root["automation"];
-            knownFields (automationState, "curves");
+            // midi_mappings is a readback: the engine owns them, so it is accepted and ignored.
+            knownFields (automationState, "curves midi_mappings");
             require (automationState["curves"].isArray() && automationState["curves"].size() <= 256,
                      "curves must be an array (max 256)");
 
             std::set<String> curveIDs;
             for (const auto& curve : *automationState["curves"].getArray())
             {
-                knownFields (curve, "id source plugin_id parameter parameter_found engine_points points");
+                knownFields (curve, "id source plugin_id parameter parameter_found engine_points engine_samples points");
                 require (curveIDs.insert (id (curve)).second, "Duplicate automation curve id");
                 require (curve["source"].isString() && curve["source"].toString().isNotEmpty(),
                          "An automation curve needs a source");
