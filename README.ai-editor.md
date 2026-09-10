@@ -70,6 +70,33 @@ Every channel plays through its numbered insert, an insert plays through whateve
 
 A curve automates any parameter `state.json` reports, and the engine plays it. `Tools > Arm channel` points the enabled inputs at the selected channel, `Ctrl+Shift+R` records into the armed channels with an optional bar of count-in, and a take becomes a pattern placed where it was played — so it is edited like anything else. `File > Export WAV` renders the arrangement, or the loop range when one is set over it, and `File > Export stems` renders one file per channel through that channel's own chain. Renders run on their own thread and report through `render-status.json`.
 
+## Working from outside
+
+`sync-status.json` reports what an applied request actually changed, read back from
+the engine rather than echoed from the file: a `change` object with the ids added,
+removed and changed in each section, and whether the tempo moved. Check that, not the
+file you wrote.
+
+A request that names a stale revision or a finished session is refused and the project
+is left alone, so the answer is always to read `state.json` again and redo the edit on
+top of what is there. `tools/cocompose.py` does that for you:
+
+```python
+from cocompose import apply_change
+
+def busier(state):
+    notes = state["patterns"][0]["sequences"][0]["notes"]
+    notes.append({"id": "extra", "pitch": 38, "velocity": 90, "start": 2.0, "length": 0.25})
+
+state, _ = apply_change("C:/song/project.json", busier)
+```
+
+`apply_change` reads the live state, lets you edit it, submits it, and starts over from
+a fresh read if someone edited first. It never forces an old snapshot over a newer one.
+
+One request is one undo, whatever it touched, so a person can hear a change and take it
+back in a single step.
+
 MIDI learn and hardware control surfaces are not wired up.
 
 Use the standard-library Python helper while the app is running:
@@ -87,6 +114,6 @@ It also supports transpose, clear-notes, place, make-unique, gain, parameter, st
 - [Windows 실행 및 외부 AI 협업 가이드](docs/windows-guide.ko.md)
 - [작업 단위와 검증 기록](docs/worklog.ko.md)
 
-The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 20 real-app integration checks passed. Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. Details are in the work log. Real audio listening and third-party VST3 compatibility remain unverified. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
+The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 21 real-app integration checks passed. Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. Details are in the work log. Real audio listening and third-party VST3 compatibility remain unverified. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
 
 Keep upstream license notices intact. Tracktion Engine and JUCE have separate licenses; see the upstream README and JUCE license files.

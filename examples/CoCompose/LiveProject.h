@@ -428,7 +428,9 @@ public:
                      "Revision conflict: read state.json and reapply your changes");
             data = accept (data);
             validate (data); // Validate the entire change before touching the model.
+            const auto before = snapshot();
             apply (data);
+            lastChange = summarise (before, snapshot());
             ++revision;
             ++applied;
             changed = true;
@@ -546,6 +548,7 @@ public:
             { "looping", static_cast<bool> (edit->getTransport().looping) },
             { "undo", edit->getUndoManager().getUndoDescription() },
             { "undo_actions", edit->getUndoManager().getNumActionsInCurrentTransaction() },
+            { "change", lastChange },
             { "channel_count", model->channels().getNumChildren() },
             { "pattern_count", model->patterns().getNumChildren() },
             { "clip_count", model->instances().getNumChildren() },
@@ -577,6 +580,7 @@ public:
 
 private:
     String lastModel, lastSeen, pending, lastRequest, lastPlugins;
+    var lastChange = object ({ { "bpm", false } });
     int ticks = 0;
     bool persistencePending = false;
 
@@ -594,6 +598,60 @@ private:
                 states += plugin->state.toXmlString();
             }
         return String::toHexString (states.hashCode64());
+    }
+
+    /** What changed between two snapshots, by section and by object id. This is the
+        result of an edit, read back from the engine, not a copy of the request. */
+    static var summarise (const var& before, const var& after)
+    {
+        auto* summary = new DynamicObject();
+        summary->setProperty ("bpm", static_cast<double> (before["bpm"]) != static_cast<double> (after["bpm"]));
+
+        compare (*summary, "channels", before["channels"], after["channels"]);
+        compare (*summary, "patterns", before["patterns"], after["patterns"]);
+        compare (*summary, "clips", before["playlist"]["clips"], after["playlist"]["clips"]);
+        compare (*summary, "audio", before["playlist"]["audio"], after["playlist"]["audio"]);
+        compare (*summary, "lanes", before["playlist"]["lanes"], after["playlist"]["lanes"]);
+        compare (*summary, "inserts", before["mixer"]["inserts"], after["mixer"]["inserts"]);
+        compare (*summary, "curves", before["automation"]["curves"], after["automation"]["curves"]);
+
+        return summary;
+    }
+
+    static void compare (DynamicObject& into, const String& section, const var& before, const var& after)
+    {
+        std::map<String, String> was, now;
+        collect (before, was);
+        collect (after, now);
+
+        Array<var> added, removed, changed;
+
+        for (const auto& [key, value] : now)
+        {
+            const auto found = was.find (key);
+            if (found == was.end()) added.add (key);
+            else if (found->second != value) changed.add (key);
+        }
+
+        for (const auto& [key, value] : was)
+        {
+            ignoreUnused (value);
+            if (now.find (key) == now.end())
+                removed.add (key);
+        }
+
+        if (added.isEmpty() && removed.isEmpty() && changed.isEmpty())
+            return;
+
+        into.setProperty (section, object ({ { "added", added }, { "removed", removed },
+                                            { "changed", changed } }));
+    }
+
+    static void collect (const var& list, std::map<String, String>& into)
+    {
+        if (auto* array = list.getArray())
+            for (const auto& item : *array)
+                into[item["id"].toString()] = JSON::toString (item, true);
     }
 
     static var parse (const String& contents)

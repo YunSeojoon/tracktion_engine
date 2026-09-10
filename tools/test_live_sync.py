@@ -13,7 +13,8 @@ import uuid
 import wave
 from xml.etree import ElementTree
 
-from cocompose import atomic_write, control, current, read, submit, wait_for
+from cocompose import (Conflict, apply_change, atomic_write, control, current, read,
+                       submit, wait_for)
 
 LEGACY_SESSION = Path(__file__).resolve().parents[1] / "tests/cocompose/legacy-schema1.tracktionedit"
 
@@ -288,6 +289,7 @@ def run(exe, folder):
         checks.append(check_audio_clips_and_assets(exe, folder))
         checks.append(check_mixer_routing_and_effects(exe, folder))
         checks.append(check_automation_and_render(exe, folder))
+        checks.append(check_external_agent_session(exe, folder))
 
         report = {"passed": checks, "folder": str(folder), "executable": str(exe)}
         atomic_write(folder / "test-report.json", report)
@@ -1051,6 +1053,164 @@ def check_automation_and_render(exe, folder):
             process.wait(timeout=10)
 
     return "A filter sweep automates, records arm and disarm, and the mix and stems render as real audio"
+
+
+def check_external_agent_session(exe, folder):
+    """An outside agent works on a playing thirty-two bar song: it varies the drums,
+    writes a bass line, rearranges a section and adjusts the mix. Each request is one
+    undo, each reports what it changed, and a request that races a change made in the
+    app is refused and succeeds after re-reading."""
+    sub = folder / "agent"
+    sub.mkdir()
+    project = sub / "project.json"
+    script = sub / "ui-script.json"
+    stage = {"round": 0}
+
+    def run(actions):
+        stage["round"] += 1
+        atomic_write(script, actions)
+        wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
+                          and read(sub / "ui-script-status.json").get("finished")), timeout=120)
+        status = read(sub / "ui-script-status.json")
+        assert not status["error"], status
+        return settled(sub)
+
+    def change():
+        return read(sub / "sync-status.json")["change"]
+
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+    process = subprocess.Popen([str(exe), "--project", str(project), "--headless", "--play",
+                                "--screenshots", "--ui-script", str(script)], startupinfo=startup)
+    try:
+        wait_for(lambda: read(sub / "sync-status.json").get("playing"), timeout=40)
+        session = read(sub / "sync-status.json")["session_id"]
+
+        # A thirty-two bar song built in the app, so the agent works on real material.
+        state = run([{"command": "New pattern"}, {"select_pattern": 1}, {"select_channel": 0}]
+                    + [{"step": [0, step]} for step in (0, 4, 8, 12)])
+        drums = state["patterns"][1]["id"]
+        drum_channel = state["channels"][0]["id"]
+
+        data = read(sub / "state.json")
+        next(p for p in data["patterns"] if p["id"] == drums)["length"] = 16.0
+        submit(project, data)
+
+        state = run([{"select_pattern": 1}, {"select_lane": 0}]
+                    + [{"place": [0, bar * 16.0]} for bar in range(8)])
+        assert len(engine_clips(state, drums)) == 8
+        assert read(sub / "sync-status.json")["playing"]
+
+        # 1. Vary the drums: the same pattern, played busier.
+        def busier(live):
+            pattern = next(p for p in live["patterns"] if p["id"] == drums)
+            notes = pattern["sequences"][0]["notes"]
+            for index, beat in enumerate((2.0, 6.0, 10.0, 14.0)):
+                notes.append({"id": "extra-%d" % index, "pitch": notes[0]["pitch"],
+                              "velocity": 90, "start": beat, "length": 0.25})
+
+        after, _ = apply_change(project, busier)
+        assert len(notes_of(next(p for p in after["patterns"] if p["id"] == drums), drum_channel)) == 8
+        assert drums in change()["patterns"]["changed"], change()
+        assert all(len(clip["notes"]) == 8 for clip in engine_clips(after, drums)), \
+            "The variation did not reach every placement"
+
+        # 2. Write a bass line: a new channel, a new pattern and its placements.
+        def bass(live):
+            live["mixer"]["inserts"].append({"id": "bass-insert", "index": 9, "name": "Bass",
+                                             "gain_db": -6.0, "pan": 0.0, "mute": False,
+                                             "output": "master", "effects": [], "sends": []})
+            live["channels"].append({"id": "bass", "name": "Bass", "gain_db": -8.0, "pan": 0.0,
+                                     "mute": False, "solo": False, "insert": 9, "instrument": "4osc",
+                                     "sample": "", "step_pitch": 40, "step_length": 0.5,
+                                     "arm": False, "parameters": []})
+            live["patterns"].append({"id": "bass-pattern", "name": "Bass", "length": 16.0,
+                                     "sequences": [{"channel": "bass", "notes": [
+                                         {"id": "b%d" % i, "pitch": 40 + (i % 2) * 5, "velocity": 100,
+                                          "start": i * 2.0, "length": 1.5} for i in range(8)]}]})
+            live["playlist"]["lanes"].append({"id": "bass-lane", "name": "Bass", "mute": False})
+            for bar in range(8):
+                live["playlist"]["clips"].append({"id": "bass-clip-%d" % bar, "lane": "bass-lane",
+                                                  "pattern": "bass-pattern", "start": bar * 16.0,
+                                                  "length": 16.0, "offset": 0.0})
+
+        after, _ = apply_change(project, bass)
+        assert len(engine_clips(after, "bass-pattern")) == 8, "The bass never played"
+        assert "bass" in change()["channels"]["added"], change()
+        assert "bass-pattern" in change()["patterns"]["added"], change()
+        assert len(change()["clips"]["added"]) == 8, change()
+
+        # 3. Rearrange a section: drop the last four bars of drums and repeat bars 1-4.
+        def rearrange(live):
+            clips = [c for c in live["playlist"]["clips"] if c["pattern"] == drums]
+            for clip in sorted(clips, key=lambda c: c["start"])[4:]:
+                clip["start"] = clip["start"] - 64.0 + 128.0
+
+        after, _ = apply_change(project, rearrange)
+        moved = sorted(c["start"] for c in after["playlist"]["clips"] if c["pattern"] == drums)
+        assert moved[-1] == 176.0, moved
+        assert len(change()["clips"]["changed"]) == 4, change()
+
+        # 4. Adjust the mix: quieter bass, and a limiter on its insert.
+        def mix(live):
+            insert = next(i for i in live["mixer"]["inserts"] if i["id"] == "bass-insert")
+            insert["gain_db"] = -12.0
+            insert["effects"].append({"id": "bass-limit", "type": "limiter", "bypass": False,
+                                      "wet": 1.0, "parameters": []})
+
+        after, _ = apply_change(project, mix)
+        insert = next(i for i in after["mixer"]["inserts"] if i["id"] == "bass-insert")
+        assert insert["gain_db"] == -12.0 and [e["type"] for e in insert["effects"]] == ["limiter"]
+        assert "bass-insert" in change()["inserts"]["changed"], change()
+        assert any(p["type"] == "compressor"
+                   for p in engine_track(after, "insert:bass-insert")["plugins"]), "The limiter is not there"
+
+        # Each of the four is one undo, in reverse order.
+        control(project, "undo")
+        time.sleep(0.4)
+        assert not next(i for i in settled(sub)["mixer"]["inserts"] if i["id"] == "bass-insert")["effects"]
+
+        control(project, "undo")
+        time.sleep(0.4)
+        assert sorted(c["start"] for c in settled(sub)["playlist"]["clips"] if c["pattern"] == drums)[-1] == 112.0
+
+        control(project, "undo")
+        time.sleep(0.4)
+        assert not [c for c in settled(sub)["playlist"]["clips"] if c["pattern"] == "bass-pattern"]
+
+        control(project, "undo")
+        time.sleep(0.4)
+        assert len(notes_of(next(p for p in settled(sub)["patterns"] if p["id"] == drums), drum_channel)) == 4
+
+        # An edit that races a change made in the app is refused, then succeeds on a
+        # re-read; the app is untouched by the refused one.
+        stale = read(sub / "state.json")
+        run([{"command": "Add channel"}])
+        stale["bpm"] = 101.0
+        try:
+            submit(project, stale)
+            raise AssertionError("A stale edit was accepted")
+        except Conflict:
+            pass
+
+        assert read(sub / "state.json")["bpm"] != 101.0, "The refused edit changed the project"
+        after, _ = apply_change(project, lambda live: live.update({"bpm": 101.0}))
+        assert after["bpm"] == 101.0
+        assert change()["bpm"], change()
+
+        assert read(sub / "sync-status.json")["session_id"] == session, "The project was reopened"
+        assert read(sub / "sync-status.json")["playing"], "The agent's work stopped playback"
+
+        control(project, "quit")
+        assert process.wait(timeout=30) == 0
+        process = None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+    return "An outside agent varies the drums, writes a bass, rearranges and mixes a playing song, one undo each"
 
 
 if __name__ == "__main__":

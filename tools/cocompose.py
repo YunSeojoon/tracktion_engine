@@ -63,11 +63,37 @@ def current(project):
     return state, status
 
 
+class Conflict(RuntimeError):
+    """The app moved on before the edit landed; read state.json and try again."""
+
+
+def apply_change(project, change, attempts=5):
+    """Reads the live state, lets `change` modify it, and submits the result. A
+    conflict means someone else edited first, so the whole thing is read and redone
+    rather than forced over the top.
+
+    `change` is called with the fresh state each attempt and may return a value to
+    pass back to the caller.
+    """
+    for attempt in range(attempts):
+        state, _ = current(project)
+        carried = change(state)
+
+        try:
+            return submit(project, state), carried
+        except Conflict:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.2)
+
+    raise Conflict("Gave up after %d attempts" % attempts)
+
+
 def submit(project, state):
     folder = Path(project).parent
     before, status = current(project)
     if state["revision"] != before["revision"]:
-        raise RuntimeError("Stale revision; read state.json and reapply the edit")
+        raise Conflict("Stale revision; read state.json and reapply the edit")
     session = status["session_id"]
     request_id = str(uuid.uuid4())
     state["request_id"] = request_id
@@ -78,7 +104,10 @@ def submit(project, state):
         if after["session_id"] != session:
             raise RuntimeError("Session changed while editing")
         if after.get("request_id") == request_id and after.get("error"):
-            raise RuntimeError(after["error"])
+            error = after["error"]
+            if "Revision conflict" in error or "Session changed" in error:
+                raise Conflict(error)
+            raise RuntimeError(error)
         if after.get("request_id") == request_id and after["revision"] > state["revision"]:
             return read(folder / "state.json")
         return None
@@ -87,6 +116,8 @@ def submit(project, state):
         return wait_for(acknowledged)
     except TimeoutError as exc:
         error = read(folder / "sync-status.json").get("error")
+        if error and ("Revision conflict" in error or "Session changed" in error):
+            raise Conflict(error) from exc
         raise RuntimeError(error or str(exc)) from exc
 
 
