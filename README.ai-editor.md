@@ -12,7 +12,7 @@ Development branch: `ai-editor`
 
 Extract the entire `CoCompose-0.1.0-windows-x64.zip` archive and double-click `CoCompose.exe`. PowerShell, Python and Visual Studio are not required to run the app. Python is optional for the external editing helper. Default projects remain in the Windows Documents folder under `CoCompose`, outside the distribution folder.
 
-To update, close the app and extract the new ZIP to a separate folder. This is an unsigned portable build; an installer and automatic updates are not included. Both the local package and the CI artifact have been extracted and verified: all 10 integration checks pass against the packaged executable, and it starts by double-click with no developer tools on PATH.
+To update, close the app and extract the new ZIP to a separate folder. This is an unsigned portable build; an installer and automatic updates are not included. Both the local package and the CI artifact have been extracted and verified: the whole integration suite passes against the packaged executable, and it starts by double-click with no developer tools on PATH.
 
 ## Build and run on Windows
 
@@ -97,6 +97,10 @@ a fresh read if someone edited first. It never forces an old snapshot over a new
 One request is one undo, whatever it touched, so a person can hear a change and take it
 back in a single step.
 
+A parameter with an automation curve is driven by that curve; the stored value is
+written only when nothing is automating it, so an edit and a curve never fight over
+the same control. Removing a curve hands the parameter back.
+
 MIDI learn and hardware control surfaces are not wired up.
 
 Use the standard-library Python helper while the app is running:
@@ -114,6 +118,6 @@ It also supports transpose, clear-notes, place, make-unique, gain, parameter, st
 - [Windows 실행 및 외부 AI 협업 가이드](docs/windows-guide.ko.md)
 - [작업 단위와 검증 기록](docs/worklog.ko.md)
 
-The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 21 real-app integration checks passed. Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. Details are in the work log. Real audio listening and third-party VST3 compatibility remain unverified. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
+The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 23 real-app integration checks passed. Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. Details are in the work log. Real audio listening and third-party VST3 compatibility remain unverified. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
 
 Keep upstream license notices intact. Tracktion Engine and JUCE have separate licenses; see the upstream README and JUCE license files.

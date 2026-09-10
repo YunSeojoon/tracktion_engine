@@ -549,8 +549,14 @@ public:
     }
 
 private:
+    struct RenderedCurve
+    {
+        te::AutomatableParameter* parameter = nullptr;
+        String points;
+    };
+
     bool dirty = false;
-    std::map<String, String> renderedCurves;
+    std::map<String, RenderedCurve> renderedCurves;
 
     void valueTreePropertyChanged (ValueTree&, const Identifier&) override { dirty = true; }
     void valueTreeChildAdded (ValueTree&, ValueTree&) override             { dirty = true; }
@@ -648,6 +654,29 @@ private:
             sampler.setSoundParams (0, root, 0, 127);
     }
 
+    /** A parameter with a curve is owned by the curve, so the stored value is only
+        written when nothing is automating it. Otherwise every render would fight the
+        automation and the curve would never be heard. */
+    static bool isAutomated (te::Plugin* plugin, const char* parameterID)
+    {
+        if (plugin != nullptr)
+            if (auto parameter = plugin->getAutomatableParameterByID (parameterID))
+                return parameter->hasAutomationPoints();
+        return false;
+    }
+
+    static void writeIfNotAutomated (te::VolumeAndPanPlugin* volume, float gainDb, float pan)
+    {
+        if (volume == nullptr)
+            return;
+
+        if (! isAutomated (volume, "volume") && std::abs (volume->getVolumeDb() - gainDb) > 1.0e-4f)
+            volume->setVolumeDb (gainDb);
+
+        if (! isAutomated (volume, "pan") && std::abs (volume->getPan() - pan) > 1.0e-4f)
+            volume->setPan (pan);
+    }
+
     /** Every channel owns one engine audio track, in the channel's order. */
     void syncChannels()
     {
@@ -673,13 +702,9 @@ private:
             if (track->isSolo (false) != static_cast<bool> (channel[ids::solo]))
                 track->setSolo (static_cast<bool> (channel[ids::solo]));
 
-            if (auto* volume = track->getVolumePlugin())
-            {
-                const auto wantedGain = static_cast<float> (channel[ids::gainDb]);
-                const auto wantedPan = static_cast<float> (channel[ids::pan]);
-                if (std::abs (volume->getVolumeDb() - wantedGain) > 1.0e-4f) volume->setVolumeDb (wantedGain);
-                if (std::abs (volume->getPan() - wantedPan) > 1.0e-4f) volume->setPan (wantedPan);
-            }
+            writeIfNotAutomated (track->getVolumePlugin(),
+                                 static_cast<float> (channel[ids::gainDb]),
+                                 static_cast<float> (channel[ids::pan]));
         }
 
         std::set<String> wanted;
@@ -729,13 +754,9 @@ private:
             if (track->isMuted (false) != static_cast<bool> (insert[ids::mute]))
                 track->setMute (static_cast<bool> (insert[ids::mute]));
 
-            if (auto* volume = track->getVolumePlugin())
-            {
-                const auto wantedGain = static_cast<float> (insert[ids::gainDb]);
-                const auto wantedPan = static_cast<float> (insert.getProperty (ids::pan, 0.0));
-                if (std::abs (volume->getVolumeDb() - wantedGain) > 1.0e-4f) volume->setVolumeDb (wantedGain);
-                if (std::abs (volume->getPan() - wantedPan) > 1.0e-4f) volume->setPan (wantedPan);
-            }
+            writeIfNotAutomated (track->getVolumePlugin(),
+                                 static_cast<float> (insert[ids::gainDb]),
+                                 static_cast<float> (insert.getProperty (ids::pan, 0.0)));
 
             syncEffects (*track, insert);
         }
@@ -819,7 +840,7 @@ private:
             if (wetParameter == nullptr)
                 wetParameter = plugin->getAutomatableParameterByID ("mix");
 
-            if (wetParameter != nullptr
+            if (wetParameter != nullptr && ! wetParameter->hasAutomationPoints()
                  && std::abs (wetParameter->valueRange.convertTo0to1 (wetParameter->getCurrentExplicitValue()) - wetValue) > 1.0e-6f)
                 wetParameter->setParameter (wetParameter->valueRange.convertFrom0to1 (wetValue), sendNotification);
 
@@ -954,21 +975,27 @@ private:
         parameter with no points keeps whatever value it was left at. */
     void syncAutomation()
     {
+        std::set<String> present;
+
         for (auto lane : automation())
         {
+            const auto laneID = uidOf (lane);
+            present.insert (laneID);
+
             auto* parameter = automatableParameter (lane[ids::source].toString(),
                                                     lane[ids::plugin].toString(),
                                                     lane[ids::parameter].toString());
             if (parameter == nullptr)
                 continue;
 
-            auto& engineCurve = parameter->getCurve();
             const auto signature = pointSignature (lane);
+            auto& rendered = renderedCurves[laneID];
 
-            if (signature == renderedCurves[uidOf (lane)])
+            if (signature == rendered.points && rendered.parameter == parameter)
                 continue;
 
-            renderedCurves[uidOf (lane)] = signature;
+            rendered = { parameter, signature };
+            auto& engineCurve = parameter->getCurve();
             engineCurve.clear (nullptr);
 
             for (auto point : lane)
@@ -981,6 +1008,22 @@ private:
                 engineCurve.addPoint (at, parameter->valueRange.convertFrom0to1 (normalised),
                                       static_cast<float> (point.getProperty (ids::curve, 0.0)), nullptr);
             }
+        }
+
+        // A curve the model no longer has must stop playing, and the parameter goes
+        // back to whatever the model says it should be.
+        for (auto entry = renderedCurves.begin(); entry != renderedCurves.end();)
+        {
+            if (present.count (entry->first) > 0)
+            {
+                ++entry;
+                continue;
+            }
+
+            if (entry->second.parameter != nullptr)
+                entry->second.parameter->getCurve().clear (nullptr);
+
+            entry = renderedCurves.erase (entry);
         }
     }
 

@@ -121,22 +121,35 @@ def submit(project, state):
         raise RuntimeError(error or str(exc)) from exc
 
 
-def control(project, action):
-    state, status = current(project)
+def control(project, action, attempts=5):
+    """Transport and history commands carry the revision too, so a command sent while
+    the app was mid-change is refused. Read again and resend rather than force it."""
     folder = Path(project).parent
-    request_id = str(uuid.uuid4())
-    atomic_write(folder / "control.json", {"id": request_id, "action": action,
-                 "session_id": status["session_id"], "revision": state["revision"]})
 
-    def acknowledged():
-        response = read(folder / "control-status.json")
-        if response.get("id") != request_id:
-            return None
-        if response["error"]:
-            raise RuntimeError(response["error"])
-        return response
+    for attempt in range(attempts):
+        state, status = current(project)
+        request_id = str(uuid.uuid4())
+        atomic_write(folder / "control.json", {"id": request_id, "action": action,
+                     "session_id": status["session_id"], "revision": state["revision"]})
 
-    return wait_for(acknowledged)
+        def acknowledged():
+            response = read(folder / "control-status.json")
+            if response.get("id") != request_id:
+                return None
+            if response["error"]:
+                if "conflict" in response["error"].lower():
+                    raise Conflict(response["error"])
+                raise RuntimeError(response["error"])
+            return response
+
+        try:
+            return wait_for(acknowledged)
+        except Conflict:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.2)
+
+    raise Conflict("Gave up sending %s after %d attempts" % (action, attempts))
 
 
 def main():

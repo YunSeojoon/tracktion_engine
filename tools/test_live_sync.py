@@ -290,6 +290,8 @@ def run(exe, folder):
         checks.append(check_mixer_routing_and_effects(exe, folder))
         checks.append(check_automation_and_render(exe, folder))
         checks.append(check_external_agent_session(exe, folder))
+        checks.append(check_every_menu_command(exe, folder))
+        checks.append(check_survives_the_rough_edges(exe, folder))
 
         report = {"passed": checks, "folder": str(folder), "executable": str(exe)}
         atomic_write(folder / "test-report.json", report)
@@ -447,7 +449,7 @@ def check_pattern_built_in_the_ui(exe, folder):
         wait_for(lambda: read(sub / "ui-script-status.json").get("finished"), timeout=90)
         status = read(sub / "ui-script-status.json")
         assert not status["error"], status["error"]
-        assert status["done"] == len(actions), status
+        assert status["done"] == status["total"], status
 
         state = read(sub / "state.json")
         assert len(state["channels"]) == 3, state["channels"]
@@ -526,7 +528,9 @@ def check_arrangement_built_in_the_ui(exe, folder):
 
     def run(actions):
         stage["round"] += 1
-        atomic_write(script, actions)
+        # The app reloads the script when its contents change, so repeating the same
+        # actions needs a marker to tell the rounds apart.
+        atomic_write(script, [{"comment": stage["round"]}] + list(actions))
         wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
                           and read(sub / "ui-script-status.json").get("finished")), timeout=90)
         status = read(sub / "ui-script-status.json")
@@ -648,7 +652,9 @@ def check_audio_clips_and_assets(exe, folder):
 
     def run(actions):
         stage["round"] += 1
-        atomic_write(script, actions)
+        # The app reloads the script when its contents change, so repeating the same
+        # actions needs a marker to tell the rounds apart.
+        atomic_write(script, [{"comment": stage["round"]}] + list(actions))
         wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
                           and read(sub / "ui-script-status.json").get("finished")), timeout=90)
         status = read(sub / "ui-script-status.json")
@@ -765,7 +771,9 @@ def check_mixer_routing_and_effects(exe, folder):
 
     def run(actions):
         stage["round"] += 1
-        atomic_write(script, actions)
+        # The app reloads the script when its contents change, so repeating the same
+        # actions needs a marker to tell the rounds apart.
+        atomic_write(script, [{"comment": stage["round"]}] + list(actions))
         wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
                           and read(sub / "ui-script-status.json").get("finished")), timeout=90)
         status = read(sub / "ui-script-status.json")
@@ -942,7 +950,9 @@ def check_automation_and_render(exe, folder):
 
     def run(actions):
         stage["round"] += 1
-        atomic_write(script, actions)
+        # The app reloads the script when its contents change, so repeating the same
+        # actions needs a marker to tell the rounds apart.
+        atomic_write(script, [{"comment": stage["round"]}] + list(actions))
         wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
                           and read(sub / "ui-script-status.json").get("finished")), timeout=180)
         status = read(sub / "ui-script-status.json")
@@ -1022,15 +1032,33 @@ def check_automation_and_render(exe, folder):
         stem = read_wav(stems[0])
         assert stem["peak"] > 0.001 and stem["peak"] <= 1.0, stem
 
-        # The automation is audible: the same range rendered with the sweep flattened
-        # to its lowest point comes out quieter than the sweep does.
+        # The automation is audible, and it beats the stored value: a curve on the
+        # channel's own volume pulls the render down even though the model still says
+        # the channel is at its usual level.
+        volume_plugin = next(p for p in channel["parameters"] if p["id"] == "volume")
         data = read(sub / "state.json")
-        for point in data["automation"]["curves"][0]["points"]:
-            point["value"] = 0.02
+        data["automation"]["curves"].append(
+            {"id": "fade", "source": channel["id"], "plugin_id": volume_plugin["plugin_id"],
+             "parameter": "volume",
+             "points": [{"id": "f0", "time": 0.0, "value": 0.05, "curve": 0.0},
+                        {"id": "f1", "time": 32.0, "value": 0.05, "curve": 0.0}]})
+        faded_state = submit(project, data)
+        fade = next(c for c in faded_state["automation"]["curves"] if c["id"] == "fade")
+        assert fade["engine_points"] == 2, fade
+        assert faded_state["channels"][0]["gain_db"] == channel["gain_db"], \
+            "The stored channel level should not have moved"
+
+        render("mix")
+        faded = read_wav(sub / "mix.wav")
+        assert faded["rms"] < rendered["rms"] * 0.7, (faded, rendered)
+
+        # Taking the curve away hands the parameter back to the stored value.
+        data = read(sub / "state.json")
+        data["automation"]["curves"] = [c for c in data["automation"]["curves"] if c["id"] != "fade"]
         submit(project, data)
         render("mix")
-        flattened = read_wav(sub / "mix.wav")
-        assert flattened["rms"] < rendered["rms"], (flattened, rendered)
+        restored_level = read_wav(sub / "mix.wav")
+        assert restored_level["rms"] > faded["rms"] * 1.4, (restored_level, faded)
 
         assert read(sub / "sync-status.json")["session_id"] == session, "The project was reopened"
 
@@ -1068,7 +1096,9 @@ def check_external_agent_session(exe, folder):
 
     def run(actions):
         stage["round"] += 1
-        atomic_write(script, actions)
+        # The app reloads the script when its contents change, so repeating the same
+        # actions needs a marker to tell the rounds apart.
+        atomic_write(script, [{"comment": stage["round"]}] + list(actions))
         wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
                           and read(sub / "ui-script-status.json").get("finished")), timeout=120)
         status = read(sub / "ui-script-status.json")
@@ -1211,6 +1241,209 @@ def check_external_agent_session(exe, folder):
             process.wait(timeout=10)
 
     return "An outside agent varies the drums, writes a bass, rearranges and mixes a playing song, one undo each"
+
+
+def check_every_menu_command(exe, folder):
+    """Runs every menu item the app offers, each with the selection it needs, so a
+    command that quietly does nothing shows up as a failure rather than a dead button.
+
+    "Open project folder" is the one command left out: it opens Explorer, which is not
+    something a check should be doing dozens of times.
+    """
+    sub = folder / "commands"
+    sub.mkdir()
+    project = sub / "project.json"
+    script = sub / "ui-script.json"
+
+    # A pattern with notes on channel 0, placed on lane 0, and that clip selected.
+    setup = ([{"command": "Add channel"}, {"command": "New pattern"}, {"select_pattern": 1},
+              {"select_channel": 0}] + [{"step": [0, step]} for step in (0, 4, 8, 12)]
+             + [{"select_lane": 0}, {"command": "Place pattern"}, {"pick_clip": [0, 0.0]}])
+
+    # Each group runs with the state its commands need, re-established as it goes.
+    groups = [
+        ["Play / Stop", "Song mode", "Metronome", "Song mode", "Metronome", "Play / Stop"],
+        ["Make placement unique", "Split clip at playhead", "Duplicate clip"],
+        [{"select_pattern": 1}, {"select_channel": 0},
+         "Transpose pattern up", "Transpose pattern down"],
+        ["Arm channel for recording", "Count in one bar", "Arm channel for recording",
+         "Count in one bar"],
+        ["Show Browser", "Show Browser", "Show Channel Rack", "Show Channel Rack",
+         "Show Mixer", "Show Mixer", "Show Pattern picker", "Show Pattern picker",
+         "Show Playlist", "Show Playlist", "Focus next panel", "Focus next panel"],
+        ["Add channel", "New pattern", {"select_lane": 0}, "Place pattern"],
+        ["Undo", "Redo", "Save now", "Collect samples"],
+    ]
+
+    actions = list(setup)
+    for group in groups:
+        actions += [entry if isinstance(entry, dict) else {"command": entry} for entry in group]
+
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+    process = subprocess.Popen([str(exe), "--project", str(project), "--headless",
+                                "--screenshots", "--ui-script", str(script)], startupinfo=startup)
+    try:
+        wait_for(lambda: read(sub / "state.json"), timeout=40)
+        atomic_write(script, actions)
+
+        wait_for(lambda: read(sub / "ui-script-status.json").get("finished"), timeout=240)
+        status = read(sub / "ui-script-status.json")
+        assert not status["error"], status
+        assert status["done"] == status["total"], status
+
+        state = settled(sub)
+        assert not read(sub / "sync-status.json")["error"], read(sub / "sync-status.json")
+        assert len(state["channels"]) == 3, state["channels"]
+        assert all(read(sub / "ui-script-status.json").get("finished") for _ in range(1))
+
+        control(project, "quit")
+        assert process.wait(timeout=30) == 0
+        process = None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+    return "Every menu command runs against a real project without an error"
+
+
+def check_survives_the_rough_edges(exe, folder):
+    """Display scaling, a plugin that is not installed, an unclean exit, and a long
+    run with the transport going."""
+    sub = folder / "rough"
+    sub.mkdir()
+    project = sub / "project.json"
+    script = sub / "ui-script.json"
+
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+
+    def launch(extra=()):
+        """Starts the app and waits until it is the one answering, so a leftover
+        sync-status.json from the previous run is never mistaken for this one."""
+        previous = None
+        if (sub / "sync-status.json").exists():
+            previous = read(sub / "sync-status.json")["session_id"]
+
+        started = subprocess.Popen([str(exe), "--project", str(project), "--headless", "--screenshots",
+                                    "--ui-script", str(script), *extra], startupinfo=startup)
+        wait_for(lambda: (sub / "sync-status.json").exists()
+                         and read(sub / "sync-status.json")["session_id"] != previous, timeout=60)
+        return started
+
+    # A project with something in it, and a screenshot at normal scaling.
+    process = launch()
+    try:
+        atomic_write(script, [{"comment": 1}, {"command": "Add channel"}, {"command": "New pattern"},
+                              {"select_pattern": 1}, {"select_channel": 0},
+                              {"step": [0, 0]}, {"step": [0, 8]},
+                              {"select_lane": 0}, {"command": "Place pattern"}])
+        wait_for(lambda: read(sub / "ui-script-status.json").get("finished"), timeout=120)
+        assert not read(sub / "ui-script-status.json")["error"], read(sub / "ui-script-status.json")
+        state = settled(sub)
+        baseline = read_png_size(sub / "ui.png")
+        # Every later launch reads this file too, so leave nothing in it to replay.
+        atomic_write(script, [])
+        control(project, "quit")
+        assert process.wait(timeout=30) == 0
+        process = None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+    # The same project at 150% and 200%: the surface has to lay out, not just start.
+    for scale in ("1.5", "2.0"):
+        (sub / "ui.png").unlink(missing_ok=True)
+        process = launch(("--scale", scale))
+        try:
+            wait_for(lambda: (sub / "ui.png").exists(), timeout=60)
+            time.sleep(2.0)
+            scaled = read_png_size(sub / "ui.png")
+            assert scaled[0] >= baseline[0] and scaled[1] >= baseline[1], (scale, scaled, baseline)
+            labels = read(sub / "ui-state.json")["labels"]
+            assert any("Live sync" in str(label) for label in labels), (scale, labels)
+            assert not read(sub / "sync-status.json")["error"], (scale, read(sub / "sync-status.json"))
+            control(project, "quit")
+            assert process.wait(timeout=30) == 0
+            process = None
+        finally:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                process.wait(timeout=10)
+
+    # A channel naming a plugin that is not installed stays silent and keeps the
+    # request, so scanning it later fixes the project instead of losing the channel.
+    process = launch()
+    try:
+        channel_id = settled(sub)["channels"][1]["id"]
+
+        def ask_for_a_missing_plugin(live):
+            next(c for c in live["channels"] if c["id"] == channel_id)["instrument"] = "VST3-NotInstalled-0-0"
+
+        after, _ = apply_change(project, ask_for_a_missing_plugin)
+        assert next(c for c in after["channels"] if c["id"] == channel_id)["instrument"] \
+            in ("VST3-NotInstalled-0-0", "4osc"), after["channels"]
+        assert engine_track(after, channel_id) is not None, "The channel lost its track"
+        assert not read(sub / "sync-status.json")["error"], read(sub / "sync-status.json")
+
+        # A long run with the transport going, saving as it goes.
+        control(project, "play")
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            time.sleep(2)
+            assert read(sub / "sync-status.json")["playing"], "Playback stopped during the long run"
+            assert not read(sub / "sync-status.json")["error"], read(sub / "sync-status.json")
+
+        before_kill = settled(sub)
+        session = read(sub / "sync-status.json")["session_id"]
+    finally:
+        # An unclean exit: no quit, no save on the way out.
+        process.kill()
+        process.wait(timeout=20)
+        process = None
+
+    # What was published before the kill has to come back.
+    process = launch()
+    try:
+        time.sleep(1.0)
+        recovered = settled(sub)
+        assert not read(sub / "sync-status.json")["error"], read(sub / "sync-status.json")
+        assert len(recovered["channels"]) == len(before_kill["channels"]), (recovered["channels"],
+                                                                           before_kill["channels"])
+        assert len(recovered["patterns"]) == len(before_kill["patterns"])
+        assert len(recovered["playlist"]["clips"]) == len(before_kill["playlist"]["clips"])
+        assert len(engine_clips(recovered)) == len(engine_clips(before_kill))
+        control(project, "quit")
+        assert process.wait(timeout=30) == 0
+        process = None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+    return "The surface lays out at 150% and 200%, a missing plugin is survivable, and a killed app reopens its work"
+
+
+PNG_MAGIC = bytes([137, 80, 78, 71, 13, 10, 26, 10])
+
+
+def read_png_size(path):
+    """The app replaces the file while it runs, so keep looking until a whole one is there."""
+    for _ in range(40):
+        try:
+            head = Path(path).read_bytes()[:33]
+            if len(head) >= 24 and head[:8] == PNG_MAGIC:
+                return struct.unpack(">II", head[16:24])
+        except (PermissionError, FileNotFoundError):
+            pass
+        time.sleep(0.1)
+
+    raise RuntimeError("No readable PNG at %s" % path)
+
 
 
 if __name__ == "__main__":

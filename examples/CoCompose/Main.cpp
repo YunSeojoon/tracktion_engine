@@ -863,6 +863,10 @@ private:
         if (action.hasProperty ("split_clip"))
             return workspace.playlistGrid().splitSelectionAt (static_cast<double> (action["split_clip"]));
 
+        // A marker so a script that repeats the same actions still reads as new work.
+        if (action.hasProperty ("comment"))
+            return true;
+
         if (action.hasProperty ("arm"))
         {
             const auto arm = action["arm"];
@@ -969,14 +973,18 @@ private:
             { "revision", project.revision }, { "labels", labels } }), false));
     }
 
+    /** Written through a temporary file so a tool never reads a half-finished image. */
     void writeImage (const String& fileName, Component& component)
     {
         auto image = component.createComponentSnapshot (component.getLocalBounds());
-        if (auto output = project.source.getSiblingFile (fileName).createOutputStream())
+        const auto target = project.source.getSiblingFile (fileName);
+        TemporaryFile temporary (target);
+
+        if (auto output = temporary.getFile().createOutputStream())
         {
-            output->setPosition (0);
-            output->truncate();
             PNGImageFormat().writeImageToStream (image, *output);
+            output.reset();
+            temporary.overwriteTargetFileWithTemporary();
         }
     }
 
@@ -1011,6 +1019,12 @@ public:
             const auto uiScript = scriptOption >= 0 && scriptOption + 1 < args.size()
                                       ? File::getCurrentWorkingDirectory().getChildFile (args[scriptOption + 1].unquoted())
                                       : File();
+            // Lets a check see the work surface at the scalings Windows actually uses.
+            const auto scaleOption = args.indexOf ("--scale");
+            if (scaleOption >= 0 && scaleOption + 1 < args.size())
+                Desktop::getInstance().setGlobalScaleFactor (
+                    jlimit (0.5f, 4.0f, args[scaleOption + 1].getFloatValue()));
+
             auto editor = std::make_unique<Editor> (file, args.contains ("--play"),
                                                     args.contains ("--screenshots"), uiScript);
             window = std::make_unique<Window> (std::move (editor), ! args.contains ("--headless"));
