@@ -4,9 +4,9 @@ Dates are the day the work landed on the `ai-editor` branch. Each release record
 the commit it was built from; `BUILD-INFO.json` inside the ZIP carries the exact
 one for the copy you have.
 
-## 0.1.0 — 2026-09-11 (release candidate 1)
+## 0.1.0 — 2026-09-11 (release candidate 2)
 
-Designated from commit e928b5c. What was run against that exact binary, where, and
+Designated from commit 9110648. What was run against that exact binary, where, and
 what is still unverified is in `docs/release-candidate.ko.md`. Since the first draft
 of these notes the second review's P0 to P4 landed: a render never replaces a good
 file before its replacement exists, the release seal reads the report it is given
