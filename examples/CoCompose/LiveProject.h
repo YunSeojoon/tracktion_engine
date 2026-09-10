@@ -98,10 +98,30 @@ public:
         require (source.hasFileExtension ("json") && ! StringArray { "state.json", "sync-status.json",
             "control.json", "control-status.json" }.contains (source.getFileName(), true), "Use a separate project.json input file");
         require (source.getSize() <= 8 * 1024 * 1024, "project.json exceeds 8 MB");
-        const bool hadNativeSession = nativeFile.existsAsFile();
+        bool hadNativeSession = nativeFile.existsAsFile();
         // Loading happens once, at startup. Live updates never replace this Edit.
         edit = hadNativeSession ? te::loadEditFromFile (engine, nativeFile)
                                        : te::createEmptyEdit (engine, nativeFile);
+
+        // A session that is gone or unreadable is what backups are for: a folder that
+        // has backups had a session, so starting it over would lose the work. Falling
+        // back is an explicit recovery at startup, not a way to sync changes.
+        if (edit == nullptr
+             || (hadNativeSession && edit->state.getNumChildren() == 0)
+             || (! hadNativeSession && ! backupsNewestFirst().isEmpty()))
+        {
+            for (const auto& backup : backupsNewestFirst())
+            {
+                if (auto recovered = te::loadEditFromFile (engine, backup))
+                {
+                    edit = std::move (recovered);
+                    hadNativeSession = true;
+                    recoveredFrom = backup.getFileName();
+                    break;
+                }
+            }
+        }
+
         require (edit != nullptr, "Cannot open native session");
         edit->editFileRetriever = [file = nativeFile] { return file; };
         edit->playInStopEnabled = true;
@@ -152,6 +172,7 @@ public:
     const File source, stateFile, statusFile, nativeFile;
     const String sessionID = Uuid().toString();
     String error;
+    String recoveredFrom;
     String syncState = "synced";
     int revision = 0, applied = 0;
 
@@ -523,6 +544,95 @@ public:
                 + (missing > 0 ? "; " + String (missing) + " still missing" : "");
     }
 
+    File backupFolder() const { return source.getSiblingFile ("backups"); }
+
+    /** Newest first, so recovery takes the most recent one that opens. */
+    Array<File> backupsNewestFirst() const
+    {
+        auto found = backupFolder().findChildFiles (File::findFiles, false, "session-*.tracktionedit");
+        std::sort (found.begin(), found.end(),
+                   [] (const File& a, const File& b) { return a.getFileName() > b.getFileName(); });
+        return found;
+    }
+
+    /** Keeps a rolling set of copies of the session, so a crash or a bad edit costs at
+        most the last minute of work rather than everything. */
+    void writeBackupIfDue()
+    {
+        if (revision == backedUpRevision)
+            return;
+
+        const auto now = Time::getCurrentTime();
+        if (lastBackup != Time() && (now - lastBackup).inSeconds() < backupIntervalSeconds)
+            return;
+
+        writeBackup();
+    }
+
+    /** For the moments that are expensive to lose — a take just kept, the app closing —
+        where waiting for the next interval would be the wrong answer. */
+    void writeBackup()
+    {
+        if (! nativeFile.existsAsFile() || ! backupFolder().createDirectory().wasOk())
+            return;
+
+        const auto now = Time::getCurrentTime();
+        auto target = backupFolder().getChildFile ("session-" + now.formatted ("%Y%m%d-%H%M%S")
+                                                     + ".tracktionedit");
+
+        for (int suffix = 2; target.existsAsFile(); ++suffix)
+            target = backupFolder().getChildFile ("session-" + now.formatted ("%Y%m%d-%H%M%S")
+                                                    + "-" + String (suffix) + ".tracktionedit");
+
+        if (! nativeFile.copyFileTo (target))
+            return;
+
+        lastBackup = now;
+        backedUpRevision = revision;
+
+        auto existing = backupsNewestFirst();
+        for (int i = backupsToKeep; i < existing.size(); ++i)
+            existing[i].deleteFile();
+    }
+
+    /** Makes a chosen backup the session the next run will open, keeping the current
+        one beside it so nothing is thrown away. */
+    String restoreBackup (const File& backup)
+    {
+        if (! backup.existsAsFile())
+            return "That backup is not there any more";
+
+        if (! backupFolder().createDirectory().wasOk())
+            return "Cannot write to the backups folder";
+
+        const auto aside = backupFolder().getChildFile ("session-replaced-"
+                                                          + Time::getCurrentTime().formatted ("%Y%m%d-%H%M%S")
+                                                          + ".tracktionedit");
+        if (nativeFile.existsAsFile() && ! nativeFile.copyFileTo (aside))
+            return "Cannot set the current session aside";
+
+        if (! backup.copyFileTo (nativeFile))
+            return "Cannot write the session file";
+
+        // The open Edit is never swapped underneath the user; the restored session is
+        // what opens next time.
+        return "Restored " + backup.getFileName() + "; reopen CoCompose to work on it";
+    }
+
+    /** Sample files an audio clip can no longer find. */
+    StringArray missingAssets() const
+    {
+        StringArray missing;
+        for (auto clip : model->instances())
+            if (clip.hasType (ids::AUDIO))
+            {
+                const File asset (clip[ids::file].toString());
+                if (! asset.existsAsFile())
+                    missing.addIfNotAlreadyThere (asset.getFileName());
+            }
+        return missing;
+    }
+
     /** Writes the native session and state.json now, instead of waiting for the next
         change to be noticed. */
     void save()
@@ -544,11 +654,15 @@ public:
             { "updated_at_ms", Time::getCurrentTime().toMilliseconds() },
             { "request_id", lastRequest },
             { "playing", edit->getTransport().isPlaying() },
+            { "recording", edit->getTransport().isRecording() },
             { "position_seconds", edit->getTransport().getPosition().inSeconds() },
             { "looping", static_cast<bool> (edit->getTransport().looping) },
             { "undo", edit->getUndoManager().getUndoDescription() },
             { "undo_actions", edit->getUndoManager().getNumActionsInCurrentTransaction() },
             { "change", lastChange },
+            { "recovered_from", recoveredFrom },
+            { "backups", backupNames() },
+            { "missing_assets", missingAssets().joinIntoString (", ") },
             { "channel_count", model->channels().getNumChildren() },
             { "pattern_count", model->patterns().getNumChildren() },
             { "clip_count", model->instances().getNumChildren() },
@@ -579,6 +693,20 @@ public:
     }
 
 private:
+    var backupNames() const
+    {
+        Array<var> names;
+        for (const auto& backup : backupsNewestFirst())
+            names.add (backup.getFileName());
+        return names;
+    }
+
+    static constexpr int backupsToKeep = 10;
+    static constexpr int backupIntervalSeconds = 60;
+
+    Time lastBackup;
+    int backedUpRevision = -1;
+
     String lastModel, lastSeen, pending, lastRequest, lastPlugins;
     var lastChange = object ({ { "bpm", false } });
     int ticks = 0;

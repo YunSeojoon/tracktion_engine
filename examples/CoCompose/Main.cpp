@@ -15,7 +15,7 @@ namespace commands
 enum
 {
     playStop = 0x2000, songMode, save, saveCopy, collectSamples, exportMix, exportStems,
-    revealFolder, quitApp, armChannel, recordToggle, countIn,
+    revealFolder, restoreBackup, quitApp, armChannel, recordToggle, countIn,
     undo, redo, addChannel, newPattern, placePattern, makeUnique, splitClip, duplicateClip,
     transposeUp, transposeDown,
     metronome, focusNextPanel, scanPlugins, audioSettings, about,
@@ -82,6 +82,14 @@ public:
         setSize (1420, 860);
         lastControl = project.source.getSiblingFile ("control.json").loadFileAsString();
         applyTransportMode();
+
+        if (project.recoveredFrom.isNotEmpty())
+            status.setText ("Recovered from " + project.recoveredFrom, dontSendNotification);
+        else if (const auto missing = project.missingAssets(); ! missing.isEmpty())
+            status.setText ("Cannot find " + String (missing.size())
+                              + (missing.size() == 1 ? " sample: " : " samples: ")
+                              + missing.joinIntoString (", ") + " - use Find in the Browser",
+                            dontSendNotification);
         startTimer (250);
     }
 
@@ -89,11 +97,16 @@ public:
     {
         stopTimer();
         menuBar.setModel (nullptr);
-        project.edit->getTransport().stop (false, false);
+        // Closing during a recording still keeps the take rather than dropping it.
+        if (project.edit->getTransport().isRecording())
+            recorder.stopRecording();
+        else
+            project.edit->getTransport().stop (false, false);
         workspace.store();
         // Layout is not part of the published model, so a session that only changed the
         // work surface still has to be written out before the app closes.
         project.save();
+        project.writeBackup();
     }
 
     void paint (Graphics& g) override { g.fillAll (Colour (0xff141a24)); }
@@ -130,7 +143,8 @@ public:
         if (index == 0)
         {
             for (auto id : { commands::save, commands::saveCopy, commands::collectSamples,
-                             commands::exportMix, commands::exportStems, commands::revealFolder })
+                             commands::exportMix, commands::exportStems, commands::restoreBackup,
+                             commands::revealFolder })
                 menu.addCommandItem (&commandManager, id);
             menu.addSeparator();
             menu.addCommandItem (&commandManager, commands::quitApp);
@@ -177,7 +191,7 @@ public:
     {
         ids.addArray ({ commands::playStop, commands::songMode, commands::save, commands::saveCopy,
                         commands::collectSamples, commands::exportMix, commands::exportStems,
-                        commands::revealFolder, commands::quitApp,
+                        commands::revealFolder, commands::restoreBackup, commands::quitApp,
                         commands::armChannel, commands::recordToggle, commands::countIn,
                         commands::undo, commands::redo,
                         commands::addChannel, commands::newPattern, commands::placePattern,
@@ -247,6 +261,11 @@ public:
             case commands::countIn:
                 info.setInfo ("Count in one bar", "Click a bar before recording starts", "Record", 0);
                 info.setTicked (recorder.getCountIn() > 0);
+                break;
+            case commands::restoreBackup:
+                info.setInfo ("Restore a backup...", "Choose one of the automatic backups to open next time",
+                              "File", 0);
+                info.setActive (! project.backupsNewestFirst().isEmpty());
                 break;
             case commands::revealFolder:
                 info.setInfo ("Open project folder", "Show the project folder in Explorer", "File", 0);
@@ -334,9 +353,15 @@ public:
         switch (invocation.commandID)
         {
             case commands::playStop:
-                startPlayback = ! startPlayback;
-                if (startPlayback) project.edit->getTransport().play (false);
-                else project.edit->getTransport().stop (false, false);
+                if (startPlayback || project.edit->getTransport().isRecording())
+                {
+                    stopTransport();
+                }
+                else
+                {
+                    startPlayback = true;
+                    project.edit->getTransport().play (false);
+                }
                 return true;
 
             case commands::songMode:
@@ -383,20 +408,20 @@ public:
 
             case commands::recordToggle:
                 if (project.edit->getTransport().isRecording())
-                {
-                    status.setText (recorder.stopRecording(), dontSendNotification);
-                    startPlayback = false;
-                }
+                    stopTransport();
                 else if (! recorder.startRecording())
-                {
                     status.setText ("Arm a channel before recording", dontSendNotification);
-                }
+
                 workspace.refresh();
                 return true;
 
             case commands::countIn:
                 recorder.setCountIn (recorder.getCountIn() > 0 ? 0 : 1);
                 menuItemsChanged();
+                return true;
+
+            case commands::restoreBackup:
+                showBackups();
                 return true;
 
             case commands::revealFolder:
@@ -536,6 +561,46 @@ private:
                 ? loop : whole;
     }
 
+    /** Lets a person pick which automatic backup to go back to. The open project is
+        never swapped underneath them; the choice is what opens next time. */
+    void showBackups()
+    {
+        const auto backups = project.backupsNewestFirst();
+        if (backups.isEmpty())
+            return;
+
+        PopupMenu menu;
+        for (int i = 0; i < backups.size(); ++i)
+            menu.addItem (i + 1, backups[i].getFileName() + "   ("
+                                   + File::descriptionOfSizeInBytes (backups[i].getSize()) + ")");
+
+        menu.showMenuAsync (PopupMenu::Options().withTargetComponent (status),
+            [this, backups] (int choice)
+            {
+                if (choice > 0 && choice <= backups.size())
+                    status.setText (project.restoreBackup (backups[choice - 1]), dontSendNotification);
+            });
+    }
+
+    /** Every way of stopping goes through here, so a take is kept whether the app,
+        a shortcut or an outside tool ended the recording. */
+    void stopTransport()
+    {
+        startPlayback = false;
+
+        if (! project.edit->getTransport().isRecording())
+        {
+            project.edit->getTransport().stop (false, false);
+            return;
+        }
+
+        status.setText (recorder.stopRecording(), dontSendNotification);
+        // A take is expensive to lose, so it is written and backed up straight away
+        // rather than waiting for the next autosave.
+        project.save();
+        project.writeBackup();
+    }
+
     bool canPlace() const
     {
         return project.model->laneFor (workspace.selection.lane()).isValid()
@@ -662,7 +727,16 @@ private:
             if (action == "undo") project.undo();
             else if (action == "redo") project.redo();
             else if (action == "play") { startPlayback = true; project.edit->getTransport().play (false); }
-            else if (action == "stop") { startPlayback = false; project.edit->getTransport().stop (false, false); }
+            else if (action == "stop") stopTransport();
+            else if (action == "record")
+            {
+                if (project.edit->getTransport().isRecording())
+                    stopTransport();
+                else
+                    live::require (recorder.startRecording(), "Arm a channel before recording");
+
+                workspace.refresh();
+            }
             else if (action == "quit") JUCEApplication::getInstance()->systemRequestedQuit();
             else live::require (false, "Unknown control action");
             project.writeStatus();
@@ -706,11 +780,14 @@ private:
             status.setText ((project.syncState == "applied_unpersisted" ? "Applied; save pending: " : "Sync rejected: ")
                                 + project.error, dontSendNotification);
         else if (! status.getText().startsWith ("Saved a copy") && ! status.getText().startsWith ("Collected")
-                  && ! status.getText().startsWith ("Rendered") && ! status.getText().startsWith ("Recorded"))
+                  && ! status.getText().startsWith ("Rendered") && ! status.getText().startsWith ("Recorded")
+                  && ! status.getText().startsWith ("Recovered") && ! status.getText().startsWith ("Restored")
+                  && ! status.getText().startsWith ("Cannot find") && ! status.getText().startsWith ("Nothing was recorded"))
             status.setText ("Live sync  |  Revision " + String (project.revision)
                 + "  |  Edit project.json externally; changes appear here automatically", dontSendNotification);
 
         collectRenderResult();
+        project.writeBackupIfDue();
         project.writeStatus();
         commandManager.commandStatusChanged();
         runScriptStep();

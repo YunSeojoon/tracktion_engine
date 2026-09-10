@@ -293,6 +293,7 @@ def run(exe, folder):
         checks.append(check_every_menu_command(exe, folder))
         checks.append(check_survives_the_rough_edges(exe, folder))
         checks.append(check_render_output_is_never_lost(exe, folder))
+        checks.append(check_recording_and_recovery(exe, folder))
 
         report = {"passed": checks, "folder": str(folder), "executable": str(exe)}
         atomic_write(folder / "test-report.json", report)
@@ -1626,6 +1627,126 @@ def check_render_output_is_never_lost(exe, folder):
 
     return ("Exports keep their names apart, carry a channel's sends, survive a failed write, "
             "and render the project as it was while it keeps being edited")
+
+
+def check_recording_and_recovery(exe, folder):
+    """Stopping a recording from outside has to keep the take just as the app does, the
+    project has to keep rolling backups, and a session that is gone has to come back
+    from the newest one."""
+    sub = folder / "recovery"
+    sub.mkdir()
+    project = sub / "project.json"
+    script = sub / "ui-script.json"
+    stage = {"round": 0}
+
+    def run(actions):
+        stage["round"] += 1
+        atomic_write(script, [{"comment": stage["round"]}] + list(actions))
+        wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
+                          and read(sub / "ui-script-status.json").get("finished")), timeout=180)
+        status = read(sub / "ui-script-status.json")
+        assert not status["error"], status
+        return settled(sub)
+
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+    process = subprocess.Popen([str(exe), "--project", str(project), "--headless",
+                                "--screenshots", "--ui-script", str(script)], startupinfo=startup)
+    try:
+        wait_for(lambda: read(sub / "state.json"), timeout=40)
+
+        # Recording is started from outside and stopped from outside. There is no MIDI
+        # keyboard here, so a take is put on the armed track the way a recording leaves
+        # one; stopping has to claim it whichever way the stop arrived.
+        state = run([{"arm": [0, True]}])
+        assert state["channels"][0]["arm"], state["channels"][0]
+        patterns_before = {p["id"] for p in state["patterns"]}
+
+        control(project, "record")
+        wait_for(lambda: read(sub / "sync-status.json").get("recording"), timeout=30)
+        run([{"take": [0, 8.0, 4.0, 62, 65, 69]}])
+        control(project, "stop")
+        time.sleep(1.0)
+
+        state = settled(sub)
+        kept = [p for p in state["patterns"] if p["id"] not in patterns_before]
+        assert len(kept) == 1, ("An outside stop lost the take", [p["name"] for p in state["patterns"]])
+        take = kept[0]
+        assert sorted(n["pitch"] for n in notes_of(take, state["channels"][0]["id"])) == [62, 65, 69]
+        placement = next(c for c in state["playlist"]["clips"] if c["pattern"] == take["id"])
+        assert round(placement["start"], 3) == 8.0, placement
+        assert not read(sub / "sync-status.json")["recording"], "The transport is still recording"
+
+        # Backups accumulate as the work changes, newest first, and are capped.
+        for beat in (16.0, 24.0, 32.0):
+            run([{"place": [0, beat]}])
+            time.sleep(1.0)
+
+        wait_for(lambda: read(sub / "sync-status.json")["backups"], timeout=180)
+        backups = read(sub / "sync-status.json")["backups"]
+        assert backups == sorted(backups, reverse=True), backups
+        assert len(backups) <= 10, backups
+
+        before_loss = settled(sub)
+        session = read(sub / "sync-status.json")["session_id"]
+        assert not read(sub / "sync-status.json")["recovered_from"], read(sub / "sync-status.json")
+    finally:
+        process.kill()
+        process.wait(timeout=20)
+        process = None
+
+    # The session file is lost. The newest backup has to bring the work back.
+    (sub / "session.tracktionedit").unlink()
+    process = subprocess.Popen([str(exe), "--project", str(project), "--headless"], startupinfo=startup)
+    try:
+        wait_for(lambda: (sub / "sync-status.json").exists()
+                         and read(sub / "sync-status.json")["session_id"] != session, timeout=60)
+        time.sleep(1.0)
+        recovered = settled(sub)
+        assert read(sub / "sync-status.json")["recovered_from"], read(sub / "sync-status.json")
+        assert not read(sub / "sync-status.json")["error"], read(sub / "sync-status.json")
+        assert len(recovered["channels"]) == len(before_loss["channels"]), recovered["channels"]
+        assert any(p["id"] == take["id"] for p in recovered["patterns"]), "The take did not survive"
+        control(project, "quit")
+        assert process.wait(timeout=30) == 0
+        process = None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+    # A sample that has gone missing is named, not silently dropped. A fresh process
+    # counts its script rounds from zero, and would replay whatever is still in the
+    # file, so it starts empty.
+    sample = write_wav(sub / "tone.wav")
+    atomic_write(script, [])
+    stage["round"] = 0
+    process = subprocess.Popen([str(exe), "--project", str(project), "--headless",
+                                "--ui-script", str(script)], startupinfo=startup)
+    try:
+        wait_for(lambda: read(sub / "state.json"), timeout=40)
+        stage["round"] += 1
+        atomic_write(script, [{"comment": stage["round"]}, {"select_lane": 0},
+                              {"audio": [0, str(sample), 0.0]}])
+        wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
+                          and read(sub / "ui-script-status.json").get("finished")), timeout=120)
+        assert not read(sub / "ui-script-status.json")["error"], read(sub / "ui-script-status.json")
+        settled(sub)
+        assert not read(sub / "sync-status.json")["missing_assets"], read(sub / "sync-status.json")
+
+        sample.unlink()
+        wait_for(lambda: "tone.wav" in read(sub / "sync-status.json")["missing_assets"], timeout=30)
+
+        control(project, "quit")
+        assert process.wait(timeout=30) == 0
+        process = None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+    return "A take survives an outside stop, backups roll, a lost session recovers, and a missing sample is named"
 
 
 if __name__ == "__main__":
