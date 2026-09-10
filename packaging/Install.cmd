@@ -7,6 +7,9 @@ set "SILENT="
 if /I "%~1"=="/s" set "SILENT=1"
 set "SOURCE=%~dp0"
 set "TARGET=%LOCALAPPDATA%\Programs\CoCompose"
+rem A user name with an apostrophe in it would end a PowerShell single-quoted
+rem string early, so the copy used inside one has its quotes doubled.
+set "TARGET_PS=%TARGET:'=''%"
 
 echo Installing CoCompose into "%TARGET%"
 if not exist "%TARGET%" mkdir "%TARGET%" || goto :failed
@@ -18,7 +21,7 @@ xcopy "%SOURCE%*" "%TARGET%\" /E /I /Y /Q >nul || goto :failed
 rem By full path, so a machine with an unusual PATH still gets its shortcut.
 "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command ^
   "$s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath('Programs')) 'CoCompose.lnk'));" ^
-  "$s.TargetPath = '%TARGET%\CoCompose.exe'; $s.WorkingDirectory = '%TARGET%'; $s.Description = 'CoCompose'; $s.Save()" || goto :failed
+  "$s.TargetPath = '%TARGET_PS%\CoCompose.exe'; $s.WorkingDirectory = '%TARGET_PS%'; $s.Description = 'CoCompose'; $s.Save()" || goto :failed
 
 echo.
 echo Done. CoCompose is in the Start menu.

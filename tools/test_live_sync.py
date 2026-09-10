@@ -330,6 +330,7 @@ def run(exe, folder):
         checks.append(check_every_menu_command(exe, folder))
         checks.append(check_survives_the_rough_edges(exe, folder))
         checks.append(check_render_output_is_never_lost(exe, folder))
+        checks.append(check_render_boundaries(exe, folder))
         checks.append(check_recording_and_recovery(exe, folder))
         checks.append(check_a_song_made_only_on_screen(exe, folder))
 
@@ -1791,6 +1792,151 @@ def check_render_output_is_never_lost(exe, folder):
     return ("Exports keep their names apart, carry a channel's sends, survive a failed write, "
             "keep a finished render whose swap failed without ever removing the file it was "
             "replacing, and render the project as it was while it keeps being edited")
+
+
+def check_render_boundaries(exe, folder):
+    """The edges around rendering: closing the app while one runs, asking for another
+    before the last result was collected, and rendering a sound that was only just
+    changed. Each of these is a moment where a result can end up attached to the wrong
+    request, or a half-finished file can end up where a finished one was."""
+    sub = folder / "render-edges"
+    sub.mkdir()
+    project = sub / "project.json"
+    script = sub / "ui-script.json"
+    stage = {"round": 0}
+    atomic_write(script, [])
+
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+
+    def launch():
+        return subprocess.Popen([str(exe), "--project", str(project), "--headless",
+                                 "--ui-script", str(script)], startupinfo=startup)
+
+    def run(actions, timeout=180):
+        stage["round"] += 1
+        atomic_write(script, [{"comment": stage["round"]}] + list(actions))
+        wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
+                          and read(sub / "ui-script-status.json").get("finished")), timeout=timeout)
+        assert not read(sub / "ui-script-status.json")["error"], read(sub / "ui-script-status.json")
+        return settled(sub)
+
+    def export_and_wait(timeout=600):
+        (sub / "render-status.json").unlink(missing_ok=True)
+        run([{"export": "mix"}])
+        wait_for(lambda: read(sub / "render-status.json").get("running") is False, timeout=timeout)
+        return read(sub / "render-status.json")
+
+    def build_a_long_song():
+        # Long enough that a render takes a while, so there is something to interrupt.
+        # The pattern keeps whatever length it was made with; the placements follow it.
+        # Rendering runs far faster than real time, so length alone will not keep one
+        # going long enough to interrupt. Weight is what does: sixteen channels all
+        # playing at once take long enough that a second and a half in is still the
+        # middle of the render, and the file stays a manageable size.
+        run([{"command": "Add channel"}] * 15, timeout=240)
+        state = settled(sub)
+        for channel in range(len(state["channels"])):
+            run([{"select_channel": channel}] + [{"step": [channel, step]} for step in range(0, 16)])
+
+        def stretch(live):
+            live["patterns"][0]["length"] = 200.0
+
+        apply_change(project, stretch)
+        run([{"select_lane": 0}, {"place": [0, 0.0]}])
+
+    process = launch()
+    try:
+        wait_for(lambda: read(sub / "state.json"), timeout=60)
+        build_a_long_song()
+
+        # A first render, so there is a good file to lose.
+        first = export_and_wait()
+        assert first["files"], first
+        good = hashlib.sha256((sub / "mix.wav").read_bytes()).digest()
+        assert read_wav(sub / "mix.wav")["seconds"] > 30.0, "The song is too short to interrupt"
+        assert first["complete"], first
+
+        # Closing the app during a render. The engine stops the render when the thread
+        # is asked to exit, and reports the part-written file because it exists on disk.
+        # What must not happen is that file taking the finished one's place.
+        # Rendering runs so much faster than real time that no sleep is short enough to
+        # land inside one. The quit is therefore the next action in the same script: it
+        # runs a tick after the export starts, which is reliably the middle of it.
+        (sub / "render-status.json").unlink(missing_ok=True)
+        stage["round"] += 1
+        atomic_write(script, [{"comment": stage["round"]}, {"export": "mix"}, {"command": "Exit"}])
+        assert process.wait(timeout=90) == 0, "The app did not close while a render was running"
+        process = None
+
+        interrupted = read(sub / "render-status.json")
+        assert not interrupted.get("complete"), ("The render finished before the quit reached it; "
+                                                 "this check proved nothing", interrupted)
+
+        assert hashlib.sha256((sub / "mix.wav").read_bytes()).digest() == good, \
+            "Closing during a render replaced the finished file with a part-written one"
+        assert not list(sub.glob("mix-rendering-*.wav")), \
+            "A stopped render left its part-written file behind"
+
+        # The project itself has to come back intact after that.
+        atomic_write(script, [])
+        stage["round"] = 0
+        process = launch()
+        wait_for(lambda: read(sub / "state.json"), timeout=60)
+        reopened = settled(sub)
+        assert not read(sub / "sync-status.json")["error"], read(sub / "sync-status.json")
+        assert len(reopened["channels"]) == 16, reopened["channels"]
+        assert len(reopened["playlist"]["clips"]) == 2, reopened["playlist"]["clips"]
+        assert reopened["patterns"][0]["length"] == 200.0, reopened["patterns"][0]
+
+        # Two exports in a row, the second asked for the moment the first finishes. Each
+        # result has to name the revision its own request was made against.
+        (sub / "render-status.json").unlink(missing_ok=True)
+        before = read(sub / "sync-status.json")["revision"]
+        run([{"export": "mix"}])
+        wait_for(lambda: read(sub / "render-status.json").get("running") is False, timeout=600)
+        one = read(sub / "render-status.json")
+        assert one["files"], one
+        assert one["revision"] == before, (one, before)
+
+        # A second export asked for while the first is still going has to be refused
+        # rather than take the running one's place. The refusal is what keeps the result
+        # attached to the request that asked for it.
+        (sub / "render-status.json").unlink(missing_ok=True)
+        stage["round"] += 1
+        atomic_write(script, [{"comment": stage["round"]}, {"export": "mix"}, {"export": "mix"}])
+        wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
+                          and read(sub / "ui-script-status.json").get("error")), timeout=120)
+        assert "export" in read(sub / "ui-script-status.json")["error"], read(sub / "ui-script-status.json")
+
+        wait_for(lambda: read(sub / "render-status.json").get("running") is False, timeout=600)
+        overlapped = read(sub / "render-status.json")
+        assert overlapped["files"] and overlapped["complete"], \
+            ("The refused second export disturbed the first", overlapped)
+        assert read_wav(sub / "mix.wav")["seconds"] > 30.0, "The overlapped render was cut short"
+
+        atomic_write(script, [])
+        run([{"select_channel": 0}, {"note": [67, 2.0, 2.0, 100]}])
+        after = read(sub / "sync-status.json")["revision"]
+        assert after != before, "The edit between renders did not change the revision"
+        two = export_and_wait()
+        assert two["files"], two
+        assert two["revision"] == after, (two, after)
+        assert hashlib.sha256((sub / "mix.wav").read_bytes()).digest() != good, \
+            "The second render did not replace the first"
+
+        control(project, "quit")
+        assert process.wait(timeout=30) == 0
+        process = None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+    return ("Closing during a render keeps the last finished file and leaves nothing half "
+            "written, a second export while one runs is refused rather than merged, and each "
+            "render reports the revision its own request was made against")
 
 
 def check_recording_and_recovery(exe, folder):

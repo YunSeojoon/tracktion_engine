@@ -14,6 +14,10 @@ setlocal
 set "TARGET=%LOCALAPPDATA%\Programs\CoCompose"
 set "LINK=%APPDATA%\Microsoft\Windows\Start Menu\Programs\CoCompose.lnk"
 set "PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+rem A user name with an apostrophe in it would end a PowerShell single-quoted
+rem string early, so the copies used inside one have their quotes doubled.
+set "TARGET_PS=%TARGET:'=''%"
+set "LINK_PS=%LINK:'=''%"
 
 if not exist "%TARGET%\CoCompose.exe" (
     echo CoCompose is not installed in "%TARGET%".
@@ -41,7 +45,7 @@ if exist "%LINK%" del "%LINK%"
 
 rem Remove everything except this script, then say what is actually left. The exit code
 rem below is the real answer, not an assumption that the removal worked.
-"%PS%" -NoProfile -Command "$target = '%TARGET%'; Get-ChildItem -LiteralPath $target -Force | Where-Object { $_.Name -ne 'Uninstall.cmd' } | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }; $left = @(Get-ChildItem -LiteralPath $target -Force | Where-Object { $_.Name -ne 'Uninstall.cmd' }); if ($left.Count -gt 0) { $left.Name -join ', '; exit 1 }; if (Test-Path -LiteralPath '%LINK%') { 'the Start menu shortcut'; exit 1 }; exit 0"
+"%PS%" -NoProfile -Command "$target = '%TARGET_PS%'; Get-ChildItem -LiteralPath $target -Force | Where-Object { $_.Name -ne 'Uninstall.cmd' } | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }; $left = @(Get-ChildItem -LiteralPath $target -Force | Where-Object { $_.Name -ne 'Uninstall.cmd' }); if ($left.Count -gt 0) { $left.Name -join ', '; exit 1 }; if (Test-Path -LiteralPath '%LINK_PS%') { 'the Start menu shortcut'; exit 1 }; exit 0"
 if errorlevel 1 (
     echo.
     echo Could not remove everything. Files are still in:
@@ -53,7 +57,7 @@ if errorlevel 1 (
 
 rem All that is left is this script and its folder, which cannot be deleted from inside
 rem itself. A detached process does it once this one has exited.
-start /min "" "%PS%" -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 2; Remove-Item -LiteralPath '%TARGET%' -Recurse -Force -ErrorAction SilentlyContinue"
+start /min "" "%PS%" -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 2; Remove-Item -LiteralPath '%TARGET_PS%' -Recurse -Force -ErrorAction SilentlyContinue"
 
 echo Removed. Your projects are still in "%USERPROFILE%\Documents\CoCompose".
 if /I not "%~1"=="/y" pause

@@ -646,6 +646,22 @@ private:
                 && project.model->patternFor (workspace.selection.pattern()).isValid();
     }
 
+    /** Follows the selection and the arrangement. Pattern mode loops the pattern that
+        is selected now, at the length it is now, and an export renders the loop, so a
+        loop left behind by an earlier selection would render the wrong thing. Cheap
+        enough to ask every tick, and it only writes when the answer changed. */
+    void updateTransportModeIfNeeded()
+    {
+        const auto key = workspace.selection.pattern() + "|" + String (project.revision)
+                           + (isSongMode() ? "|song" : "|pattern");
+
+        if (key == lastTransportKey)
+            return;
+
+        lastTransportKey = key;
+        applyTransportMode();
+    }
+
     /** Song mode loops the arrangement; pattern mode loops the selected pattern's first
         placement, which is what makes the two transport modes audibly different. */
     void applyTransportMode()
@@ -666,7 +682,11 @@ private:
                     break;
                 }
 
-        transport.setLoopRange (range);
+        // Moving the loop under a running transport would jump the playhead, so it is
+        // only written when it is actually different.
+        if (transport.getLoopRange() != range)
+            transport.setLoopRange (range);
+
         transport.looping = true;
     }
 
@@ -894,6 +914,7 @@ private:
 
         collectRenderResult();
         continuePluginScan();
+        updateTransportModeIfNeeded();
         project.writeBackupIfDue();
         project.writeStatus();
         commandManager.commandStatusChanged();
@@ -1265,6 +1286,7 @@ private:
     std::unique_ptr<FileChooser> chooser;
     std::unique_ptr<PluginDirectoryScanner> scanner;
     int scanned = 0;
+    String lastTransportKey;
 };
 
 class Application final : public JUCEApplication

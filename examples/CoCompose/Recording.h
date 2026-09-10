@@ -243,7 +243,17 @@ public:
         bool complete = false;
     };
 
-    bool isBusy() const { return isThreadRunning(); }
+    /** Busy until the result has been collected, not just until the thread stops. The
+        rendering Edit is released when the result is taken, so a second export starting
+        in between would replace it while the first result was still unread. */
+    bool isBusy() const
+    {
+        if (isThreadRunning())
+            return true;
+
+        const juce::ScopedLock lock (resultLock);
+        return finished;
+    }
 
     bool startMix (const File& destination, te::TimeRange range, int revision)
     {
@@ -298,6 +308,11 @@ public:
 
         renderRange = range;
         startedAtRevision = revision;
+
+        // A plugin keeps its own settings inside itself and only writes them into the
+        // project now and then. Without this, a sound changed in a plugin's window a
+        // moment ago would not be in the copy, and the render would be of the older one.
+        model.edit.flushState();
 
         // The copy is opened here, on the message thread, because that is where an Edit
         // is built and taken down. The worker only runs the render over it.
@@ -509,6 +524,21 @@ private:
 
         const auto rendered = te::Renderer::renderToFile ("Render", working, source, renderRange, tracks,
                                                           true, true, {}, false);
+
+        // The engine stops a render when the thread running it is asked to exit, and
+        // then reports the part-written file as a result because it exists. Closing the
+        // app mid-render would otherwise put that truncated file where the last good
+        // one was.
+        // The engine stops a render when the thread running it is asked to exit, and
+        // then reports whether the output file exists. A part-written file exists, so
+        // this does not rely on that answer: a render that was cut short is a failure
+        // whatever it left on disk, and nothing it wrote may reach the destination.
+        if (threadShouldExit())
+        {
+            working.deleteFile();
+            problem = "the render was stopped before it finished";
+            return false;
+        }
 
         if (! rendered || ! working.existsAsFile() || working.getSize() == 0)
         {
