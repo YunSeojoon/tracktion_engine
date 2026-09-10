@@ -1,6 +1,8 @@
 name: Coverage
 on:
-  push:
+  # Manual only. Automatic triggers were removed so a push never spends CI
+  # minutes on its own: on a private repository those are billed, and this
+  # fork carries workflows it inherited rather than chose.
   workflow_dispatch:
 
 jobs:

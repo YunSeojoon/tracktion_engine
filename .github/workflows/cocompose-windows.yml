@@ -1,17 +1,10 @@
 name: CoCompose Windows
 on:
+  # Manual only. Automatic triggers were removed so a push never spends CI
+  # minutes on its own: on a private repository those are billed, and this
+  # fork carries workflows it inherited rather than chose.
   workflow_dispatch:
-  push:
-    branches: [ai-editor]
-    paths:
-      - 'examples/**'
-      - 'modules/**'
-      - 'tools/**'
-      - 'tests/**'
-      - 'docs/**'
-      - '.github/workflows/cocompose-windows.yml'
-  pull_request:
-    branches: [ai-editor]
+
 permissions:
   contents: read
 jobs:

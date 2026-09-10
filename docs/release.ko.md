@@ -72,6 +72,10 @@ Get-FileHash CoCompose-0.1.0-windows-x64.zip -Algorithm SHA256
 
 ## 검사를 통과하지 못한 빌드는 나가지 않는다
 
+**CI는 수동으로만 돈다.** push·pull request·schedule 트리거를 전부 뺐고 `workflow_dispatch`만 남겼다. 이 fork는 상위 저장소에서 물려받은 워크플로(`build`, `generate_coverage`, `juce_compat`, `update_docs`)를 함께 들고 있는데, 그것들이 push마다 12개 Debug 매트릭스를 돌린다. public 저장소에서는 무료지만 private 저장소에 같은 코드를 올리면 그대로 과금된다. 검사가 필요한 시점은 사람이 정한다.
+
+돌리는 방법은 GitHub의 Actions 탭에서 워크플로를 고르고 `Run workflow`를 누르거나, `gh workflow run cocompose-windows.yml --ref ai-editor`다.
+
 `.github/workflows/cocompose-windows.yml`이 순서를 강제한다. 빌드 → 패키징 → ZIP 압축 해제 → 압축을 푼 실행 파일로 통합 검사 26개 → 두 번 누른 것처럼 시작되는지 → 설치·업데이트·제거 → 봉인이 잘못된 보고서를 거절하는지 → 봉인 → 그다음에야 ZIP과 `SHA256SUMS.txt`를 올린다. 앞 단계가 하나라도 실패하면 workflow가 실패하고 배포물은 올라가지 않는다.
 
 봉인은 검사 보고서를 그냥 첨부하지 않고 읽는다. 아는 형식인지, 통과라고 적혀 있는지, 검사 수가 최소치 이상인지, 그리고 그 보고서가 검사한 실행 파일이 이 ZIP 안의 실행 파일과 같은지를 확인한다. 마지막 항목이 없으면 아무 빌드의 보고서로 아무 배포물이나 봉인할 수 있다. 실패한 보고서, 다른 빌드의 보고서, JSON이 아닌 파일, 지정한 첨부 문서가 없는 경우는 모두 거절되며 `tools/test_release_seal.ps1`이 그것을 검사한다.
