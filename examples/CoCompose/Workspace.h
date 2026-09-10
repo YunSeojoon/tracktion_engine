@@ -3,6 +3,7 @@
 #include "Model.h"
 #include "PianoRoll.h"
 #include "PlaylistGrid.h"
+#include "Browser.h"
 
 namespace live
 {
@@ -72,114 +73,6 @@ public:
 
 
 //==============================================================================
-class ProjectBrowser final : public Component,
-                             private ListBoxModel
-{
-public:
-    ProjectBrowser (Model& m, Selection& s, te::Engine& e, std::function<void()> onChange)
-        : model (m), selection (s), engine (e), changed (std::move (onChange))
-    {
-        list.setModel (this);
-        list.setRowHeight (19);
-        list.setColour (ListBox::backgroundColourId, Colours::transparentBlack);
-        addAndMakeVisible (list);
-    }
-
-    void resized() override { list.setBounds (getLocalBounds()); }
-
-    void refresh()
-    {
-        Array<Row> rebuilt;
-        rebuilt.add ({ "Project", {}, {}, true });
-        addSection (rebuilt, "Channels", ids::CHANNEL, model.channels(), "channel");
-        addSection (rebuilt, "Patterns", ids::PATTERN, model.patterns(), "pattern");
-        addSection (rebuilt, "Playlist lanes", ids::LANE, model.lanes(), "lane");
-        addSection (rebuilt, "Mixer inserts", ids::INSERT, model.mixer(), "insert");
-
-        rebuilt.add ({ "Scanned plugins", {}, {}, true });
-        auto& known = engine.getPluginManager().knownPluginList;
-        if (known.getNumTypes() == 0)
-            rebuilt.add ({ "  (none scanned yet)", {}, {}, false });
-        else
-            for (const auto& type : known.getTypes())
-                rebuilt.add ({ "  " + type.name, {}, {}, false });
-
-        if (! sameAs (rebuilt))
-        {
-            rows = std::move (rebuilt);
-            list.updateContent();
-        }
-        list.repaint();
-    }
-
-private:
-    struct Row { String label, kind, id; bool header; };
-
-    void addSection (Array<Row>& into, const String& title, const Identifier& type,
-                     ValueTree parent, const String& kind)
-    {
-        into.add ({ "  " + title, {}, {}, true });
-        for (auto child : parent)
-            if (child.hasType (type))
-                into.add ({ "    " + child[ids::name].toString(), kind, Model::uidOf (child), false });
-    }
-
-    bool sameAs (const Array<Row>& other) const
-    {
-        if (other.size() != rows.size())
-            return false;
-        for (int i = 0; i < rows.size(); ++i)
-            if (rows[i].label != other[i].label || rows[i].id != other[i].id)
-                return false;
-        return true;
-    }
-
-    int getNumRows() override { return rows.size(); }
-
-    void paintListBoxItem (int row, Graphics& g, int width, int height, bool) override
-    {
-        if (! isPositiveAndBelow (row, rows.size()))
-            return;
-
-        const auto& item = rows.getReference (row);
-        const auto picked = ! item.id.isEmpty()
-                             && ((item.kind == "channel" && item.id == selection.channel())
-                              || (item.kind == "pattern" && item.id == selection.pattern())
-                              || (item.kind == "lane" && item.id == selection.lane()));
-
-        if (picked)
-        {
-            g.setColour (Colour (0xff2f4f5f));
-            g.fillRect (0, 0, width, height);
-        }
-
-        g.setColour (item.header ? Colour (0xff8698b6) : Colours::white.withAlpha (0.88f));
-        g.setFont (Font (FontOptions (item.header ? 12.0f : 13.0f, item.header ? Font::bold : Font::plain)));
-        g.drawText (item.label, 4, 0, width - 8, height, Justification::centredLeft);
-    }
-
-    void listBoxItemClicked (int row, const MouseEvent&) override
-    {
-        if (! isPositiveAndBelow (row, rows.size()))
-            return;
-
-        const auto& item = rows.getReference (row);
-        if (item.kind == "channel") selection.setChannel (item.id);
-        else if (item.kind == "pattern") selection.setPattern (item.id);
-        else if (item.kind == "lane") selection.setLane (item.id);
-        else return;
-
-        if (changed != nullptr) changed();
-    }
-
-    Model& model;
-    Selection& selection;
-    te::Engine& engine;
-    std::function<void()> changed;
-    ListBox list;
-    Array<Row> rows;
-};
-
 //==============================================================================
 /** The sixteenth-note grid for one channel in the selected pattern. A lit step is a
     note starting inside it; clicking writes or removes that note in the pattern, so
@@ -1115,14 +1008,14 @@ class Workspace final : public Component,
                        public DragAndDropContainer
 {
 public:
-    Workspace (Model& m, te::Engine& engine)
+    explicit Workspace (Model& m)
         : model (m),
           layout (m.edit.state.getOrCreateChildWithName (layoutIds::LAYOUT, nullptr)),
           selection (layout)
     {
         auto onChange = [this] { refresh(); };
 
-        browser = std::make_unique<ProjectBrowser> (model, selection, engine, onChange);
+        browser = std::make_unique<Browser> (model, selection, onChange);
         rack = std::make_unique<ChannelRack> (model, selection, onChange, [this] { openPianoRoll(); });
         mixer = std::make_unique<MixerPanel> (model);
         picker = std::make_unique<PatternPicker> (model, selection, onChange);
@@ -1309,6 +1202,16 @@ public:
                  ? pianoRollWindow->getContentComponent() : nullptr;
     }
 
+    bool addAudioClip (int laneIndex, const String& path, double beat)
+    {
+        return playlist->getGrid().addAudio (laneIndex, path, beat);
+    }
+
+    bool shapeAudioClip (const Identifier& property, double value)
+    {
+        return playlist->getGrid().shapeSelection (property, value);
+    }
+
     bool addPianoRollNote (int pitch, double startBeat, double lengthBeats, int velocity)
     {
         if (pianoRollWindow == nullptr || ! pianoRollWindow->isVisible())
@@ -1444,7 +1347,7 @@ private:
 
     double desired[4] = { 190.0, 460.0, 290.0, 170.0 };
 
-    std::unique_ptr<ProjectBrowser> browser;
+    std::unique_ptr<Browser> browser;
     std::unique_ptr<ChannelRack> rack;
     std::unique_ptr<MixerPanel> mixer;
     std::unique_ptr<PatternPicker> picker;

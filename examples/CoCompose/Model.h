@@ -22,17 +22,18 @@ namespace ids
     const Identifier COCOMPOSE ("COCOMPOSE"), CHANNELS ("CHANNELS"), CHANNEL ("CHANNEL"),
         PATTERNS ("PATTERNS"), PATTERN ("PATTERN"), SEQUENCE ("SEQUENCE"), NOTE ("NOTE"),
         PLAYLIST ("PLAYLIST"), LANES ("LANES"), LANE ("LANE"), CLIPS ("CLIPS"), INSTANCE ("INSTANCE"),
-        MIXER ("MIXER"), INSERT ("INSERT");
+        MIXER ("MIXER"), INSERT ("INSERT"), AUDIO ("AUDIO");
 
     const Identifier uid ("id"), name ("name"), schema ("schema"), channel ("channel"),
         pattern ("pattern"), lane ("lane"), start ("start"), length ("length"), pitch ("pitch"),
         velocity ("velocity"), gainDb ("gainDb"), pan ("pan"), mute ("mute"), solo ("solo"),
         insert ("insert"), index ("index"),
         instrument ("instrument"), sample ("sample"), stepPitch ("stepPitch"), stepLength ("stepLength"),
-        offset ("offset");
+        offset ("offset"), file ("file"), fadeIn ("fadeIn"), fadeOut ("fadeOut"), speed ("speed");
 
     // Written onto engine clips so a derived clip can be matched back to the model.
-    const Identifier clipInstance ("coComposeInstance"), clipChannel ("coComposeChannel");
+    const Identifier clipInstance ("coComposeInstance"), clipChannel ("coComposeChannel"),
+        clipAudio ("coComposeAudio");
 }
 
 constexpr int modelSchema = 2;
@@ -127,6 +128,61 @@ public:
     ValueTree laneFor     (const String& key) const { return withID (lanes(), ids::LANE, key); }
     ValueTree instanceFor (const String& key) const { return withID (instances(), ids::INSTANCE, key); }
     ValueTree insertFor   (const String& key) const { return withID (mixer(), ids::INSERT, key); }
+    ValueTree audioClipFor (const String& key) const { return withID (instances(), ids::AUDIO, key); }
+
+    /** A placement of either kind: a pattern instance or an audio clip. */
+    ValueTree placementFor (const String& key) const
+    {
+        for (auto child : instances())
+            if (uidOf (child) == key)
+                return child;
+        return {};
+    }
+
+    /** Audio lives on the playlist lane, not on an instrument channel, so a lane that
+        holds audio owns an engine track of its own. */
+    static String laneTrackID (const String& laneID) { return "lane:" + laneID; }
+
+    bool laneHasAudio (const String& laneID) const
+    {
+        for (auto clip : instances())
+            if (clip.hasType (ids::AUDIO) && clip[ids::lane].toString() == laneID)
+                return true;
+        return false;
+    }
+
+    ValueTree addAudioClip (const String& laneID, const File& source, double startBeat,
+                            double lengthBeats, UndoManager* undo)
+    {
+        require (laneFor (laneID).isValid(), "Unknown playlist lane: " + laneID);
+
+        ValueTree clip (ids::AUDIO);
+        clip.setProperty (ids::uid, Uuid().toString(), nullptr);
+        clip.setProperty (ids::name, source.getFileNameWithoutExtension(), nullptr);
+        clip.setProperty (ids::lane, laneID, nullptr);
+        clip.setProperty (ids::file, source.getFullPathName(), nullptr);
+        clip.setProperty (ids::start, startBeat, nullptr);
+        clip.setProperty (ids::length, std::max (0.01, lengthBeats), nullptr);
+        clip.setProperty (ids::offset, 0.0, nullptr);
+        clip.setProperty (ids::gainDb, 0.0, nullptr);
+        clip.setProperty (ids::fadeIn, 0.0, nullptr);
+        clip.setProperty (ids::fadeOut, 0.0, nullptr);
+        clip.setProperty (ids::speed, 1.0, nullptr);
+        instances().appendChild (clip, undo);
+        return clip;
+    }
+
+    /** How long a file is, in beats at the current tempo. */
+    double fileLengthInBeats (const File& source) const
+    {
+        te::AudioFile audio (edit.engine, source);
+        const auto seconds = audio.getLength();
+        if (seconds <= 0.0)
+            return 4.0;
+
+        auto& tempo = edit.tempoSequence;
+        return tempo.toBeats (te::TimePosition::fromSeconds (seconds)).inBeats();
+    }
 
     static ValueTree findSequence (ValueTree pattern, const String& channelID)
     {
@@ -460,6 +516,26 @@ private:
         for (auto channel : channels())
             wanted.insert (uidOf (channel));
 
+        for (auto lane : lanes())
+            if (laneHasAudio (uidOf (lane)))
+            {
+                const auto trackID = laneTrackID (uidOf (lane));
+                wanted.insert (trackID);
+
+                auto* track = trackFor (trackID);
+                if (track == nullptr)
+                {
+                    const auto count = te::getAudioTracks (edit).size();
+                    edit.ensureNumberOfAudioTracks (count + 1);
+                    track = te::getAudioTracks (edit)[count];
+                    require (track != nullptr, "Cannot create lane track");
+                    track->state.setProperty ("coComposeId", trackID, nullptr);
+                }
+
+                track->setName (lane[ids::name].toString());
+                track->setMute (static_cast<bool> (lane[ids::mute]));
+            }
+
         for (auto* track : te::getAudioTracks (edit))
             if (wanted.find (stableID (track->state)) == wanted.end())
                 edit.deleteTrack (track);
@@ -509,10 +585,16 @@ private:
             }
         }
 
+        std::set<String> wantedAudio;
+        for (auto clip : instances())
+            if (clip.hasType (ids::AUDIO) && syncAudioClip (clip))
+                wantedAudio.insert (uidOf (clip));
+
         for (auto* track : te::getAudioTracks (edit))
         {
             const auto existingClips = track->getClips();
             for (auto* existing : existingClips)
+            {
                 if (existing->state.hasProperty (ids::clipInstance))
                 {
                     const auto key = existing->state[ids::clipInstance].toString() + "/"
@@ -520,6 +602,12 @@ private:
                     if (wanted.find (key) == wanted.end())
                         existing->removeFromParent();
                 }
+                else if (existing->state.hasProperty (ids::clipAudio))
+                {
+                    if (wantedAudio.find (existing->state[ids::clipAudio].toString()) == wantedAudio.end())
+                        existing->removeFromParent();
+                }
+            }
         }
     }
 
@@ -609,6 +697,48 @@ private:
         for (auto* existing : existingNotes)
             if (keep.find (existing->state["coComposeId"].toString()) == keep.end())
                 notes.removeNote (*existing, nullptr);
+    }
+
+    /** One wave clip per audio placement, on its lane's own track. */
+    bool syncAudioClip (ValueTree clip)
+    {
+        auto* track = trackFor (laneTrackID (clip[ids::lane].toString()));
+        const File source (clip[ids::file].toString());
+        if (track == nullptr || ! source.existsAsFile()
+             || edit.engine.getAudioFileFormatManager().readFormatManager
+                    .findFormatForFileExtension (source.getFileExtension()) == nullptr)
+            return false;
+
+        const auto clipID = uidOf (clip);
+        const auto startBeat = static_cast<double> (clip[ids::start]);
+        const auto lengthBeats = std::max (0.01, static_cast<double> (clip[ids::length]));
+        const auto range = te::TimeRange (atBeat (startBeat), atBeat (startBeat + lengthBeats));
+        const auto offsetSeconds = te::TimeDuration::fromSeconds (
+            (atBeat (static_cast<double> (clip.getProperty (ids::offset, 0.0))) - atBeat (0.0)).inSeconds());
+
+        te::WaveAudioClip* wave = nullptr;
+        for (auto* existing : track->getClips())
+            if (existing->state[ids::clipAudio].toString() == clipID)
+                wave = dynamic_cast<te::WaveAudioClip*> (existing);
+
+        if (wave == nullptr)
+        {
+            wave = track->insertWaveClip (clip[ids::name].toString(), source,
+                                          { range, offsetSeconds }, false).get();
+            if (wave == nullptr)
+                return false;
+            wave->state.setProperty (ids::clipAudio, clipID, nullptr);
+        }
+
+        if (wave->getPosition().time != range || wave->getPosition().offset != offsetSeconds)
+            wave->setPosition ({ range, offsetSeconds });
+
+        wave->setName (clip[ids::name].toString());
+        wave->setGainDB (static_cast<float> (clip.getProperty (ids::gainDb, 0.0)));
+        wave->setSpeedRatio (jlimit (0.1, 10.0, static_cast<double> (clip.getProperty (ids::speed, 1.0))));
+        wave->setFadeIn (te::TimeDuration::fromSeconds (static_cast<double> (clip.getProperty (ids::fadeIn, 0.0))));
+        wave->setFadeOut (te::TimeDuration::fromSeconds (static_cast<double> (clip.getProperty (ids::fadeOut, 0.0))));
+        return true;
     }
 
     /** Converts a session written by the pre-pattern build: every track becomes a channel

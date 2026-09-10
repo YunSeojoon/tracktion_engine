@@ -12,11 +12,13 @@ namespace live
 */
 class PlaylistGrid final : public Component,
                            public DragAndDropTarget,
+                           public FileDragAndDropTarget,
                            private Timer
 {
 public:
     PlaylistGrid (Model& m, Selection& s, std::function<void()> onChange)
-        : model (m), selection (s), changed (std::move (onChange))
+        : model (m), selection (s), changed (std::move (onChange)),
+          thumbnailCache (64)
     {
         setWantsKeyboardFocus (true);
         startTimerHz (20);
@@ -132,7 +134,8 @@ public:
             selected.add (clipID);
         }
 
-        selection.setPattern (hit[ids::pattern].toString());
+        if (! isAudio (hit))
+            selection.setPattern (hit[ids::pattern].toString());
         selection.setLane (hit[ids::lane].toString());
 
         const auto area = clipArea (hit);
@@ -175,7 +178,7 @@ public:
 
         for (const auto& start : starts)
         {
-            auto instance = model.instanceFor (start.id);
+            auto instance = model.placementFor (start.id);
             if (! instance.isValid())
                 continue;
 
@@ -234,7 +237,10 @@ public:
     //==========================================================================
     bool isInterestedInDragSource (const SourceDetails& details) override
     {
-        return model.patternFor (details.description.toString()).isValid();
+        const auto description = details.description.toString();
+        return description.startsWith ("sample:")
+                ? isAudioFile (File (description.fromFirstOccurrenceOf ("sample:", false, false)))
+                : model.patternFor (description).isValid();
     }
 
     void itemDragEnter (const SourceDetails& details) override { itemDragMove (details); }
@@ -249,10 +255,19 @@ public:
 
     void itemDropped (const SourceDetails& details) override
     {
-        const auto patternID = details.description.toString();
+        const auto description = details.description.toString();
         auto lane = model.lanes().getChild (laneIndexAt (details.localPosition.y));
         dropPreview = {};
 
+        if (description.startsWith ("sample:"))
+        {
+            addAudio (laneIndexAt (details.localPosition.y),
+                      description.fromFirstOccurrenceOf ("sample:", false, false),
+                      std::max (0.0, snapped (beatAt (details.localPosition.x))));
+            return;
+        }
+
+        const auto patternID = description;
         if (! lane.isValid() || ! model.patternFor (patternID).isValid())
             return;
 
@@ -268,6 +283,98 @@ public:
     }
 
     //==========================================================================
+    bool isInterestedInFileDrag (const StringArray& files) override
+    {
+        for (const auto& path : files)
+            if (isAudioFile (File (path)))
+                return true;
+        return false;
+    }
+
+    void fileDragMove (const StringArray&, int x, int y) override
+    {
+        dropPreview = { snapped (beatAt (x)), laneIndexAt (y) };
+        repaint();
+    }
+
+    void fileDragExit (const StringArray&) override { dropPreview = {}; repaint(); }
+
+    void filesDropped (const StringArray& files, int x, int y) override
+    {
+        dropPreview = {};
+        auto lane = model.lanes().getChild (laneIndexAt (y));
+        if (! lane.isValid())
+            return;
+
+        auto beat = std::max (0.0, snapped (beatAt (x)));
+        undo().beginNewTransaction ("Drop audio");
+        selected.clearQuick();
+
+        for (const auto& path : files)
+        {
+            const File source (path);
+            if (! isAudioFile (source))
+                continue;
+
+            const auto length = model.fileLengthInBeats (source);
+            auto clip = model.addAudioClip (Model::uidOf (lane), source, beat, length, &undo());
+            selected.add (Model::uidOf (clip));
+            beat += length;
+        }
+
+        model.renderIfNeeded();
+        selection.setLane (Model::uidOf (lane));
+        notify();
+    }
+
+    bool isAudioFile (const File& source) const
+    {
+        return source.existsAsFile()
+                && model.edit.engine.getAudioFileFormatManager().readFormatManager
+                        .findFormatForFileExtension (source.getFileExtension()) != nullptr;
+    }
+
+    /** Places an audio file the way a drop does, for the diagnostic UI script. */
+    bool addAudio (int laneIndex, const String& path, double beat)
+    {
+        auto lane = model.lanes().getChild (laneIndex);
+        const File source (path);
+        if (! lane.isValid() || ! isAudioFile (source))
+            return false;
+
+        undo().beginNewTransaction ("Add audio");
+        auto clip = model.addAudioClip (Model::uidOf (lane), source, std::max (0.0, beat),
+                                        model.fileLengthInBeats (source), &undo());
+        model.renderIfNeeded();
+        selected.clearQuick();
+        selected.add (Model::uidOf (clip));
+        selection.setLane (Model::uidOf (lane));
+        notify();
+        return true;
+    }
+
+    /** Trim, gain, fades and speed for the selected audio clips. */
+    bool shapeSelection (const Identifier& property, double value)
+    {
+        bool any = false;
+        undo().beginNewTransaction ("Shape audio clip");
+
+        for (const auto& clipID : selected)
+            if (auto clip = model.audioClipFor (clipID); clip.isValid())
+            {
+                clip.setProperty (property, value, &undo());
+                any = true;
+            }
+
+        if (any)
+        {
+            model.renderIfNeeded();
+            notify();
+        }
+        return any;
+    }
+
+    //==========================================================================
     // The same operations the toolbar buttons and the UI script use.
     bool deleteSelection()
     {
@@ -276,7 +383,7 @@ public:
 
         undo().beginNewTransaction ("Delete clips");
         for (const auto& clipID : selected)
-            if (auto instance = model.instanceFor (clipID); instance.isValid())
+            if (auto instance = model.placementFor (clipID); instance.isValid())
                 model.instances().removeChild (instance, &undo());
         selected.clear();
         model.renderIfNeeded();
@@ -291,7 +398,7 @@ public:
 
         double span = 0.0, first = std::numeric_limits<double>::max();
         for (const auto& clipID : selected)
-            if (auto instance = model.instanceFor (clipID); instance.isValid())
+            if (auto instance = model.placementFor (clipID); instance.isValid())
             {
                 const auto start = static_cast<double> (instance[ids::start]);
                 first = std::min (first, start);
@@ -303,7 +410,7 @@ public:
 
         undo().beginNewTransaction ("Duplicate clips");
         for (const auto& clipID : selected)
-            if (auto instance = model.instanceFor (clipID); instance.isValid())
+            if (auto instance = model.placementFor (clipID); instance.isValid())
                 copies.add (Model::uidOf (copyOf (instance, static_cast<double> (instance[ids::start]) + shift)));
 
         selected = copies;
@@ -319,7 +426,7 @@ public:
 
         undo().beginNewTransaction ("Make clips unique");
         for (const auto& clipID : selected)
-            if (auto instance = model.instanceFor (clipID); instance.isValid())
+            if (auto instance = model.placementFor (clipID); instance.isValid() && ! isAudio (instance))
                 selection.setPattern (Model::uidOf (model.makeUnique (instance, &undo())));
 
         model.renderIfNeeded();
@@ -359,7 +466,7 @@ public:
     {
         bool any = false;
         for (const auto& clipID : StringArray (selected))
-            any = split (model.instanceFor (clipID), beat) || any;
+            any = split (model.placementFor (clipID), beat) || any;
         return any;
     }
 
@@ -396,7 +503,8 @@ public:
 
         selected.clearQuick();
         selected.add (Model::uidOf (hit));
-        selection.setPattern (hit[ids::pattern].toString());
+        if (! isAudio (hit))
+            selection.setPattern (hit[ids::pattern].toString());
         selection.setLane (hit[ids::lane].toString());
         notify();
         return true;
@@ -409,7 +517,7 @@ public:
 
         undo().beginNewTransaction ("Move clips");
         for (const auto& clipID : selected)
-            if (auto instance = model.instanceFor (clipID); instance.isValid())
+            if (auto instance = model.placementFor (clipID); instance.isValid())
             {
                 instance.setProperty (ids::start,
                                       std::max (0.0, static_cast<double> (instance[ids::start]) + beatDelta), &undo());
@@ -466,6 +574,9 @@ private:
         return {};
     }
 
+    static bool isAudio (ValueTree clip) { return clip.hasType (ids::AUDIO); }
+
+    /** Copies a placement of either kind, keeping its type. */
     ValueTree copyOf (ValueTree instance, double startBeat)
     {
         auto copy = instance.createCopy();
@@ -480,7 +591,7 @@ private:
         StringArray copies;
         undo().beginNewTransaction ("Copy clips");
         for (const auto& clipID : selected)
-            if (auto instance = model.instanceFor (clipID); instance.isValid())
+            if (auto instance = model.placementFor (clipID); instance.isValid())
                 copies.add (Model::uidOf (copyOf (instance, static_cast<double> (instance[ids::start]))));
         selected = copies;
     }
@@ -489,7 +600,7 @@ private:
     {
         starts.clearQuick();
         for (const auto& clipID : selected)
-            if (auto instance = model.instanceFor (clipID); instance.isValid())
+            if (auto instance = model.placementFor (clipID); instance.isValid())
                 starts.add ({ clipID, static_cast<double> (instance[ids::start]),
                               static_cast<double> (instance[ids::length]), laneIndexOf (instance) });
     }
@@ -542,6 +653,12 @@ private:
     {
         for (auto instance : model.instances())
         {
+            if (isAudio (instance))
+            {
+                paintAudioClip (g, instance);
+                continue;
+            }
+
             auto pattern = model.patternFor (instance[ids::pattern].toString());
             const auto area = clipArea (instance);
             const auto picked = selected.contains (Model::uidOf (instance));
@@ -575,6 +692,83 @@ private:
             g.setColour (Colour (0x80ffd479));
             g.fillRect (x, rulerHeight + dropPreview.lane * laneHeight + 2, 4, laneHeight - 4);
         }
+    }
+
+    /** An audio clip shows its waveform, its fades and whether the file is still there. */
+    void paintAudioClip (Graphics& g, ValueTree clip)
+    {
+        const auto area = clipArea (clip);
+        const auto picked = selected.contains (Model::uidOf (clip));
+        const File source (clip[ids::file].toString());
+        const auto missing = ! source.existsAsFile();
+
+        g.setColour (missing ? Colour (0xff7a4a4a) : Colour (0xff3f6f8c));
+        g.fillRoundedRectangle (area.toFloat(), 3.0f);
+
+        if (! missing)
+        {
+            auto* thumbnail = thumbnailFor (source);
+            if (thumbnail != nullptr && thumbnail->getTotalLength() > 0.0)
+            {
+                const auto offset = static_cast<double> (clip.getProperty (ids::offset, 0.0));
+                auto& tempo = model.edit.tempoSequence;
+                const auto from = tempo.toTime (te::BeatPosition::fromBeats (offset)).inSeconds();
+                const auto span = tempo.toTime (te::BeatPosition::fromBeats (
+                                      offset + static_cast<double> (clip[ids::length]))).inSeconds() - from;
+
+                g.setColour (Colours::white.withAlpha (0.5f));
+                thumbnail->drawChannels (g, area.reduced (2, 3), from, from + std::max (0.01, span), 1.0f);
+            }
+        }
+
+        // Fades are drawn as the wedges they apply to the sound.
+        auto& tempo = model.edit.tempoSequence;
+        const auto secondsPerBeat = tempo.toTime (te::BeatPosition::fromBeats (1.0)).inSeconds();
+        const auto fadeIn = static_cast<double> (clip.getProperty (ids::fadeIn, 0.0)) / std::max (0.001, secondsPerBeat);
+        const auto fadeOut = static_cast<double> (clip.getProperty (ids::fadeOut, 0.0)) / std::max (0.001, secondsPerBeat);
+
+        g.setColour (Colours::black.withAlpha (0.45f));
+        if (fadeIn > 0.0)
+        {
+            Path wedge;
+            wedge.addTriangle ((float) area.getX(), (float) area.getY(),
+                               (float) area.getX() + (float) (fadeIn * beatWidth()), (float) area.getY(),
+                               (float) area.getX(), (float) area.getBottom());
+            g.fillPath (wedge);
+        }
+        if (fadeOut > 0.0)
+        {
+            Path wedge;
+            wedge.addTriangle ((float) area.getRight(), (float) area.getY(),
+                               (float) area.getRight() - (float) (fadeOut * beatWidth()), (float) area.getY(),
+                               (float) area.getRight(), (float) area.getBottom());
+            g.fillPath (wedge);
+        }
+
+        g.setColour (picked ? Colours::white : Colour (0xff0e131b));
+        g.drawRoundedRectangle (area.toFloat(), 3.0f, picked ? 1.6f : 1.0f);
+
+        if (area.getWidth() > 34)
+        {
+            g.setColour (missing ? Colours::white : Colours::black.withAlpha (0.75f));
+            g.setFont (Font (FontOptions (11.0f)));
+            g.drawText (missing ? "missing: " + source.getFileName() : clip[ids::name].toString(),
+                        area.reduced (5, 0), Justification::centredLeft, false);
+        }
+    }
+
+    AudioThumbnail* thumbnailFor (const File& source)
+    {
+        const auto key = source.getFullPathName();
+        if (auto* existing = thumbnails[key].get())
+            return existing;
+
+        auto thumbnail = std::make_unique<AudioThumbnail> (
+            512, model.edit.engine.getAudioFileFormatManager().readFormatManager, thumbnailCache);
+        thumbnail->setSource (new FileInputSource (source));
+        auto* result = thumbnail.get();
+        thumbnails[key] = std::move (thumbnail);
+        return result;
     }
 
     void paintRuler (Graphics& g, double beats)
@@ -655,6 +849,8 @@ private:
     Point<int> dragAnchor, rubberStart;
     Rectangle<int> rubberBand;
     DropPreview dropPreview;
+    AudioThumbnailCache thumbnailCache;
+    std::map<String, std::unique_ptr<AudioThumbnail>> thumbnails;
     double zoom = 9.0, snap = 1.0, loopAnchor = 0.0;
     int lastPlayheadX = 0;
 };

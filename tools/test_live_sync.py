@@ -8,7 +8,9 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
+import struct
 import uuid
+import wave
 from xml.etree import ElementTree
 
 from cocompose import atomic_write, control, current, read, submit, wait_for
@@ -168,7 +170,7 @@ def run(exe, folder):
         data["channels"].insert(0, {"id": "second", "name": "New channel", "gain_db": -18, "pan": 0.0,
                                     "mute": False, "solo": False, "insert": 2, "parameters": []})
         result = submit(project, data)
-        assert [c["id"] for c in result["channels"]] == ["second", channel_id]
+        assert [c["id"] for c in result["channels"]] == ["second", channel_id], [c["id"] for c in result["channels"]]
         assert [t["channel"] for t in result["engine"]["tracks"]] == ["second", channel_id], \
             "Channel order did not reach the engine tracks"
         data = live_state()
@@ -263,6 +265,7 @@ def run(exe, folder):
         checks.append(check_workspace_layout(launch, folder))
         checks.append(check_pattern_built_in_the_ui(exe, folder))
         checks.append(check_arrangement_built_in_the_ui(exe, folder))
+        checks.append(check_audio_clips_and_assets(exe, folder))
 
         report = {"passed": checks, "folder": str(folder), "executable": str(exe)}
         atomic_write(folder / "test-report.json", report)
@@ -584,6 +587,142 @@ def check_arrangement_built_in_the_ui(exe, folder):
             process.wait(timeout=10)
 
     return "A thirty-two bar arrangement placed, moved, split and undone in the playlist grid"
+
+
+def write_wav(path, seconds=2.0, frequency=220.0, rate=44100):
+    """A short tone, so a check does not need a sample library."""
+    frames = int(seconds * rate)
+    with wave.open(str(path), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(rate)
+        stream.writeframes(b"".join(
+            struct.pack("<h", int(20000 * math.sin(2 * math.pi * frequency * i / rate)))
+            for i in range(frames)))
+    return path
+
+
+def audio_in_engine(state, clip_id):
+    for track in state["engine"]["tracks"]:
+        for clip in track.get("audio", []):
+            if clip["clip"] == clip_id:
+                return clip
+    return None
+
+
+def check_audio_clips_and_assets(exe, folder):
+    """Drops a WAV onto a lane, shapes it, collects the project's samples, and reopens
+    the folder somewhere else to confirm it still plays."""
+    sub = folder / "audio"
+    sub.mkdir()
+    project = sub / "project.json"
+    script = sub / "ui-script.json"
+    outside = folder / "outside-samples"
+    outside.mkdir()
+    sample = write_wav(outside / "tone.wav")
+    stage = {"round": 0}
+
+    def run(actions):
+        stage["round"] += 1
+        atomic_write(script, actions)
+        wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
+                          and read(sub / "ui-script-status.json").get("finished")), timeout=90)
+        status = read(sub / "ui-script-status.json")
+        assert not status["error"], status
+        return read(sub / "state.json")
+
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+    process = subprocess.Popen([str(exe), "--project", str(project), "--headless", "--play",
+                                "--screenshots", "--ui-script", str(script)], startupinfo=startup)
+    try:
+        wait_for(lambda: read(sub / "sync-status.json").get("playing"), timeout=40)
+
+        state = run([{"select_lane": 0}, {"audio": [0, str(sample), 8.0]}])
+        assert len(state["playlist"]["audio"]) == 1, state["playlist"]["audio"]
+        clip = state["playlist"]["audio"][0]
+        assert clip["file"] == str(sample), clip
+        assert not clip["missing"]
+        assert abs(clip["start"] - 8.0) < 1e-6, clip
+        played = audio_in_engine(state, clip["id"])
+        assert played is not None, "The dropped WAV never reached the engine"
+        assert abs(played["start"] - 8.0) < 1e-6, played
+
+        # Trim it, move its start into the file, set gain, fades and speed.
+        state = run([{"shape": ["length", 2.0]}, {"shape": ["offset", 1.0]}, {"shape": ["gain", -4.5]},
+                     {"shape": ["fade_in", 0.25]}, {"shape": ["fade_out", 0.5]}, {"shape": ["speed", 1.5]}])
+        clip = state["playlist"]["audio"][0]
+        assert abs(clip["length"] - 2.0) < 1e-6 and abs(clip["offset"] - 1.0) < 1e-6, clip
+        played = audio_in_engine(state, clip["id"])
+        assert abs(played["length"] - 2.0) < 1e-6, played
+        assert abs(played["gain_db"] + 4.5) < 0.01, played
+        assert abs(played["fade_in"] - 0.25) < 0.01 and abs(played["fade_out"] - 0.5) < 0.01, played
+        assert abs(played["speed"] - 1.5) < 0.01, played
+        assert played["offset_seconds"] > 0.4, played
+
+        # A file that is not audio is refused before anything changes.
+        junk = outside / "notes.txt"
+        junk.write_text("this is not a wave file", encoding="utf-8")
+        before = read(sub / "state.json")
+        bad = read(sub / "state.json")
+        bad["playlist"]["audio"][0]["file"] = str(junk)
+        atomic_write(project, bad)
+        wait_for(lambda: "Not an audio file" in read(sub / "sync-status.json").get("error", ""))
+        assert read(sub / "state.json") == before, "A refused file changed the project"
+        assert audio_in_engine(read(sub / "state.json"), clip["id"]) is not None, "The good clip stopped playing"
+
+        # A file that is gone is reported, not silently dropped.
+        moved = outside / "tone-moved.wav"
+        sample.rename(moved)
+        wait_for(lambda: read(sub / "state.json")["playlist"]["audio"][0]["missing"], timeout=20)
+        moved.rename(sample)
+        wait_for(lambda: not read(sub / "state.json")["playlist"]["audio"][0]["missing"], timeout=20)
+
+        # Collecting copies it into the project folder and repoints the clip.
+        state = run([{"command": "Collect samples"}])
+        collected = state["playlist"]["audio"][0]
+        assert Path(collected["file"]).parent == sub / "samples", collected
+        assert Path(collected["file"]).exists()
+        assert audio_in_engine(state, collected["id"]) is not None, "The collected sample stopped playing"
+
+        control(project, "quit")
+        assert process.wait(timeout=20) == 0
+        process = None
+
+        # The folder is self-contained: move it and it still plays.
+        elsewhere = folder / "moved-project"
+        shutil.copytree(sub, elsewhere)
+        shutil.rmtree(outside)
+        for stale in ("state.json", "sync-status.json", "ui-script.json", "ui-script-status.json"):
+            (elsewhere / stale).unlink(missing_ok=True)
+
+        # A copied folder keeps absolute paths, so point the clip at its own copy first.
+        moved_project = elsewhere / "project.json"
+        document = json.loads(moved_project.read_text(encoding="utf-8-sig"))
+        for entry in document["playlist"]["audio"]:
+            entry["file"] = str(elsewhere / "samples" / Path(entry["file"]).name)
+        moved_project.write_text(json.dumps(document), encoding="utf-8")
+
+        process = subprocess.Popen([str(exe), "--project", str(moved_project), "--headless"],
+                                   startupinfo=startup)
+        wait_for(lambda: read(elsewhere / "state.json"), timeout=40)
+        time.sleep(0.7)
+        reopened = read(elsewhere / "state.json")
+        assert not read(elsewhere / "sync-status.json")["error"], read(elsewhere / "sync-status.json")
+        assert len(reopened["playlist"]["audio"]) == 1, reopened["playlist"]["audio"]
+        restored = reopened["playlist"]["audio"][0]
+        assert not restored["missing"], restored
+        assert audio_in_engine(reopened, restored["id"]) is not None, "The moved project lost its audio"
+        control(moved_project, "quit")
+        assert process.wait(timeout=20) == 0
+        process = None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+    return "A dropped WAV plays, trims, fades and stretches, and survives collecting and moving the folder"
 
 
 if __name__ == "__main__":

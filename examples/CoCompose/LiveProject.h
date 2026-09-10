@@ -205,16 +205,37 @@ public:
                 { "length", static_cast<double> (pattern[ids::length]) }, { "sequences", sequences } }));
         }
 
-        Array<var> lanes, clips;
+        Array<var> lanes, clips, audio;
         for (auto lane : model->lanes())
             lanes.add (object ({ { "id", Model::uidOf (lane) }, { "name", lane[ids::name].toString() },
                 { "mute", static_cast<bool> (lane[ids::mute]) } }));
+
         for (auto instance : model->instances())
+        {
+            if (instance.hasType (ids::AUDIO))
+            {
+                const File audioFile (instance[ids::file].toString());
+                audio.add (object ({ { "id", Model::uidOf (instance) },
+                    { "name", instance[ids::name].toString() },
+                    { "lane", instance[ids::lane].toString() },
+                    { "file", audioFile.getFullPathName() },
+                    { "missing", ! audioFile.existsAsFile() },
+                    { "start", static_cast<double> (instance[ids::start]) },
+                    { "length", static_cast<double> (instance[ids::length]) },
+                    { "offset", static_cast<double> (instance.getProperty (ids::offset, 0.0)) },
+                    { "gain_db", static_cast<double> (instance.getProperty (ids::gainDb, 0.0)) },
+                    { "fade_in", static_cast<double> (instance.getProperty (ids::fadeIn, 0.0)) },
+                    { "fade_out", static_cast<double> (instance.getProperty (ids::fadeOut, 0.0)) },
+                    { "speed", static_cast<double> (instance.getProperty (ids::speed, 1.0)) } }));
+                continue;
+            }
+
             clips.add (object ({ { "id", Model::uidOf (instance) },
                 { "lane", instance[ids::lane].toString() }, { "pattern", instance[ids::pattern].toString() },
                 { "start", static_cast<double> (instance[ids::start]) },
                 { "length", static_cast<double> (instance[ids::length]) },
                 { "offset", static_cast<double> (instance.getProperty (ids::offset, 0.0)) } }));
+        }
 
         Array<var> inserts;
         for (auto insert : model->mixer())
@@ -226,7 +247,7 @@ public:
 
         return object ({ { "schema", modelSchema }, { "bpm", edit->tempoSequence.getTempo (0)->getBpm() },
                          { "channels", channels }, { "patterns", patterns },
-                         { "playlist", object ({ { "lanes", lanes }, { "clips", clips } }) },
+                         { "playlist", object ({ { "lanes", lanes }, { "clips", clips }, { "audio", audio } }) },
                          { "mixer", object ({ { "inserts", inserts } }) },
                          { "engine", engineReadback() } });
     }
@@ -239,9 +260,25 @@ public:
         Array<var> tracks;
         for (auto* track : te::getAudioTracks (*edit))
         {
-            Array<var> clips;
+            Array<var> clips, waves;
             for (auto* base : track->getClips())
             {
+                if (auto* wave = dynamic_cast<te::WaveAudioClip*> (base))
+                {
+                    const auto waveRange = wave->getPosition().time;
+                    waves.add (object ({ { "clip", wave->state[ids::clipAudio].toString() },
+                        { "file", wave->getSourceFileReference().getFile().getFullPathName() },
+                        { "start", edit->tempoSequence.toBeats (waveRange.getStart()).inBeats() },
+                        { "length", edit->tempoSequence.toBeats (waveRange.getEnd()).inBeats()
+                                      - edit->tempoSequence.toBeats (waveRange.getStart()).inBeats() },
+                        { "offset_seconds", wave->getPosition().offset.inSeconds() },
+                        { "gain_db", wave->getGainDB() },
+                        { "fade_in", wave->getFadeIn().inSeconds() },
+                        { "fade_out", wave->getFadeOut().inSeconds() },
+                        { "speed", wave->getSpeedRatio() } }));
+                    continue;
+                }
+
                 auto* clip = dynamic_cast<te::MidiClip*> (base);
                 if (clip == nullptr)
                     continue;
@@ -260,7 +297,7 @@ public:
                     { "notes", notes } }));
             }
             tracks.add (object ({ { "channel", stableID (track->state) }, { "name", track->getName() },
-                                  { "clips", clips } }));
+                                  { "clips", clips }, { "audio", waves } }));
         }
         return object ({ { "tracks", tracks } });
     }
@@ -328,6 +365,51 @@ public:
     {
         edit->getUndoManager().undo();
         poll();
+    }
+
+    /** Copies every sample an audio clip uses into the project folder and points the
+        clips at the copies, so the folder can be moved or handed on whole. */
+    String collectSamples()
+    {
+        auto folder = source.getParentDirectory().getChildFile ("samples");
+        require (folder.createDirectory().wasOk(), "Cannot create the samples folder");
+
+        auto& undo = edit->getUndoManager();
+        undo.beginNewTransaction ("Collect samples");
+        int copied = 0, missing = 0;
+
+        for (auto clip : model->instances())
+        {
+            if (! clip.hasType (ids::AUDIO))
+                continue;
+
+            const File current (clip[ids::file].toString());
+            if (! current.existsAsFile())
+            {
+                ++missing;
+                continue;
+            }
+
+            if (current.getParentDirectory() == folder)
+                continue;
+
+            auto target = folder.getChildFile (current.getFileName());
+            for (int attempt = 2; target.existsAsFile() && target.getSize() != current.getSize(); ++attempt)
+                target = folder.getChildFile (current.getFileNameWithoutExtension() + " " + String (attempt)
+                                                + current.getFileExtension());
+
+            if (target.existsAsFile() || current.copyFileTo (target))
+            {
+                clip.setProperty (ids::file, target.getFullPathName(), &undo);
+                ++copied;
+            }
+        }
+
+        model->renderIfNeeded();
+        save();
+
+        return "Collected " + String (copied) + (copied == 1 ? " sample" : " samples")
+                + (missing > 0 ? "; " + String (missing) + " still missing" : "");
     }
 
     /** Writes the native session and state.json now, instead of waiting for the next
@@ -512,7 +594,7 @@ private:
         }
 
         const auto playlist = root["playlist"];
-        knownFields (playlist, "lanes clips");
+        knownFields (playlist, "lanes clips audio");
         require (playlist["lanes"].isArray() && playlist["lanes"].size() <= 128, "lanes must be an array (max 128)");
         std::set<String> laneIDs, instanceIDs;
         for (const auto& lane : *playlist["lanes"].getArray())
@@ -534,6 +616,35 @@ private:
             // A clip shows its pattern from this beat onwards; it arrived with the playlist editor.
             if (clip.hasProperty ("offset"))
                 number (clip, "offset", 0, 100000);
+        }
+
+        if (playlist.hasProperty ("audio"))
+        {
+            require (playlist["audio"].isArray() && playlist["audio"].size() <= 2048,
+                     "audio must be an array (max 2048)");
+            for (const auto& clip : *playlist["audio"].getArray())
+            {
+                knownFields (clip, "id name lane file missing start length offset gain_db fade_in fade_out speed");
+                require (instanceIDs.insert (id (clip)).second, "Duplicate playlist clip id");
+                require (laneIDs.count (clip["lane"].toString()) > 0, "Audio clip references an unknown lane");
+                require (clip["name"].isString() && clip["name"].toString().length() <= 200, "Invalid clip name");
+                const auto path = clip["file"].toString();
+                require (path.isNotEmpty() && File::isAbsolutePath (path), "Audio clip needs an absolute file path");
+                // A file that is not there yet is reported as missing, but a file that is
+                // there and is not audio is refused before anything is changed.
+                const File audioFile (path);
+                require (! audioFile.existsAsFile()
+                          || edit->engine.getAudioFileFormatManager().readFormatManager
+                                 .findFormatForFileExtension (audioFile.getFileExtension()) != nullptr,
+                         "Not an audio file: " + audioFile.getFileName());
+                number (clip, "start", 0, 100000);
+                number (clip, "length", 0.01, 100000);
+                if (clip.hasProperty ("offset"))   number (clip, "offset", 0, 100000);
+                if (clip.hasProperty ("gain_db"))  number (clip, "gain_db", -60, 12);
+                if (clip.hasProperty ("fade_in"))  number (clip, "fade_in", 0, 600);
+                if (clip.hasProperty ("fade_out")) number (clip, "fade_out", 0, 600);
+                if (clip.hasProperty ("speed"))    number (clip, "speed", 0.1, 10);
+            }
         }
 
         const auto mixerState = root["mixer"];
@@ -623,6 +734,27 @@ private:
                                                                   ? static_cast<double> (desired["offset"]) : 0.0, um);
                        });
 
+            applyList (model->instances(), ids::AUDIO,
+                       root["playlist"].hasProperty ("audio") ? root["playlist"]["audio"] : var (Array<var>()), undo,
+                       [] (ValueTree clip, const var& desired, UndoManager* um)
+                       {
+                           clip.setProperty (ids::name, desired["name"].toString(), um);
+                           clip.setProperty (ids::lane, desired["lane"].toString(), um);
+                           clip.setProperty (ids::file, desired["file"].toString(), um);
+                           clip.setProperty (ids::start, static_cast<double> (desired["start"]), um);
+                           clip.setProperty (ids::length, static_cast<double> (desired["length"]), um);
+                           clip.setProperty (ids::offset, desired.hasProperty ("offset")
+                                                              ? static_cast<double> (desired["offset"]) : 0.0, um);
+                           clip.setProperty (ids::gainDb, desired.hasProperty ("gain_db")
+                                                              ? static_cast<double> (desired["gain_db"]) : 0.0, um);
+                           clip.setProperty (ids::fadeIn, desired.hasProperty ("fade_in")
+                                                              ? static_cast<double> (desired["fade_in"]) : 0.0, um);
+                           clip.setProperty (ids::fadeOut, desired.hasProperty ("fade_out")
+                                                               ? static_cast<double> (desired["fade_out"]) : 0.0, um);
+                           clip.setProperty (ids::speed, desired.hasProperty ("speed")
+                                                             ? static_cast<double> (desired["speed"]) : 1.0, um);
+                       });
+
             // The model owns the channel fader, so render it before the explicit
             // parameter edits that are read back from the engine.
             model->render();
@@ -648,6 +780,8 @@ private:
         undo.beginNewTransaction();
     }
 
+    /** Replaces every child of one type, leaving other types in the same parent alone,
+        which is what lets pattern placements and audio clips share the playlist. */
     template <typename Update>
     void applyList (ValueTree parent, const Identifier& type, const var& desiredList,
                     UndoManager& undo, Update update)
@@ -669,15 +803,35 @@ private:
         }
 
         for (int i = parent.getNumChildren(); --i >= 0;)
-            if (! order.contains (Model::uidOf (parent.getChild (i))))
+            if (parent.getChild (i).hasType (type) && ! order.contains (Model::uidOf (parent.getChild (i))))
                 parent.removeChild (i, &undo);
 
-        for (int target = 0; target < order.size(); ++target)
+        // Order the children of this type among themselves, leaving any others where
+        // they are, which is what lets pattern placements and audio clips share a parent.
+        int slot = 0;
+        for (const auto& key : order)
         {
-            auto child = Model::withID (parent, type, order[target]);
+            auto child = Model::withID (parent, type, key);
             const auto current = parent.indexOf (child);
-            if (current >= 0 && current != target)
+            if (current < 0)
+                continue;
+
+            int target = -1, seen = 0;
+            for (int i = 0; i < parent.getNumChildren(); ++i)
+                if (parent.getChild (i).hasType (type))
+                {
+                    if (seen == slot)
+                    {
+                        target = i;
+                        break;
+                    }
+                    ++seen;
+                }
+
+            if (target >= 0 && target != current)
                 parent.moveChild (current, target, &undo);
+
+            ++slot;
         }
     }
 

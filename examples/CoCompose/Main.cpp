@@ -13,7 +13,7 @@ namespace commands
 {
 enum
 {
-    playStop = 0x2000, songMode, save, saveCopy, revealFolder, quitApp,
+    playStop = 0x2000, songMode, save, saveCopy, collectSamples, revealFolder, quitApp,
     undo, redo, addChannel, newPattern, placePattern, makeUnique, splitClip, duplicateClip,
     transposeUp, transposeDown,
     metronome, focusNextPanel, scanPlugins, audioSettings, about,
@@ -29,7 +29,7 @@ class Editor final : public Component,
 public:
     Editor (const File& file, bool playOnStart, bool snapshots, const File& uiScript)
         : engine ("CoCompose", std::make_unique<ExtendedUIBehaviour>(), nullptr),
-          project (engine, file), workspace (*project.model, engine),
+          project (engine, file), workspace (*project.model),
           saveSnapshots (snapshots), startPlayback (playOnStart)
     {
         scriptFile = uiScript;
@@ -127,7 +127,8 @@ public:
 
         if (index == 0)
         {
-            for (auto id : { commands::save, commands::saveCopy, commands::revealFolder })
+            for (auto id : { commands::save, commands::saveCopy, commands::collectSamples,
+                             commands::revealFolder })
                 menu.addCommandItem (&commandManager, id);
             menu.addSeparator();
             menu.addCommandItem (&commandManager, commands::quitApp);
@@ -170,7 +171,8 @@ public:
     void getAllCommands (Array<CommandID>& ids) override
     {
         ids.addArray ({ commands::playStop, commands::songMode, commands::save, commands::saveCopy,
-                        commands::revealFolder, commands::quitApp, commands::undo, commands::redo,
+                        commands::collectSamples, commands::revealFolder, commands::quitApp,
+                        commands::undo, commands::redo,
                         commands::addChannel, commands::newPattern, commands::placePattern,
                         commands::makeUnique, commands::splitClip, commands::duplicateClip,
                         commands::transposeUp, commands::transposeDown,
@@ -213,6 +215,10 @@ public:
                 break;
             case commands::saveCopy:
                 info.setInfo ("Save a copy...", "Copy the session into another folder", "File", 0);
+                break;
+            case commands::collectSamples:
+                info.setInfo ("Collect samples", "Copy every sample the project uses into its own folder",
+                              "File", 0);
                 break;
             case commands::revealFolder:
                 info.setInfo ("Open project folder", "Show the project folder in Explorer", "File", 0);
@@ -322,6 +328,11 @@ public:
 
             case commands::saveCopy:
                 saveCopyAsync();
+                return true;
+
+            case commands::collectSamples:
+                status.setText (project.collectSamples(), dontSendNotification);
+                workspace.refresh();
                 return true;
 
             case commands::revealFolder:
@@ -617,7 +628,7 @@ private:
         if (project.error.isNotEmpty())
             status.setText ((project.syncState == "applied_unpersisted" ? "Applied; save pending: " : "Sync rejected: ")
                                 + project.error, dontSendNotification);
-        else if (! status.getText().startsWith ("Saved a copy"))
+        else if (! status.getText().startsWith ("Saved a copy") && ! status.getText().startsWith ("Collected"))
             status.setText ("Live sync  |  Revision " + String (project.revision)
                 + "  |  Edit project.json externally; changes appear here automatically", dontSendNotification);
 
@@ -746,6 +757,30 @@ private:
 
         if (action.hasProperty ("split_clip"))
             return workspace.playlistGrid().splitSelectionAt (static_cast<double> (action["split_clip"]));
+
+        if (action.hasProperty ("audio"))
+        {
+            const auto audio = action["audio"];
+            return audio.isArray() && audio.size() == 3
+                    && workspace.addAudioClip (static_cast<int> (audio[0]), audio[1].toString(),
+                                               static_cast<double> (audio[2]));
+        }
+
+        if (action.hasProperty ("shape"))
+        {
+            const auto shape = action["shape"];
+            if (! shape.isArray() || shape.size() != 2)
+                return false;
+
+            const auto what = shape[0].toString();
+            const Identifier property = what == "gain" ? live::ids::gainDb
+                                      : what == "fade_in" ? live::ids::fadeIn
+                                      : what == "fade_out" ? live::ids::fadeOut
+                                      : what == "speed" ? live::ids::speed
+                                      : what == "offset" ? live::ids::offset
+                                      : live::ids::length;
+            return workspace.shapeAudioClip (property, static_cast<double> (shape[1]));
+        }
 
         if (action.hasProperty ("note"))
         {
