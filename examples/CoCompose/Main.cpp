@@ -674,6 +674,13 @@ private:
         enough to ask every tick, and it only writes when the answer changed. */
     void updateTransportModeIfNeeded()
     {
+        // Not while it is playing. Moving the loop then makes the engine rebuild its
+        // playback graph, and an edit during playback would do that on every change -
+        // which is both expensive and a jump the person did not ask for. The key is
+        // left alone so the new range is applied as soon as the transport stops.
+        if (project.edit->getTransport().isPlaying())
+            return;
+
         const auto key = workspace.selection.pattern() + "|" + String (project.revision)
                            + (isSongMode() ? "|song" : "|pattern");
 
@@ -980,8 +987,16 @@ private:
     {
         const auto contents = project.source.getSiblingFile ("control.json").loadFileAsString();
         if (contents == lastControl || contents.isEmpty()) return;
-        lastControl = contents;
+
+        // A request is only counted as seen once it reads as one. A file caught halfway
+        // through being replaced parses as nothing, and marking that as seen would drop
+        // the request on the floor: the writer waits for an answer that never comes.
+        // project.json has been protected this way for a while; this is the same rule.
         auto request = JSON::parse (contents);
+        if (! (request.isObject() && request["id"].isString()))
+            return;
+
+        lastControl = contents;
         String failure;
         try
         {

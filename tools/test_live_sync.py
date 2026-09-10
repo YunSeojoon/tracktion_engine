@@ -184,7 +184,16 @@ def run(exe, folder):
         project.write_text('{"schema":', encoding="utf-8")
         wait_for(lambda: "Invalid JSON" in status().get("error", ""))
         assert live_state() == before_partial
-        checks.append("Partial JSON preserves previous live state")
+
+        # The same rule for control requests. A half-written one must not be counted as
+        # seen, or the request that follows it is never answered and whoever sent it
+        # waits for a reply that is not coming.
+        (folder / "control.json").write_text('{"id": "half', encoding="utf-8")
+        time.sleep(1.0)
+        control(project, "undo")
+        control(project, "redo")
+        checks.append("Partial JSON preserves previous live state, and a half-written "
+                      "control request is not swallowed")
 
         stale = live_state()
         stale["revision"] -= 1

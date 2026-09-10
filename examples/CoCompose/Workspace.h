@@ -892,7 +892,11 @@ public:
 
     void refresh()
     {
+        const auto previous = peak;
         peak = readPeak();
+        // A strip is drawn with arcs and paths, so repainting all of them every tick is
+        // real work. The meter only needs redrawing when it would look different.
+        meterMoved = std::abs (peak - previous) > 0.4f;
 
         if (master != nullptr)
         {
@@ -901,7 +905,8 @@ public:
             pan.setValue (master->getPan(), dontSendNotification);
             feeds.setText ("all inserts", dontSendNotification);
             chain.setText ({}, dontSendNotification);
-            repaint();
+            if (meterMoved)
+                repaint();
             return;
         }
 
@@ -942,7 +947,8 @@ public:
 
         feeds.setText (String (fed) + (fed == 1 ? " ch" : " chs")
                         + (sendCount > 0 ? ", " + String (sendCount) + " snd" : ""), dontSendNotification);
-        repaint();
+        if (meterMoved)
+            repaint();
     }
 
     const String id;
@@ -1170,6 +1176,7 @@ private:
     te::LevelMeasurer::Client client;
     te::LevelMeterPlugin* attached = nullptr;
     float peak = -100.0f, held = -100.0f;
+    bool meterMoved = true;
     Array<std::pair<String, String>> effectChoices;
 };
 
