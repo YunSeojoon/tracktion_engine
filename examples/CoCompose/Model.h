@@ -297,10 +297,12 @@ public:
         return insert;
     }
 
-    /** Adds one of the six effects to an insert's chain, at the end. */
+    /** Adds an effect to an insert's chain, at the end. The type is one of the six
+        built in, or the identifier of a scanned plugin. */
     ValueTree addEffect (ValueTree insert, const String& effectType, UndoManager* undo)
     {
-        require (enginePluginFor (effectType).isNotEmpty(), "Unknown effect: " + effectType);
+        require (enginePluginFor (effectType).isNotEmpty() || scannedEffect (effectType) != nullptr,
+                 "Unknown effect: " + effectType);
 
         ValueTree effect (ids::EFFECT);
         effect.setProperty (ids::uid, Uuid().toString(), nullptr);
@@ -526,12 +528,58 @@ public:
     /** What `instrument` would have to say for this plugin to be the right one. */
     static String kindOf (te::Plugin* plugin)
     {
+        // The engine's own getIdentifierString() still writes the pre-2021 form, which
+        // is not what the scanned list stores or looks plugins up by. Matching the list
+        // is what matters here: a mismatch would rebuild the plugin on every sync.
         if (auto* external = dynamic_cast<te::ExternalPlugin*> (plugin))
-            return external->getIdentifierString();
+            return external->desc.createIdentifierString();
         if (dynamic_cast<te::SamplerPlugin*> (plugin) != nullptr)
             return builtInSampler;
         if (plugin != nullptr)
             return builtInSynth;
+        return {};
+    }
+
+    /** Effects the mixer can offer: the six built in, plus every scanned plugin that
+        is not an instrument. Pairs of what goes in `type` and what to show. */
+    Array<std::pair<String, String>> availableEffects() const
+    {
+        Array<std::pair<String, String>> result;
+        for (int i = 0; i < numEffectTypes; ++i)
+            result.add ({ effectTypes (i).first, effectTypes (i).first });
+        for (const auto& type : edit.engine.getPluginManager().knownPluginList.getTypes())
+            if (! type.isInstrument)
+                result.add ({ type.createIdentifierString(), type.name });
+        return result;
+    }
+
+    /** The name to show for an effect type, which for a scanned plugin is not its
+        identifier. */
+    String effectName (const String& effectType) const
+    {
+        if (auto description = scannedEffect (effectType))
+            return description->name;
+        return effectType;
+    }
+
+    /** The scanned plugin an effect type names, if it names one at all. */
+    std::unique_ptr<juce::PluginDescription> scannedEffect (const String& effectType) const
+    {
+        if (enginePluginFor (effectType).isNotEmpty())
+            return {};
+        return edit.engine.getPluginManager().knownPluginList.getTypeForIdentifierString (effectType);
+    }
+
+    /** What `type` would have to say for this effect plugin to be the right one. */
+    static String effectKindOf (te::Plugin* plugin)
+    {
+        if (auto* external = dynamic_cast<te::ExternalPlugin*> (plugin))
+            return external->desc.createIdentifierString();
+
+        for (int i = 0; plugin != nullptr && i < numEffectTypes; ++i)
+            if (plugin->getPluginType() == effectTypes (i).second)
+                return effectTypes (i).first;
+
         return {};
     }
 
@@ -801,14 +849,14 @@ private:
                 continue;
 
             const auto effectID = uidOf (effect);
-            const auto wantedType = enginePluginFor (effect[ids::type].toString());
+            const auto wantedType = effect[ids::type].toString();
 
             te::Plugin* plugin = nullptr;
             for (auto* candidate : track.pluginList)
                 if (candidate->state[ids::pluginEffect].toString() == effectID)
                     plugin = candidate;
 
-            if (plugin != nullptr && plugin->getPluginType() != wantedType)
+            if (plugin != nullptr && effectKindOf (plugin) != wantedType)
             {
                 plugin->deleteFromParent();
                 plugin = nullptr;
@@ -816,10 +864,16 @@ private:
 
             if (plugin == nullptr)
             {
-                if (wantedType.isEmpty())
-                    continue;
+                const auto builtIn = enginePluginFor (wantedType);
+                const auto scanned = scannedEffect (wantedType);
 
-                auto created = edit.getPluginCache().createNewPlugin (wantedType, {});
+                // A plugin that is not installed leaves the slot empty rather than
+                // wrong, and the model keeps asking for it in case a scan finds it.
+                auto created = builtIn.isNotEmpty()
+                                 ? edit.getPluginCache().createNewPlugin (builtIn, {})
+                                 : (scanned != nullptr
+                                      ? edit.getPluginCache().createNewPlugin (te::ExternalPlugin::xmlTypeName, *scanned)
+                                      : te::Plugin::Ptr());
                 if (created == nullptr)
                     continue;
 

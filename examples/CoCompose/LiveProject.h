@@ -337,6 +337,7 @@ public:
                 { "source", lane[ids::source].toString() },
                 { "plugin_id", lane[ids::plugin].toString() },
                 { "parameter", lane[ids::parameter].toString() },
+                { "parameter_found", parameter != nullptr },
                 { "engine_points", parameter != nullptr ? parameter->getCurve().getNumPoints() : 0 },
                 { "points", points } }));
         }
@@ -400,7 +401,29 @@ public:
                                   { "plugins", plugins },
                                   { "clips", clips }, { "audio", waves } }));
         }
-        return object ({ { "tracks", tracks } });
+        return object ({ { "tracks", tracks }, { "device", deviceReadback() } });
+    }
+
+    /** The audio device the engine actually opened, so a compatibility report can say
+        what it was run against rather than what was asked for. */
+    var deviceReadback()
+    {
+        auto& deviceManager = edit->engine.getDeviceManager();
+        auto* device = deviceManager.deviceManager.getCurrentAudioDevice();
+
+        if (device == nullptr)
+            return object ({ { "open", false },
+                             { "type", deviceManager.deviceManager.getCurrentAudioDeviceType() } });
+
+        return object ({ { "open", device->isOpen() },
+                         { "type", deviceManager.deviceManager.getCurrentAudioDeviceType() },
+                         { "name", device->getName() },
+                         { "sample_rate", device->getCurrentSampleRate() },
+                         { "buffer_size", device->getCurrentBufferSizeSamples() },
+                         { "bit_depth", device->getCurrentBitDepth() },
+                         { "output_latency", device->getOutputLatencyInSamples() },
+                         { "outputs", device->getActiveOutputChannels().countNumberOfSetBits() },
+                         { "inputs", device->getActiveInputChannels().countNumberOfSetBits() } });
     }
 
     // Called only on the JUCE message thread, never the audio callback.
@@ -957,7 +980,7 @@ private:
             std::set<String> curveIDs;
             for (const auto& curve : *automationState["curves"].getArray())
             {
-                knownFields (curve, "id source plugin_id parameter engine_points points");
+                knownFields (curve, "id source plugin_id parameter parameter_found engine_points points");
                 require (curveIDs.insert (id (curve)).second, "Duplicate automation curve id");
                 require (curve["source"].isString() && curve["source"].toString().isNotEmpty(),
                          "An automation curve needs a source");
@@ -1017,8 +1040,13 @@ private:
                 {
                     knownFields (effect, "id type bypass wet parameters");
                     require (effectIDs.insert (id (effect)).second, "Duplicate effect id");
-                    require (enginePluginFor (effect["type"].toString()).isNotEmpty(),
-                             "Unknown effect: " + effect["type"].toString());
+                    // One of the six built in, or a scanned plugin. A plugin that is not
+                    // installed here is still accepted, the way a missing instrument is,
+                    // so a project written on another machine opens rather than fails;
+                    // the slot stays empty and the readback shows it never loaded.
+                    const auto effectType = effect["type"].toString();
+                    require (enginePluginFor (effectType).isNotEmpty() || effectType.contains ("-"),
+                             "Unknown effect: " + effectType);
                     require (effect["bypass"].isVoid() || effect["bypass"].isBool(), "bypass must be boolean");
                     if (effect.hasProperty ("wet")) number (effect, "wet", 0, 1);
                 }

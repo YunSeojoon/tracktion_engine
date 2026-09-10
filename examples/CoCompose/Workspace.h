@@ -925,9 +925,11 @@ private:
         if (! insert.isValid())
             return;
 
+        effectChoices = model.availableEffects();
+
         PopupMenu add;
-        for (int i = 0; i < numEffectTypes; ++i)
-            add.addItem (100 + i, String (effectTypes (i).first));
+        for (int i = 0; i < effectChoices.size(); ++i)
+            add.addItem (100 + i, effectChoices[i].second);
 
         PopupMenu menu;
         menu.addSubMenu ("Add effect", add);
@@ -944,7 +946,7 @@ private:
             item.addItem (1000 + index * 10 + 2, "Move up", index > 0);
             item.addItem (1000 + index * 10 + 3, "Move down");
             item.addItem (1000 + index * 10 + 4, "Remove");
-            menu.addSubMenu (String (index + 1) + ". " + child[ids::type].toString(), item);
+            menu.addSubMenu (String (index + 1) + ". " + model.effectName (child[ids::type].toString()), item);
             ++index;
         }
 
@@ -971,8 +973,11 @@ private:
 
         if (choice >= 100 && choice < 500)
         {
+            if (! isPositiveAndBelow (choice - 100, effectChoices.size()))
+                return;
+
             undo.beginNewTransaction ("Add effect");
-            model.addEffect (insert, effectTypes (choice - 100).first, &undo);
+            model.addEffect (insert, effectChoices[choice - 100].first, &undo);
         }
         else if (choice >= 500 && choice < 1000)
         {
@@ -1068,6 +1073,7 @@ private:
     te::LevelMeasurer::Client client;
     te::LevelMeterPlugin* attached = nullptr;
     float peak = -100.0f, held = -100.0f;
+    Array<std::pair<String, String>> effectChoices;
 };
 
 //==============================================================================

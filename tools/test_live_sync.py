@@ -1384,6 +1384,9 @@ def check_survives_the_rough_edges(exe, folder):
             process.wait(timeout=10)
 
     # The same project at 150% and 200%: the surface has to lay out, not just start.
+    # The window is measured in its own units, so scaling it up makes those units
+    # cover more of the screen; what has to hold is that the window still fits the
+    # display and still has its panels, not that the number grows.
     for scale in ("1.5", "2.0"):
         (sub / "ui.png").unlink(missing_ok=True)
         process = launch(("--scale", scale))
@@ -1391,7 +1394,8 @@ def check_survives_the_rough_edges(exe, folder):
             wait_for(lambda: (sub / "ui.png").exists(), timeout=60)
             time.sleep(2.0)
             scaled = read_png_size(sub / "ui.png")
-            assert scaled[0] >= baseline[0] and scaled[1] >= baseline[1], (scale, scaled, baseline)
+            assert scaled[0] <= baseline[0] and scaled[1] <= baseline[1], (scale, scaled, baseline)
+            assert scaled[0] >= 620 and scaled[1] >= 340, (scale, scaled)
             labels = read(sub / "ui-state.json")["labels"]
             assert any("Live sync" in str(label) for label in labels), (scale, labels)
             assert not read(sub / "sync-status.json")["error"], (scale, read(sub / "sync-status.json"))

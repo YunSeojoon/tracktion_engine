@@ -1305,10 +1305,26 @@ private:
             setUsingNativeTitleBar (true);
             setContentOwned (editor.release(), true);
             setResizable (true, false);
-            setResizeLimits (1180, 620, 4000, 2400);
-            centreWithSize (1420, 860);
+
+            // At 150% or 200% a fixed size is bigger than the screen, and a minimum
+            // bigger than the screen cannot be shrunk to fit, so both are capped by
+            // what this display actually has room for.
+            const auto room = availableSize();
+            setResizeLimits (jmin (1180, room.getWidth()), jmin (620, room.getHeight()), 4000, 2400);
+            centreWithSize (jmin (1420, room.getWidth()), jmin (860, room.getHeight()));
             setVisible (visible);
         }
+        /** The room a window has, in the units a window is sized in. userBounds is
+            already divided by the scaling in force, so nothing else has to be. A
+            little is left over for the title bar and the screen edge. */
+        static Rectangle<int> availableSize()
+        {
+            if (auto* display = Desktop::getInstance().getDisplays().getPrimaryDisplay())
+                return display->userBounds.withTrimmedBottom (40.0f).withTrimmedRight (8.0f).toNearestInt();
+
+            return { 1420, 860 };
+        }
+
         void closeButtonPressed() override { JUCEApplication::getInstance()->systemRequestedQuit(); }
     };
     std::unique_ptr<Window> window;
