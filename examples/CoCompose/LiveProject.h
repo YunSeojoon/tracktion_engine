@@ -393,6 +393,8 @@ public:
             for (auto* plugin : track->pluginList)
                 plugins.add (object ({ { "type", plugin->getPluginType() }, { "name", plugin->getName() },
                                        { "enabled", plugin->isEnabled() },
+                                       { "window_open", plugin->windowState != nullptr
+                                                          && plugin->windowState->isWindowShowing() },
                                        { "effect", plugin->state[ids::pluginEffect].toString() } }));
 
             auto* destination = track->getOutput().getDestinationTrack();

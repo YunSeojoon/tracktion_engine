@@ -648,6 +648,29 @@ public:
         return nullptr;
     }
 
+    /** Opens the selected channel's instrument window, which is how a check can see
+        whether a plugin's own editor comes up on this machine. */
+    bool openSelectedPlugin() const
+    {
+        if (auto* row = selectedRow())
+            if (auto* track = model.trackFor (row->id))
+                if (auto* plugin = Model::instrumentOf (*track))
+                {
+                    plugin->showWindowExplicitly();
+                    return true;
+                }
+        return false;
+    }
+
+    bool closePluginWindows() const
+    {
+        for (auto* track : te::getAudioTracks (model.edit))
+            for (auto* plugin : track->pluginList)
+                if (plugin->windowState != nullptr)
+                    plugin->windowState->closeWindowExplicitly();
+        return true;
+    }
+
     bool saveSelectedPreset() const
     {
         auto* row = selectedRow();
@@ -1699,6 +1722,8 @@ public:
 
     PlaylistGrid& playlistGrid() const { return playlist->getGrid(); }
 
+    bool openInstrumentWindow() const { return rack->openSelectedPlugin(); }
+    bool closePluginWindows() const { return rack->closePluginWindows(); }
     bool saveInstrumentPreset() const { return rack->saveSelectedPreset(); }
     bool loadInstrumentPreset() const { return rack->loadNewestPresetOnSelected(); }
 

@@ -148,6 +148,17 @@ def check_instrument(session, plugin, pattern_id):
     if not on_track:
         return {"loaded": False, "notes": "; ".join(notes + ["did not appear on the track"])}
 
+    # The plugin's own editor: a plugin that loads but cannot show its window is not
+    # usable, so it is asked for one and the engine is asked whether it came up.
+    window_open = False
+    try:
+        session.run([{"select_channel": 0}, {"open_plugin": 0}])
+        time.sleep(1.5)
+        window_open = any(p["window_open"] for p in session.settled()["engine"]["tracks"][0]["plugins"])
+        session.run([{"close_plugins": True}])
+    except Exception as error:
+        notes.append("window failed: %s" % error)
+
     automated = False
     if parameters:
         target = parameters[0]
@@ -164,8 +175,8 @@ def check_instrument(session, plugin, pattern_id):
         except Exception as error:
             notes.append("automation failed: %s" % error)
 
-    return {"loaded": True, "parameters": len(parameters), "automated": automated,
-            "notes": "; ".join(notes)}
+    return {"loaded": True, "parameters": len(parameters), "window": window_open,
+            "automated": automated, "notes": "; ".join(notes)}
 
 
 def check_effect(session, plugin):

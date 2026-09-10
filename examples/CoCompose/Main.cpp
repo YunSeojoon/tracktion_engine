@@ -1071,6 +1071,12 @@ private:
         if (action.hasProperty ("scan"))
             return startPluginScan();
 
+        if (action.hasProperty ("open_plugin"))
+            return workspace.openInstrumentWindow();
+
+        if (action.hasProperty ("close_plugins"))
+            return workspace.closePluginWindows();
+
         if (action.hasProperty ("automate"))
         {
             const auto request = action["automate"];
@@ -1281,6 +1287,7 @@ public:
                 Desktop::getInstance().setGlobalScaleFactor (
                     jlimit (0.5f, 4.0f, args[scaleOption + 1].getFloatValue()));
 
+            openedProject = file;
             auto editor = std::make_unique<Editor> (file, args.contains ("--play"),
                                                     args.contains ("--screenshots"), uiScript);
             window = std::make_unique<Window> (std::move (editor), ! args.contains ("--headless"));
@@ -1295,6 +1302,31 @@ public:
 
     void shutdown() override { window.reset(); }
     void systemRequestedQuit() override { quit(); }
+
+    /** One project at a time: the app owns a folder's live-sync files while it is open,
+        so a second copy would fight the first over them. Opening another project used
+        to do nothing at all, which looked like a failed launch. */
+    void anotherInstanceStarted (const String& commandLine) override
+    {
+        if (window == nullptr)
+            return;
+
+        window->toFront (true);
+
+        auto args = StringArray::fromTokens (commandLine, true);
+        args.trim();
+        const auto projectOption = args.indexOf ("--project");
+        const auto wanted = projectOption >= 0 && projectOption + 1 < args.size()
+                              ? args[projectOption + 1].unquoted() : String();
+
+        if (wanted.isEmpty())
+            return;
+
+        AlertWindow::showMessageBoxAsync (MessageBoxIconType::InfoIcon, "CoCompose is already open",
+                                          "CoCompose opens one project at a time, and it is already working on\n"
+                                          + openedProject.getFullPathName()
+                                          + "\n\nClose it first to open\n" + wanted);
+    }
 
 private:
     struct Window final : DocumentWindow
@@ -1328,6 +1360,7 @@ private:
         void closeButtonPressed() override { JUCEApplication::getInstance()->systemRequestedQuit(); }
     };
     std::unique_ptr<Window> window;
+    File openedProject;
 };
 
 START_JUCE_APPLICATION (Application)

@@ -42,6 +42,12 @@ namespace ids
 
     // Written onto engine plugins so a derived effect can be matched back to the model.
     const Identifier pluginEffect ("coComposeEffect");
+
+    /** What the model asked for when it built a plugin. The engine overwrites an
+        external plugin's own description with whatever the loaded instance reports,
+        which for some plugins no longer matches the scanned entry it was created
+        from, so the request is kept here instead of being derived back out. */
+    const Identifier pluginRequest ("coComposeRequest");
 }
 
 constexpr int modelSchema = 2;
@@ -528,11 +534,10 @@ public:
     /** What `instrument` would have to say for this plugin to be the right one. */
     static String kindOf (te::Plugin* plugin)
     {
-        // The engine's own getIdentifierString() still writes the pre-2021 form, which
-        // is not what the scanned list stores or looks plugins up by. Matching the list
-        // is what matters here: a mismatch would rebuild the plugin on every sync.
         if (auto* external = dynamic_cast<te::ExternalPlugin*> (plugin))
-            return external->desc.createIdentifierString();
+            return external->state.hasProperty (ids::pluginRequest)
+                     ? external->state[ids::pluginRequest].toString()
+                     : external->desc.createIdentifierString();
         if (dynamic_cast<te::SamplerPlugin*> (plugin) != nullptr)
             return builtInSampler;
         if (plugin != nullptr)
@@ -574,7 +579,9 @@ public:
     static String effectKindOf (te::Plugin* plugin)
     {
         if (auto* external = dynamic_cast<te::ExternalPlugin*> (plugin))
-            return external->desc.createIdentifierString();
+            return external->state.hasProperty (ids::pluginRequest)
+                     ? external->state[ids::pluginRequest].toString()
+                     : external->desc.createIdentifierString();
 
         for (int i = 0; plugin != nullptr && i < numEffectTypes; ++i)
             if (plugin->getPluginType() == effectTypes (i).second)
@@ -668,6 +675,8 @@ private:
             // wrong, and the model keeps the request so a later scan can satisfy it.
             if (replacement != nullptr)
             {
+                replacement->state.setProperty (ids::pluginRequest, wanted, nullptr);
+
                 if (existing != nullptr)
                     existing->deleteFromParent();
                 track.pluginList.insertPlugin (*replacement, 0, nullptr);
@@ -878,6 +887,7 @@ private:
                     continue;
 
                 created->state.setProperty (ids::pluginEffect, effectID, nullptr);
+                created->state.setProperty (ids::pluginRequest, wantedType, nullptr);
                 track.pluginList.insertPlugin (*created, slot, nullptr);
                 plugin = created.get();
             }
