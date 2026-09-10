@@ -381,9 +381,10 @@ public:
         };
 
         sample.onClick = [this] { chooseSample(); };
+        stepSettings.onClick = [this] { showStepSettings(); };
 
         for (auto* child : std::initializer_list<Component*> { &name, &mute, &solo, &gain, &pan, &insert,
-                                                              &instrument, &openInstrument, &sample, &steps })
+                                                              &instrument, &openInstrument, &sample, &stepSettings, &steps })
             addAndMakeVisible (*child);
     }
 
@@ -407,10 +408,11 @@ public:
         gain.setBounds (r.removeFromLeft (32));
         pan.setBounds (r.removeFromLeft (32));
         insert.setBounds (r.removeFromLeft (62).reduced (1));
+        stepSettings.setBounds (r.removeFromLeft (40).reduced (1));
         steps.setBounds (r.withTrimmedLeft (8));
     }
 
-    static constexpr int controlsWidth = 470;
+    static constexpr int controlsWidth = 510;
 
     int preferredWidth() const { return controlsWidth + steps.preferredWidth(); }
 
@@ -454,6 +456,13 @@ public:
         sample.setEnabled (wanted == builtInSampler);
         sample.setTooltip (tree[ids::sample].toString());
 
+        const auto stepLength = static_cast<double> (tree.getProperty (ids::stepLength, stepBeats));
+        stepSettings.setButtonText (stepLength >= 4.0 ? "1b" : stepLength >= 2.0 ? "1/2"
+                                  : stepLength >= 1.0 ? "1/4" : stepLength >= 0.5 ? "1/8" : "1/16");
+        stepSettings.setTooltip ("Step length and pitch: "
+                                  + MidiMessage::getMidiNoteName (static_cast<int> (tree.getProperty (ids::stepPitch, 60)),
+                                                                  true, true, 3));
+
         auto sequence = Model::findSequence (model.patternFor (selection.pattern()), id);
         const auto count = sequence.isValid() ? sequence.getNumChildren() : 0;
         steps.setTooltip (count == 1 ? "1 note in pattern" : String (count) + " notes in pattern");
@@ -476,6 +485,49 @@ private:
         undo.beginNewTransaction (description);
         channel().setProperty (property, value, &undo);
         model.renderIfNeeded();
+    }
+
+    /** What a step writes: how long the note is and which pitch it plays. A drum
+        channel wants a short note on its own key; a bass channel a longer one. */
+    void showStepSettings()
+    {
+        static const std::pair<const char*, double> lengths[] = {
+            { "1/16", 0.25 }, { "1/8", 0.5 }, { "1/4", 1.0 }, { "1/2", 2.0 }, { "1 bar", 4.0 } };
+
+        auto tree = channel();
+        const auto currentLength = static_cast<double> (tree.getProperty (ids::stepLength, stepBeats));
+        const auto currentPitch = static_cast<int> (tree.getProperty (ids::stepPitch, 60));
+
+        PopupMenu lengthMenu;
+        for (int i = 0; i < numElementsInArray (lengths); ++i)
+            lengthMenu.addItem (i + 1, String ("Step length  ") + lengths[i].first, true,
+                                std::abs (currentLength - lengths[i].second) < 1.0e-6);
+
+        PopupMenu pitchMenu;
+        for (int octave = 1; octave <= 7; ++octave)
+            for (int semitone = 0; semitone < 12; semitone += (octave == 1 || octave == 7) ? 12 : 1)
+            {
+                const auto pitch = octave * 12 + semitone;
+                pitchMenu.addItem (100 + pitch, MidiMessage::getMidiNoteName (pitch, true, true, 3),
+                                   true, pitch == currentPitch);
+            }
+
+        PopupMenu menu;
+        menu.addSubMenu ("Step length", lengthMenu);
+        menu.addSubMenu ("Step pitch", pitchMenu);
+        menu.showMenuAsync (PopupMenu::Options().withTargetComponent (stepSettings),
+            [this] (int choice)
+            {
+                if (choice <= 0)
+                    return;
+
+                if (choice >= 100)
+                    write (ids::stepPitch, choice - 100, "Step pitch");
+                else
+                    write (ids::stepLength, lengths[choice - 1].second, "Step length");
+
+                if (changed != nullptr) changed();
+            });
     }
 
     void chooseSample()
@@ -503,7 +555,7 @@ private:
     Selection& selection;
     std::function<void()> changed;
     Label name;
-    TextButton mute { "M" }, solo { "S" }, openInstrument { "..." }, sample { "WAV" };
+    TextButton mute { "M" }, solo { "S" }, openInstrument { "..." }, sample { "WAV" }, stepSettings { "1/16" };
     ComboBox instrument;
     Slider gain, pan, insert;
     StepGrid steps;

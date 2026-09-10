@@ -58,7 +58,7 @@ Browser on the left, Channel Rack above the Mixer in the centre, Pattern picker 
 
 `Space` starts and stops, `Ctrl+L` switches between Song and Pattern loops, `Ctrl+M` toggles the metronome, `Ctrl+T` adds a channel, `Ctrl+P` a pattern, `Ctrl+B` places the selected pattern, and `Ctrl+U` gives the selected placement its own copy.
 
-The Channel Rack carries a sixteenth-note step grid for the selected pattern: click or drag across it to write notes at the channel's step pitch. `Piano roll` opens the note editor for the selected channel and pattern — click to add, drag to move, drag a note's right edge to resize, Alt-drag for velocity, right-click to delete, drag the background to rubber-band select, and use `Ctrl+D` to duplicate, `Q` to quantise and `Delete` to remove. Clicking the keyboard previews through the channel's real instrument.
+The Channel Rack carries a sixteenth-note step grid for the selected pattern: click or drag across it to write notes at the channel's step pitch, and the button beside the insert number sets that pitch and the step length. `Piano roll` opens the note editor for the selected channel and pattern — click to add, drag to move, drag a note's right edge to resize, Alt-drag for velocity, right-click to delete, drag the background to rubber-band select, and use `Ctrl+D` to duplicate, `Q` to quantise and `Delete` to remove. Clicking the keyboard previews through the channel's real instrument.
 
 Playlist editing with the mouse, the sample browser, and mixer routing with effects are not built yet.
 
