@@ -38,19 +38,22 @@ try {
     if ((Get-Item $state).LastWriteTimeUtc -le $beforeWrite) { throw 'state.json was never refreshed' }
 
     $after = Get-Content $state -Raw | ConvertFrom-Json
-    if ($after.tracks.Count -ne $before.tracks.Count) { throw "track count changed: $($before.tracks.Count) -> $($after.tracks.Count)" }
-    $beforeNotes = $before.tracks[0].clips[0].notes.Count
-    $afterNotes  = $after.tracks[0].clips[0].notes.Count
+    if ($after.channels.Count -ne $before.channels.Count) { throw "channel count changed: $($before.channels.Count) -> $($after.channels.Count)" }
+    if ($after.patterns.Count -ne $before.patterns.Count) { throw "pattern count changed: $($before.patterns.Count) -> $($after.patterns.Count)" }
+    $countNotes = { param($state) ($state.patterns | ForEach-Object { $_.sequences } | ForEach-Object { $_.notes.Count } | Measure-Object -Sum).Sum }
+    $beforeNotes = & $countNotes $before
+    $afterNotes = & $countNotes $after
     if ($afterNotes -ne $beforeNotes) { throw "note count changed: $beforeNotes -> $afterNotes" }
     if ($null -eq $after.bpm) { throw 'state.json has no bpm field' }
     if ($after.bpm -ne $before.bpm) { throw "bpm changed: $($before.bpm) -> $($after.bpm)" }
 
     [pscustomobject]@{
         window       = $title
-        tracks       = $after.tracks.Count
+        channels     = $after.channels.Count
+        patterns     = $after.patterns.Count
         notes        = $afterNotes
         bpm          = $after.bpm
-        trackName    = $after.tracks[0].name
+        firstChannel = $after.channels[0].name
         restored     = $true
     } | ConvertTo-Json -Compress
 }

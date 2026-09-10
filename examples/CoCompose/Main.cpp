@@ -26,13 +26,22 @@ class Editor final : public Component,
                      private Timer
 {
 public:
-    Editor (const File& file, bool playOnStart, bool snapshots)
+    Editor (const File& file, bool playOnStart, bool snapshots, const File& uiScript)
         : engine ("CoCompose", std::make_unique<ExtendedUIBehaviour>(), nullptr),
           project (engine, file), selection (engine),
           workspace (*project.model, selection, engine),
           saveSnapshots (snapshots), startPlayback (playOnStart)
     {
+        if (uiScript.existsAsFile())
+        {
+            script = JSON::parse (uiScript.loadFileAsString());
+            live::require (script.isArray(), "UI script must be a JSON array of actions");
+        }
+
         commandManager.registerAllCommandsForTarget (this);
+        // Without an explicit target the manager looks for one via keyboard focus, which
+        // a plugin window or a hidden window can take away.
+        commandManager.setFirstCommandTarget (this);
         addKeyListener (commandManager.getKeyMappings());
         setWantsKeyboardFocus (true);
 
@@ -405,6 +414,7 @@ private:
     live::Workspace workspace;
     ApplicationCommandManager commandManager;
     MenuBarComponent menuBar;
+    TooltipWindow tooltips { this, 700 };
     Label title, path, position, load, focus, status;
     TextButton play { "Play / Stop" }, song { "Song" }, click { "Metronome" };
     Slider tempo;
@@ -412,7 +422,9 @@ private:
     bool startPlayback;
     int startupTicks = 0;
     int lastSnapshotRevision = -1;
-    String lastControl, lastLabels;
+    String lastControl, lastLabels, scriptError;
+    var script;
+    int scriptStep = 0;
 
     bool isSongMode() const
     {
@@ -602,6 +614,7 @@ private:
 
         project.writeStatus();
         commandManager.commandStatusChanged();
+        runScriptStep();
         writeSnapshot();
         }
         catch (const std::exception& e)
@@ -609,6 +622,86 @@ private:
             project.error = e.what();
             status.setText ("I/O error: " + project.error, dontSendNotification);
         }
+    }
+
+    /** Replays recorded work-surface actions against the real panels, one per tick, so
+        a check can drive the UI instead of writing to the model behind its back. It is
+        a diagnostic like --screenshots, not part of the live sync contract. */
+    void runScriptStep()
+    {
+        if (! script.isArray() || scriptStep > script.size())
+            return;
+
+        String failure;
+
+        if (scriptStep < script.size())
+        {
+            const auto action = script[scriptStep];
+            try
+            {
+                live::require (performScriptAction (action), "Action failed: " + JSON::toString (action, true));
+            }
+            catch (const std::exception& e) { failure = e.what(); }
+        }
+
+        if (failure.isNotEmpty())
+            scriptError = failure;
+
+        live::atomicWrite (project.source.getSiblingFile ("ui-script-status.json"), JSON::toString (live::object ({
+            { "done", scriptStep }, { "total", script.size() }, { "error", scriptError },
+            { "finished", scriptStep >= script.size() } }), false));
+
+        if (failure.isEmpty())
+            ++scriptStep;
+        else
+            scriptStep = script.size() + 1; // Stop rather than run the rest on a broken state.
+    }
+
+    bool performScriptAction (const var& action)
+    {
+        if (action.hasProperty ("command"))
+        {
+            const auto wanted = action["command"].toString();
+            for (auto id : allCommands())
+            {
+                ApplicationCommandInfo info (id);
+                getCommandInfo (id, info);
+                if (info.shortName == wanted)
+                    return commandManager.invokeDirectly (id, false);
+            }
+            return false;
+        }
+
+        if (action.hasProperty ("select_channel"))
+            return workspace.selectByIndex (live::ids::CHANNEL, static_cast<int> (action["select_channel"]));
+        if (action.hasProperty ("select_pattern"))
+            return workspace.selectByIndex (live::ids::PATTERN, static_cast<int> (action["select_pattern"]));
+        if (action.hasProperty ("select_lane"))
+            return workspace.selectByIndex (live::ids::LANE, static_cast<int> (action["select_lane"]));
+
+        if (action.hasProperty ("step"))
+        {
+            const auto step = action["step"];
+            return step.isArray() && step.size() == 2
+                    && workspace.toggleStep (static_cast<int> (step[0]), static_cast<int> (step[1]));
+        }
+
+        if (action.hasProperty ("note"))
+        {
+            const auto note = action["note"];
+            return note.isArray() && note.size() == 4
+                    && workspace.addPianoRollNote (static_cast<int> (note[0]), static_cast<double> (note[1]),
+                                                   static_cast<double> (note[2]), static_cast<int> (note[3]));
+        }
+
+        return false;
+    }
+
+    Array<CommandID> allCommands()
+    {
+        Array<CommandID> ids;
+        getAllCommands (ids);
+        return ids;
     }
 
     /** Captures the finished frame, after the panels have been refreshed, whenever the
@@ -627,11 +720,23 @@ private:
         lastSnapshotRevision = project.revision;
         lastLabels = signature;
 
-        auto image = createComponentSnapshot (getLocalBounds());
-        auto output = project.source.getSiblingFile ("ui.png").createOutputStream();
-        if (output != nullptr) { output->setPosition (0); output->truncate(); PNGImageFormat().writeImageToStream (image, *output); }
+        writeImage ("ui.png", *this);
+        if (auto* roll = workspace.pianoRollContent())
+            writeImage ("piano-roll.png", *roll);
+
         live::atomicWrite (project.source.getSiblingFile ("ui-state.json"), JSON::toString (live::object ({
             { "revision", project.revision }, { "labels", labels } }), false));
+    }
+
+    void writeImage (const String& fileName, Component& component)
+    {
+        auto image = component.createComponentSnapshot (component.getLocalBounds());
+        if (auto output = project.source.getSiblingFile (fileName).createOutputStream())
+        {
+            output->setPosition (0);
+            output->truncate();
+            PNGImageFormat().writeImageToStream (image, *output);
+        }
     }
 
     static void collectLabels (Component& component, Array<var>& labels)
@@ -661,7 +766,12 @@ public:
             file = File::getCurrentWorkingDirectory().getChildFile (args[projectOption + 1].unquoted());
         try
         {
-            auto editor = std::make_unique<Editor> (file, args.contains ("--play"), args.contains ("--screenshots"));
+            const auto scriptOption = args.indexOf ("--ui-script");
+            const auto uiScript = scriptOption >= 0 && scriptOption + 1 < args.size()
+                                      ? File::getCurrentWorkingDirectory().getChildFile (args[scriptOption + 1].unquoted())
+                                      : File();
+            auto editor = std::make_unique<Editor> (file, args.contains ("--play"),
+                                                    args.contains ("--screenshots"), uiScript);
             window = std::make_unique<Window> (std::move (editor), ! args.contains ("--headless"));
         }
         catch (const std::exception& e)

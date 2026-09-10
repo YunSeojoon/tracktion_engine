@@ -27,14 +27,21 @@ namespace ids
     const Identifier uid ("id"), name ("name"), schema ("schema"), channel ("channel"),
         pattern ("pattern"), lane ("lane"), start ("start"), length ("length"), pitch ("pitch"),
         velocity ("velocity"), gainDb ("gainDb"), pan ("pan"), mute ("mute"), solo ("solo"),
-        insert ("insert"), index ("index");
+        insert ("insert"), index ("index"),
+        instrument ("instrument"), sample ("sample"), stepPitch ("stepPitch"), stepLength ("stepLength");
 
     // Written onto engine clips so a derived clip can be matched back to the model.
     const Identifier clipInstance ("coComposeInstance"), clipChannel ("coComposeChannel");
 }
 
 constexpr int modelSchema = 2;
-constexpr double defaultPatternBeats = 16.0;
+constexpr double defaultPatternBeats = 4.0;   // One bar, sixteen steps, as FL does
+
+/** A step in the Channel Rack grid is a sixteenth note. */
+constexpr double stepBeats = 0.25;
+
+// Channel instruments are named by these, or by a scanned plugin's identifier string.
+const String builtInSynth ("4osc"), builtInSampler ("sampler");
 
 class Model  : private ValueTree::Listener
 {
@@ -126,6 +133,10 @@ public:
         channel.setProperty (ids::mute, false, nullptr);
         channel.setProperty (ids::solo, false, nullptr);
         channel.setProperty (ids::insert, slot, nullptr);
+        channel.setProperty (ids::instrument, builtInSynth, nullptr);
+        channel.setProperty (ids::sample, "", nullptr);
+        channel.setProperty (ids::stepPitch, 60, nullptr);
+        channel.setProperty (ids::stepLength, stepBeats, nullptr);
         channels().appendChild (channel, undo);
         addInsert (channelName, slot, undo);
         return channel;
@@ -252,6 +263,42 @@ public:
         return nullptr;
     }
 
+    /** The channel's instrument: the first plugin that is not the track's own volume
+        or metering. */
+    static te::Plugin* instrumentOf (te::AudioTrack& track)
+    {
+        for (auto* plugin : track.pluginList)
+            if (dynamic_cast<te::VolumeAndPanPlugin*> (plugin) == nullptr
+                 && dynamic_cast<te::LevelMeterPlugin*> (plugin) == nullptr)
+                return plugin;
+        return nullptr;
+    }
+
+    /** What `instrument` would have to say for this plugin to be the right one. */
+    static String kindOf (te::Plugin* plugin)
+    {
+        if (auto* external = dynamic_cast<te::ExternalPlugin*> (plugin))
+            return external->getIdentifierString();
+        if (dynamic_cast<te::SamplerPlugin*> (plugin) != nullptr)
+            return builtInSampler;
+        if (plugin != nullptr)
+            return builtInSynth;
+        return {};
+    }
+
+    /** Instruments the Channel Rack can offer: the two built in, plus every scanned
+        plugin that reports itself as an instrument. */
+    Array<std::pair<String, String>> availableInstruments() const
+    {
+        Array<std::pair<String, String>> result;
+        result.add ({ builtInSynth, "4OSC (built in)" });
+        result.add ({ builtInSampler, "Sampler (built in)" });
+        for (const auto& type : edit.engine.getPluginManager().knownPluginList.getTypes())
+            if (type.isInstrument)
+                result.add ({ type.createIdentifierString(), type.name });
+        return result;
+    }
+
 private:
     bool dirty = false;
 
@@ -287,6 +334,70 @@ private:
         return edit.tempoSequence.toTime (te::BeatPosition::fromBeats (beat));
     }
 
+    /** Puts the instrument the channel asks for at the head of the track, replacing
+        whatever is there only when it is actually a different one. */
+    void syncInstrument (te::AudioTrack& track, ValueTree channel)
+    {
+        auto wanted = channel[ids::instrument].toString();
+        if (wanted.isEmpty())
+        {
+            // A channel created from a document that predates instrument selection.
+            wanted = builtInSynth;
+            channel.setProperty (ids::instrument, wanted, nullptr);
+        }
+
+        auto* existing = instrumentOf (track);
+
+        if (kindOf (existing) != wanted)
+        {
+            te::Plugin::Ptr replacement;
+
+            if (wanted == builtInSynth)
+                replacement = edit.getPluginCache().createNewPlugin (te::FourOscPlugin::xmlTypeName, {});
+            else if (wanted == builtInSampler)
+                replacement = edit.getPluginCache().createNewPlugin (te::SamplerPlugin::xmlTypeName, {});
+            else if (auto description = edit.engine.getPluginManager().knownPluginList
+                                            .getTypeForIdentifierString (wanted))
+                replacement = edit.getPluginCache().createNewPlugin (te::ExternalPlugin::xmlTypeName, *description);
+
+            // A plugin that cannot be created leaves the channel silent rather than
+            // wrong, and the model keeps the request so a later scan can satisfy it.
+            if (replacement != nullptr)
+            {
+                if (existing != nullptr)
+                    existing->deleteFromParent();
+                track.pluginList.insertPlugin (*replacement, 0, nullptr);
+                existing = replacement.get();
+            }
+        }
+
+        if (auto* sampler = dynamic_cast<te::SamplerPlugin*> (existing))
+            syncSampler (*sampler, channel);
+    }
+
+    /** One sound across the whole keyboard, rooted at the channel's step pitch, which
+        is what a drum or one-shot channel needs. */
+    void syncSampler (te::SamplerPlugin& sampler, ValueTree channel)
+    {
+        const auto wanted = channel[ids::sample].toString();
+        const auto root = jlimit (0, 127, static_cast<int> (channel.getProperty (ids::stepPitch, 60)));
+
+        if (wanted.isEmpty())
+        {
+            while (sampler.getNumSounds() > 0)
+                sampler.removeSound (0);
+            return;
+        }
+
+        if (sampler.getNumSounds() == 0)
+            sampler.addSound (wanted, File (wanted).getFileNameWithoutExtension(), 0.0, 0.0, 0.0f);
+        else if (sampler.getSoundMedia (0) != wanted)
+            sampler.setSoundMedia (0, wanted);
+
+        if (sampler.getNumSounds() > 0 && sampler.getKeyNote (0) != root)
+            sampler.setSoundParams (0, root, 0, 127);
+    }
+
     /** Every channel owns one engine audio track, in the channel's order. */
     void syncChannels()
     {
@@ -302,11 +413,9 @@ private:
                 track = te::getAudioTracks (edit)[count];
                 require (track != nullptr, "Cannot create channel track");
                 track->state.setProperty ("coComposeId", channelID, nullptr);
-
-                if (auto synth = edit.getPluginCache().createNewPlugin (te::FourOscPlugin::xmlTypeName, {}))
-                    track->pluginList.insertPlugin (*synth, 0, nullptr);
             }
 
+            syncInstrument (*track, channel);
             track->setName (channel[ids::name].toString());
             track->setMute (static_cast<bool> (channel[ids::mute]));
             track->setSolo (static_cast<bool> (channel[ids::solo]));
@@ -470,6 +579,10 @@ private:
             channel.setProperty (ids::mute, track->isMuted (false), nullptr);
             channel.setProperty (ids::solo, track->isSolo (false), nullptr);
             channel.setProperty (ids::insert, ++slot, nullptr);
+            channel.setProperty (ids::instrument, kindOf (instrumentOf (*track)), nullptr);
+            channel.setProperty (ids::sample, "", nullptr);
+            channel.setProperty (ids::stepPitch, 60, nullptr);
+            channel.setProperty (ids::stepLength, stepBeats, nullptr);
             channels().appendChild (channel, nullptr);
             addInsert (track->getName(), slot, nullptr);
 

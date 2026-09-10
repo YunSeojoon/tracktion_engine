@@ -39,7 +39,7 @@ Read fresh `state.json`, keep its session ID, revision and object IDs, modify th
 
 The document is schema 2 and separates five things:
 
-- `channels` — one instrument each, with `gain_db`, `pan`, `mute`, `solo`, a mixer `insert` number and the `parameters` its plugins expose.
+- `channels` — one instrument each, with `gain_db`, `pan`, `mute`, `solo`, a mixer `insert` number, the `instrument` it plays (`4osc`, `sampler`, or a scanned plugin's identifier), a `sample` path for the sampler, the `step_pitch` and `step_length` its step grid writes, and the `parameters` its plugins expose.
 - `patterns` — named note collections. A pattern holds one `sequences` entry per channel that plays in it, each with its own `notes`.
 - `playlist.lanes` and `playlist.clips` — a clip is a *placement* of a pattern on a lane at a beat position. Several clips can reference one pattern.
 - `mixer.inserts` — numbered strips that channels are assigned to. Modelled and saved, but the audio still runs from each channel to the master; routing arrives with the mixer work.
@@ -58,7 +58,9 @@ Browser on the left, Channel Rack above the Mixer in the centre, Pattern picker 
 
 `Space` starts and stops, `Ctrl+L` switches between Song and Pattern loops, `Ctrl+M` toggles the metronome, `Ctrl+T` adds a channel, `Ctrl+P` a pattern, `Ctrl+B` places the selected pattern, and `Ctrl+U` gives the selected placement its own copy.
 
-Step sequencing and the piano roll, playlist editing with the mouse, the sample browser, and mixer routing with effects are not built yet.
+The Channel Rack carries a sixteenth-note step grid for the selected pattern: click or drag across it to write notes at the channel's step pitch. `Piano roll` opens the note editor for the selected channel and pattern — click to add, drag to move, drag a note's right edge to resize, Alt-drag for velocity, right-click to delete, drag the background to rubber-band select, and use `Ctrl+D` to duplicate, `Q` to quantise and `Delete` to remove. Clicking the keyboard previews through the channel's real instrument.
+
+Playlist editing with the mouse, the sample browser, and mixer routing with effects are not built yet.
 
 Use the standard-library Python helper while the app is running:
 
@@ -75,6 +77,6 @@ It also supports transpose, clear-notes, place, make-unique, gain, parameter, st
 - [Windows 실행 및 외부 AI 협업 가이드](docs/windows-guide.ko.md)
 - [작업 단위와 검증 기록](docs/worklog.ko.md)
 
-The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 15 real-app integration checks passed. Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. Details are in the work log. Real audio listening and third-party VST3 compatibility remain unverified. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
+The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 16 real-app integration checks passed. Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. Details are in the work log. Real audio listening and third-party VST3 compatibility remain unverified. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
 
 Keep upstream license notices intact. Tracktion Engine and JUCE have separate licenses; see the upstream README and JUCE license files.

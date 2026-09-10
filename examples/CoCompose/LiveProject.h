@@ -50,7 +50,8 @@ inline var upgradeToSchema2 (const var& root)
 
         channels.add (object ({ { "id", channelID }, { "name", trackName },
             { "gain_db", track["gain_db"] }, { "pan", 0.0 }, { "mute", track["mute"] },
-            { "solo", track["solo"] }, { "insert", slot },
+            { "solo", track["solo"] }, { "insert", slot }, { "instrument", builtInSynth },
+            { "sample", "" }, { "step_pitch", 60 }, { "step_length", stepBeats },
             { "parameters", track["parameters"].isArray() ? track["parameters"] : var (Array<var>()) } }));
         inserts.add (object ({ { "id", channelID + "-insert" }, { "index", slot },
             { "name", trackName }, { "gain_db", 0.0 }, { "pan", 0.0 }, { "mute", false } }));
@@ -175,6 +176,10 @@ public:
                 { "mute", track != nullptr ? track->isMuted (false) : static_cast<bool> (channel[ids::mute]) },
                 { "solo", track != nullptr ? track->isSolo (false) : static_cast<bool> (channel[ids::solo]) },
                 { "insert", static_cast<int> (channel[ids::insert]) },
+                { "instrument", Model::kindOf (track != nullptr ? Model::instrumentOf (*track) : nullptr) },
+                { "sample", channel[ids::sample].toString() },
+                { "step_pitch", static_cast<int> (channel.getProperty (ids::stepPitch, 60)) },
+                { "step_length", static_cast<double> (channel.getProperty (ids::stepLength, stepBeats)) },
                 { "parameters", parameters } }));
         }
 
@@ -433,13 +438,29 @@ private:
         std::set<String> channelIDs;
         for (const auto& channel : *root["channels"].getArray())
         {
-            knownFields (channel, "id name gain_db pan mute solo insert parameters");
+            knownFields (channel, "id name gain_db pan mute solo insert instrument sample "
+                                  "step_pitch step_length parameters");
             require (channelIDs.insert (id (channel)).second, "Duplicate channel id");
             require (channel["name"].isString() && channel["name"].toString().length() <= 200, "Invalid channel name");
             number (channel, "gain_db", -60, 6);
             number (channel, "pan", -1, 1);
             number (channel, "insert", 1, 256, true);
             require (channel["mute"].isBool() && channel["solo"].isBool(), "mute and solo must be boolean");
+
+            // The instrument fields arrived after schema 2 shipped, so they stay optional.
+            if (channel.hasProperty ("instrument"))
+                require (channel["instrument"].isString() && channel["instrument"].toString().length() <= 400,
+                         "Invalid instrument");
+            if (channel.hasProperty ("sample"))
+            {
+                require (channel["sample"].isString(), "sample must be a string");
+                const auto file = channel["sample"].toString();
+                require (file.isEmpty() || File::isAbsolutePath (file), "sample must be an absolute path");
+            }
+            if (channel.hasProperty ("step_pitch"))
+                number (channel, "step_pitch", 0, 127, true);
+            if (channel.hasProperty ("step_length"))
+                number (channel, "step_length", 0.001, 64);
 
             require (channel["parameters"].isArray(), "parameters must be an array");
             std::set<String> parameterIDs;
@@ -561,6 +582,14 @@ private:
                            channel.setProperty (ids::mute, static_cast<bool> (desired["mute"]), um);
                            channel.setProperty (ids::solo, static_cast<bool> (desired["solo"]), um);
                            channel.setProperty (ids::insert, static_cast<int> (desired["insert"]), um);
+                           if (desired.hasProperty ("instrument"))
+                               channel.setProperty (ids::instrument, desired["instrument"].toString(), um);
+                           if (desired.hasProperty ("sample"))
+                               channel.setProperty (ids::sample, desired["sample"].toString(), um);
+                           if (desired.hasProperty ("step_pitch"))
+                               channel.setProperty (ids::stepPitch, static_cast<int> (desired["step_pitch"]), um);
+                           if (desired.hasProperty ("step_length"))
+                               channel.setProperty (ids::stepLength, static_cast<double> (desired["step_length"]), um);
                        });
 
             applyList (model->patterns(), ids::PATTERN, root["patterns"], undo,

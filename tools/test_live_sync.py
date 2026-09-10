@@ -261,6 +261,7 @@ def run(exe, folder):
         checks.append(check_legacy_session(launch, folder))
         checks.append(check_legacy_json_input(launch, folder))
         checks.append(check_workspace_layout(launch, folder))
+        checks.append(check_pattern_built_in_the_ui(exe, folder))
 
         report = {"passed": checks, "folder": str(folder), "executable": str(exe)}
         atomic_write(folder / "test-report.json", report)
@@ -383,6 +384,98 @@ def check_workspace_layout(launch, folder):
     restored_sizes = [float(v) for v in restored.get("sizes", "").split()]
     assert abs(restored_sizes[0] - 160.0) < 1.0, restored_sizes
     return "Panel sizes, visibility and selection are saved in the session and restored"
+
+
+def check_pattern_built_in_the_ui(exe, folder):
+    """Builds a drum, bass and melody pattern using only the work surface: menu
+    commands, the Channel Rack step grid and the piano roll. Then plays it, saves it,
+    and confirms an outside note edit reaches the open editor."""
+    sub = folder / "ui-built"
+    sub.mkdir()
+    project = sub / "project.json"
+    script = sub / "ui-script.json"
+
+    drum_steps = [0, 4, 8, 12, 2, 10]
+    bass_steps = [0, 6, 8, 14]
+    melody = [(72, 0.0, 0.5, 100), (76, 0.5, 0.5, 96), (79, 1.0, 1.0, 104),
+              (76, 2.0, 0.5, 92), (72, 2.5, 1.5, 88)]
+
+    actions = [{"command": "New pattern"}, {"select_pattern": 1}]
+    # Channel 0 is the seeded synth; add the bass and the drums beside it.
+    actions += [{"command": "Add channel"}, {"command": "Add channel"}]
+    actions += [{"select_channel": 0}] + [{"step": [0, step]} for step in drum_steps]
+    actions += [{"select_channel": 1}] + [{"step": [1, step]} for step in bass_steps]
+    actions += [{"select_channel": 2}] + [{"note": list(note)} for note in melody]
+    actions += [{"select_lane": 0}, {"command": "Place pattern"},
+                {"command": "Play / Stop"}, {"command": "Save now"}]
+    atomic_write(script, actions)
+
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+    process = subprocess.Popen([str(exe), "--project", str(project), "--headless",
+                                "--screenshots", "--ui-script", str(script)], startupinfo=startup)
+    try:
+        wait_for(lambda: read(sub / "ui-script-status.json").get("finished"), timeout=90)
+        status = read(sub / "ui-script-status.json")
+        assert not status["error"], status["error"]
+        assert status["done"] == len(actions), status
+
+        state = read(sub / "state.json")
+        assert len(state["channels"]) == 3, state["channels"]
+        built = next(p for p in state["patterns"] if len(p["sequences"]) == 3)
+        by_channel = {s["channel"]: s["notes"] for s in built["sequences"]}
+        ids = [c["id"] for c in state["channels"]]
+
+        assert len(by_channel[ids[0]]) == len(drum_steps), by_channel[ids[0]]
+        assert sorted(round(n["start"] / 0.25) for n in by_channel[ids[0]]) == sorted(drum_steps)
+        assert len(by_channel[ids[1]]) == len(bass_steps)
+        assert sorted(round(n["start"] / 0.25) for n in by_channel[ids[1]]) == sorted(bass_steps)
+        assert sorted((n["pitch"], n["start"]) for n in by_channel[ids[2]]) == \
+            sorted((p, s) for p, s, _, _ in melody)
+
+        played = engine_clips(state, built["id"])
+        assert len(played) == 3, "The pattern the UI built did not reach three engine clips"
+        assert sum(len(clip["notes"]) for clip in played) == len(drum_steps) + len(bass_steps) + len(melody)
+        assert read(sub / "sync-status.json")["playing"], "Play from the transport did not start"
+
+        # An outside note edit has to show up in the editor that is already open.
+        outside = read(sub / "state.json")
+        target = next(p for p in outside["patterns"] if p["id"] == built["id"])
+        notes = next(s for s in target["sequences"] if s["channel"] == ids[2])["notes"]
+        for note in notes:
+            note["pitch"] += 3
+        updated = submit(project, outside)
+        shown = next(s for s in next(p for p in updated["patterns"] if p["id"] == built["id"])["sequences"]
+                     if s["channel"] == ids[2])["notes"]
+        assert sorted(n["pitch"] for n in shown) == sorted(p + 3 for p, _, _, _ in melody)
+        assert sorted(n["pitch"] for n in engine_clips(updated, built["id"])[2]["notes"]) == \
+            sorted(p + 3 for p, _, _, _ in melody)
+        labels = read(sub / "ui-state.json")["labels"]
+        for channel in state["channels"]:
+            assert channel["name"] in labels, (channel["name"], labels)
+
+        first_session = read(sub / "sync-status.json")["session_id"]
+        control(project, "quit")
+        assert process.wait(timeout=20) == 0
+
+        # And it all has to come back from the saved session.
+        process = subprocess.Popen([str(exe), "--project", str(project), "--headless"], startupinfo=startup)
+        wait_for(lambda: read(sub / "sync-status.json")["session_id"] != first_session, timeout=40)
+        reopened = read(sub / "state.json")
+        assert len(reopened["channels"]) == 3
+        restored = next(p for p in reopened["patterns"] if p["id"] == built["id"])
+        assert len(restored["sequences"]) == 3
+        assert len(engine_clips(reopened, built["id"])) == 3
+        control(project, "quit")
+        assert process.wait(timeout=20) == 0
+        process = None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+    return "Drum, bass and melody channels built through the rack and piano roll play, save and reload"
 
 
 if __name__ == "__main__":

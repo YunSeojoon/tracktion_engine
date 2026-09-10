@@ -2,6 +2,7 @@
 
 #include "../common/Components.h"
 #include "Model.h"
+#include "PianoRoll.h"
 
 namespace live
 {
@@ -204,13 +205,122 @@ private:
 };
 
 //==============================================================================
-/** One channel: name, mute/solo, fader, mixer insert, and how much the selected
-    pattern asks this channel to play. */
+/** The sixteenth-note grid for one channel in the selected pattern. A lit step is a
+    note starting inside it; clicking writes or removes that note in the pattern, so
+    the whole playlist hears the change. */
+class StepGrid final : public Component,
+                       public SettableTooltipClient
+{
+public:
+    StepGrid (Model& m, Selection& s, const String& channelID, std::function<void()> onChange)
+        : model (m), selection (s), id (channelID), changed (std::move (onChange)) {}
+
+    static constexpr int stepWidth = 14;
+
+    int stepCount() const
+    {
+        auto pattern = model.patternFor (selection.pattern());
+        if (! pattern.isValid())
+            return 0;
+        return jlimit (0, 256, roundToInt (static_cast<double> (pattern[ids::length]) / stepBeats));
+    }
+
+    int preferredWidth() const { return stepCount() * stepWidth; }
+
+    void paint (Graphics& g) override
+    {
+        auto sequence = Model::findSequence (model.patternFor (selection.pattern()), id);
+        const auto steps = stepCount();
+
+        for (int step = 0; step < steps; ++step)
+        {
+            const auto area = Rectangle<int> (step * stepWidth, 0, stepWidth - 2, getHeight()).reduced (0, 3);
+            const auto onBeat = step % 4 == 0;
+            const auto lit = noteInStep (sequence, step).isValid();
+
+            g.setColour (lit ? Colour (0xff7ddc9a)
+                             : onBeat ? Colour (0xff39455c) : Colour (0xff28303f));
+            g.fillRoundedRectangle (area.toFloat(), 2.0f);
+
+            if (! lit && step % 16 == 0 && step > 0)
+            {
+                g.setColour (Colour (0xff55617a));
+                g.fillRect (step * stepWidth - 1, 0, 1, getHeight());
+            }
+        }
+    }
+
+    void mouseDown (const MouseEvent& e) override { toggleStep (e.x / stepWidth); }
+    void mouseDrag (const MouseEvent& e) override
+    {
+        const auto step = e.x / stepWidth;
+        if (step != lastDragged)
+            toggleStep (step);
+    }
+    void mouseUp (const MouseEvent&) override { lastDragged = -1; }
+
+    /** Turns one step on or off, the same way a click on it does. */
+    bool toggleStep (int step)
+    {
+        auto pattern = model.patternFor (selection.pattern());
+        if (! pattern.isValid() || step < 0 || step >= stepCount())
+            return false;
+
+        lastDragged = step;
+        auto channel = model.channelFor (id);
+        auto& undo = model.edit.getUndoManager();
+        undo.beginNewTransaction ("Edit step");
+
+        auto sequence = model.sequenceFor (pattern, id, &undo);
+        if (auto existing = noteInStep (sequence, step); existing.isValid())
+        {
+            sequence.removeChild (existing, &undo);
+        }
+        else
+        {
+            const auto length = std::max (0.001, static_cast<double> (channel.getProperty (ids::stepLength, stepBeats)));
+            const auto room = static_cast<double> (pattern[ids::length]) - step * stepBeats;
+            model.addNote (sequence, jlimit (0, 127, static_cast<int> (channel.getProperty (ids::stepPitch, 60))),
+                           step * stepBeats, std::min (length, room), 100, &undo);
+        }
+
+        model.renderIfNeeded();
+        if (changed != nullptr) changed();
+        repaint();
+        return true;
+    }
+
+private:
+    ValueTree noteInStep (ValueTree sequence, int step) const
+    {
+        if (! sequence.isValid())
+            return {};
+
+        const auto from = step * stepBeats;
+        for (auto note : sequence)
+        {
+            const auto start = static_cast<double> (note[ids::start]);
+            if (start >= from - 1.0e-6 && start < from + stepBeats - 1.0e-6)
+                return note;
+        }
+        return {};
+    }
+
+    Model& model;
+    Selection& selection;
+    const String id;
+    std::function<void()> changed;
+    int lastDragged = -1;
+};
+
+//==============================================================================
+/** One channel: name, instrument, mute/solo, fader, pan, mixer insert, and the step
+    grid for the pattern currently selected in the picker. */
 class ChannelRow final : public Component
 {
 public:
     ChannelRow (Model& m, Selection& s, const String& channelID, std::function<void()> onChange)
-        : model (m), selection (s), id (channelID), changed (std::move (onChange))
+        : model (m), selection (s), id (channelID), changed (onChange), steps (m, s, channelID, onChange)
     {
         name.setEditable (false, true, false);
         name.setColour (Label::textColourId, Colours::white);
@@ -224,35 +334,56 @@ public:
 
         mute.setClickingTogglesState (true);
         solo.setClickingTogglesState (true);
-        mute.onClick = [this] { toggle (ids::mute, mute.getToggleState(), "Mute channel"); };
-        solo.onClick = [this] { toggle (ids::solo, solo.getToggleState(), "Solo channel"); };
+        mute.onClick = [this] { write (ids::mute, mute.getToggleState(), "Mute channel"); };
+        solo.onClick = [this] { write (ids::solo, solo.getToggleState(), "Solo channel"); };
 
-        gain.setSliderStyle (Slider::LinearHorizontal);
+        gain.setSliderStyle (Slider::RotaryVerticalDrag);
         gain.setRange (-60.0, 6.0, 0.1);
-        gain.setTextBoxStyle (Slider::TextBoxRight, false, 52, 20);
-        gain.setTextValueSuffix (" dB");
-        gain.onValueChange = [this] { toggle (ids::gainDb, gain.getValue(), "Channel volume"); };
+        gain.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
+        gain.setTooltip ("Channel volume");
+        gain.onValueChange = [this] { write (ids::gainDb, gain.getValue(), "Channel volume"); };
 
         insert.setSliderStyle (Slider::IncDecButtons);
         insert.setRange (1.0, 256.0, 1.0);
-        insert.setTextBoxStyle (Slider::TextBoxLeft, false, 40, 20);
-        insert.onValueChange = [this] { toggle (ids::insert, static_cast<int> (insert.getValue()), "Mixer insert"); };
+        insert.setTextBoxStyle (Slider::TextBoxLeft, false, 26, 20);
+        insert.setTooltip ("Mixer insert");
+        insert.onValueChange = [this] { write (ids::insert, static_cast<int> (insert.getValue()), "Mixer insert"); };
 
-        instrument.onClick = [this]
+        pan.setSliderStyle (Slider::RotaryVerticalDrag);
+        pan.setRange (-1.0, 1.0, 0.01);
+        pan.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
+        pan.setTooltip ("Channel pan");
+        pan.onValueChange = [this] { write (ids::pan, pan.getValue(), "Channel pan"); };
+
+        instrument.onChange = [this]
         {
-            if (auto* track = model.trackFor (id))
-                for (auto* plugin : track->pluginList)
-                    if (plugin->getName() != "Volume & Pan" && plugin->getName() != "Level Meter")
-                    {
-                        plugin->showWindowExplicitly();
-                        return;
-                    }
+            const auto choice = instrument.getSelectedId() - 1;
+            if (! isPositiveAndBelow (choice, instruments.size()) || refreshing)
+                return;
+
+            const auto wanted = instruments.getReference (choice).first;
+            if (wanted == channel()[ids::instrument].toString())
+                return;
+
+            auto& undo = model.edit.getUndoManager();
+            undo.beginNewTransaction ("Change instrument");
+            channel().setProperty (ids::instrument, wanted, &undo);
+            if (wanted == builtInSampler && channel()[ids::sample].toString().isEmpty())
+                chooseSample();
+            model.renderIfNeeded();
         };
 
-        notes.setColour (Label::textColourId, Colour (0xff8698b6));
-        notes.setJustificationType (Justification::centredRight);
+        openInstrument.onClick = [this]
+        {
+            if (auto* track = model.trackFor (id))
+                if (auto* plugin = Model::instrumentOf (*track))
+                    plugin->showWindowExplicitly();
+        };
 
-        for (auto* child : std::initializer_list<Component*> { &name, &mute, &solo, &gain, &insert, &instrument, &notes })
+        sample.onClick = [this] { chooseSample(); };
+
+        for (auto* child : std::initializer_list<Component*> { &name, &mute, &solo, &gain, &pan, &insert,
+                                                              &instrument, &openInstrument, &sample, &steps })
             addAndMakeVisible (*child);
     }
 
@@ -264,15 +395,26 @@ public:
 
     void resized() override
     {
+        // The step grid is what a Channel Rack is for, so the controls beside it stay
+        // compact and everything left over goes to the steps.
         auto r = getLocalBounds().reduced (6, 3);
-        name.setBounds (r.removeFromLeft (150));
-        mute.setBounds (r.removeFromLeft (34).reduced (2));
-        solo.setBounds (r.removeFromLeft (34).reduced (2));
-        instrument.setBounds (r.removeFromLeft (74).reduced (2));
-        insert.setBounds (r.removeFromRight (96).reduced (2));
-        notes.setBounds (r.removeFromRight (110));
-        gain.setBounds (r.reduced (2, 0));
+        name.setBounds (r.removeFromLeft (116));
+        mute.setBounds (r.removeFromLeft (24).reduced (1));
+        solo.setBounds (r.removeFromLeft (24).reduced (1));
+        instrument.setBounds (r.removeFromLeft (114).reduced (2));
+        openInstrument.setBounds (r.removeFromLeft (26).reduced (1));
+        sample.setBounds (r.removeFromLeft (32).reduced (1));
+        gain.setBounds (r.removeFromLeft (32));
+        pan.setBounds (r.removeFromLeft (32));
+        insert.setBounds (r.removeFromLeft (62).reduced (1));
+        steps.setBounds (r.withTrimmedLeft (8));
     }
+
+    static constexpr int controlsWidth = 470;
+
+    int preferredWidth() const { return controlsWidth + steps.preferredWidth(); }
+
+    bool toggleStep (int step) { return steps.toggleStep (step); }
 
     void mouseDown (const MouseEvent&) override
     {
@@ -286,16 +428,36 @@ public:
         if (! tree.isValid())
             return;
 
+        const ScopedValueSetter<bool> guard (refreshing, true);
+
         if (! name.isBeingEdited()) name.setText (tree[ids::name].toString(), dontSendNotification);
         mute.setToggleState (static_cast<bool> (tree[ids::mute]), dontSendNotification);
         solo.setToggleState (static_cast<bool> (tree[ids::solo]), dontSendNotification);
         gain.setValue (static_cast<double> (tree[ids::gainDb]), dontSendNotification);
+        pan.setValue (static_cast<double> (tree.getProperty (ids::pan, 0.0)), dontSendNotification);
         insert.setValue (static_cast<double> (tree[ids::insert]), dontSendNotification);
+
+        const auto available = model.availableInstruments();
+        if (available != instruments)
+        {
+            instruments = available;
+            instrument.clear (dontSendNotification);
+            for (int i = 0; i < instruments.size(); ++i)
+                instrument.addItem (instruments.getReference (i).second, i + 1);
+        }
+
+        const auto wanted = tree[ids::instrument].toString();
+        for (int i = 0; i < instruments.size(); ++i)
+            if (instruments.getReference (i).first == wanted)
+                instrument.setSelectedId (i + 1, dontSendNotification);
+
+        sample.setEnabled (wanted == builtInSampler);
+        sample.setTooltip (tree[ids::sample].toString());
 
         auto sequence = Model::findSequence (model.patternFor (selection.pattern()), id);
         const auto count = sequence.isValid() ? sequence.getNumChildren() : 0;
-        notes.setText (count == 0 ? "no notes in pattern" : String (count) + " notes in pattern",
-                       dontSendNotification);
+        steps.setTooltip (count == 1 ? "1 note in pattern" : String (count) + " notes in pattern");
+        steps.repaint();
         repaint();
     }
 
@@ -305,30 +467,60 @@ private:
     ValueTree channel() const { return model.channelFor (id); }
 
     template <typename Value>
-    void toggle (const Identifier& property, Value value, const String& description)
+    void write (const Identifier& property, Value value, const String& description)
     {
+        if (refreshing)
+            return;
+
         auto& undo = model.edit.getUndoManager();
         undo.beginNewTransaction (description);
         channel().setProperty (property, value, &undo);
         model.renderIfNeeded();
     }
 
+    void chooseSample()
+    {
+        chooser = std::make_unique<FileChooser> ("Choose a sample for " + channel()[ids::name].toString(),
+                                                 File(), model.edit.engine.getAudioFileFormatManager()
+                                                              .readFormatManager.getWildcardForAllFormats());
+        chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles,
+            [this] (const FileChooser& result)
+            {
+                const auto file = result.getResult();
+                if (! file.existsAsFile())
+                    return;
+
+                auto& undo = model.edit.getUndoManager();
+                undo.beginNewTransaction ("Load sample");
+                channel().setProperty (ids::instrument, builtInSampler, &undo);
+                channel().setProperty (ids::sample, file.getFullPathName(), &undo);
+                model.renderIfNeeded();
+                if (changed != nullptr) changed();
+            });
+    }
+
     Model& model;
     Selection& selection;
     std::function<void()> changed;
     Label name;
-    TextButton mute { "M" }, solo { "S" }, instrument { "Instrument" };
-    Slider gain, insert;
-    Label notes;
+    TextButton mute { "M" }, solo { "S" }, openInstrument { "..." }, sample { "WAV" };
+    ComboBox instrument;
+    Slider gain, pan, insert;
+    StepGrid steps;
+    Array<std::pair<String, String>> instruments;
+    std::unique_ptr<FileChooser> chooser;
+    bool refreshing = false;
 };
 
 //==============================================================================
 class ChannelRack final : public Component
 {
 public:
-    ChannelRack (Model& m, Selection& s, std::function<void()> onChange)
+    ChannelRack (Model& m, Selection& s, std::function<void()> onChange, std::function<void()> openPianoRoll)
         : model (m), selection (s), changed (std::move (onChange))
     {
+        pianoRoll.onClick = std::move (openPianoRoll);
+
         add.onClick = [this]
         {
             auto& undo = model.edit.getUndoManager();
@@ -355,10 +547,11 @@ public:
 
         rows.setInterceptsMouseClicks (false, true);
         viewport.setViewedComponent (&rows, false);
-        viewport.setScrollBarsShown (true, false);
+        viewport.setScrollBarsShown (true, true);
         addAndMakeVisible (viewport);
         addAndMakeVisible (add);
         addAndMakeVisible (remove);
+        addAndMakeVisible (pianoRoll);
     }
 
     void resized() override
@@ -367,6 +560,7 @@ public:
         auto bar = r.removeFromBottom (26);
         add.setBounds (bar.removeFromLeft (110).reduced (2));
         remove.setBounds (bar.removeFromLeft (130).reduced (2));
+        pianoRoll.setBounds (bar.removeFromLeft (110).reduced (2));
         viewport.setBounds (r);
         layoutRows();
     }
@@ -393,20 +587,35 @@ public:
         }
 
         remove.setEnabled (model.channelFor (selection.channel()).isValid());
+        pianoRoll.setEnabled (model.channelFor (selection.channel()).isValid()
+                               && model.patternFor (selection.pattern()).isValid());
         for (auto* row : channelRows)
             row->refresh();
+
+        layoutRows(); // The step grid grows and shrinks with the selected pattern.
+    }
+
+    /** Drives one step button, for the diagnostic UI script. */
+    bool toggleStep (int channelIndex, int step)
+    {
+        if (! isPositiveAndBelow (channelIndex, channelRows.size()))
+            return false;
+        return channelRows[channelIndex]->toggleStep (step);
     }
 
 private:
     void layoutRows()
     {
-        const auto width = std::max (520, viewport.getWidth() - viewport.getScrollBarThickness());
+        auto width = std::max (560, viewport.getWidth() - viewport.getScrollBarThickness());
+        for (auto* row : channelRows)
+            width = std::max (width, row->preferredWidth());
+
         rows.setSize (width, std::max (viewport.getHeight(), channelRows.size() * rowHeight));
         for (int i = 0; i < channelRows.size(); ++i)
             channelRows[i]->setBounds (0, i * rowHeight, width, rowHeight);
     }
 
-    static constexpr int rowHeight = 30;
+    static constexpr int rowHeight = 38;
 
     Model& model;
     Selection& selection;
@@ -414,7 +623,7 @@ private:
     Viewport viewport;
     Component rows;
     OwnedArray<ChannelRow> channelRows;
-    TextButton add { "+ Channel" }, remove { "Remove channel" };
+    TextButton add { "+ Channel" }, remove { "Remove channel" }, pianoRoll { "Piano roll" };
 };
 
 //==============================================================================
@@ -878,7 +1087,7 @@ public:
         auto onChange = [this] { refresh(); };
 
         browser = std::make_unique<ProjectBrowser> (model, selection, engine, onChange);
-        rack = std::make_unique<ChannelRack> (model, selection, onChange);
+        rack = std::make_unique<ChannelRack> (model, selection, onChange, [this] { openPianoRoll(); });
         mixer = std::make_unique<MixerPanel> (model);
         picker = std::make_unique<PatternPicker> (model, selection, onChange);
         playlist = std::make_unique<PlaylistPanel> (model, selection, sm, onChange);
@@ -891,7 +1100,7 @@ public:
         }
 
         const auto stored = StringArray::fromTokens (layout[layoutIds::sizes].toString(), " ", "");
-        const double fallbacks[4] = { 210.0, 520.0, 290.0, 170.0 };
+        const double fallbacks[4] = { 190.0, 460.0, 290.0, 170.0 };
         for (int i = 0; i < 4; ++i)
         {
             const auto value = i < stored.size() ? stored[i].getDoubleValue() : 0.0;
@@ -1019,6 +1228,62 @@ public:
             panel->repaint();
     }
 
+    /** Opens the note editor for the selected channel in the selected pattern. Its
+        window is owned here so it closes with the work surface. */
+    void openPianoRoll()
+    {
+        auto channel = model.channelFor (selection.channel());
+        auto pattern = model.patternFor (selection.pattern());
+        if (! channel.isValid() || ! pattern.isValid())
+            return;
+
+        pianoRollWindow = std::make_unique<PianoRollWindow> (
+            pattern[ids::name].toString() + "  -  " + channel[ids::name].toString(),
+            std::make_unique<PianoRollEditor> (model, selection.pattern(), selection.channel()));
+    }
+
+    //==========================================================================
+    // Entry points for the diagnostic UI script, so a check can drive the real
+    // panels instead of writing to the model behind their backs.
+    bool selectByIndex (const Identifier& what, int index)
+    {
+        auto parent = what == ids::CHANNEL ? model.channels()
+                    : what == ids::PATTERN ? model.patterns()
+                    : model.lanes();
+        auto child = parent.getChild (index);
+        if (! child.isValid())
+            return false;
+
+        if (what == ids::CHANNEL)      selection.setChannel (Model::uidOf (child));
+        else if (what == ids::PATTERN) selection.setPattern (Model::uidOf (child));
+        else                           selection.setLane (Model::uidOf (child));
+
+        refresh();
+        return true;
+    }
+
+    bool toggleStep (int channelIndex, int step) { return rack->toggleStep (channelIndex, step); }
+
+    /** The open note editor, so --screenshots can capture it too. */
+    Component* pianoRollContent() const
+    {
+        return pianoRollWindow != nullptr && pianoRollWindow->isVisible()
+                 ? pianoRollWindow->getContentComponent() : nullptr;
+    }
+
+    bool addPianoRollNote (int pitch, double startBeat, double lengthBeats, int velocity)
+    {
+        if (pianoRollWindow == nullptr || ! pianoRollWindow->isVisible())
+            openPianoRoll();
+
+        if (auto* editor = pianoRollWindow != nullptr
+                             ? dynamic_cast<PianoRollEditor*> (pianoRollWindow->getContentComponent())
+                             : nullptr)
+            return editor->addNote (pitch, startBeat, lengthBeats, velocity);
+
+        return false;
+    }
+
     void store()
     {
         rememberSizes();
@@ -1031,6 +1296,23 @@ public:
     Selection selection;
 
 private:
+    struct PianoRollWindow final : DocumentWindow
+    {
+        PianoRollWindow (const String& windowTitle, std::unique_ptr<PianoRollEditor> editor)
+            : DocumentWindow (windowTitle, Colour (0xff151b26), DocumentWindow::allButtons)
+        {
+            setUsingNativeTitleBar (true);
+            setContentOwned (editor.release(), true);
+            setResizable (true, false);
+            setResizeLimits (620, 380, 4000, 2400);
+            centreWithSize (1000, 560);
+            setVisible (true);
+            toFront (true);
+        }
+
+        void closeButtonPressed() override { setVisible (false); }
+    };
+
     static constexpr int barSize = 6;
 
     /** Keeps the last size an item had while it was genuinely sharing space, so hiding
@@ -1122,7 +1404,7 @@ private:
         setBar (manager, 1, bothOn);
     }
 
-    double desired[4] = { 210.0, 520.0, 290.0, 170.0 };
+    double desired[4] = { 190.0, 460.0, 290.0, 170.0 };
 
     std::unique_ptr<ProjectBrowser> browser;
     std::unique_ptr<ChannelRack> rack;
@@ -1131,6 +1413,7 @@ private:
     std::unique_ptr<PlaylistPanel> playlist;
     std::unique_ptr<Panel> panels[numPanels];
 
+    std::unique_ptr<PianoRollWindow> pianoRollWindow;
     Component centreHolder, rightHolder;
     StretchableLayoutManager columns, centre, right;
     std::unique_ptr<StretchableLayoutResizerBar> columnBars[2], centreBar, rightBar;
