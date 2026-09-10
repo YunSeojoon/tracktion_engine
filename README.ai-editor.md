@@ -12,7 +12,7 @@ Development branch: `ai-editor`
 
 Extract the entire `CoCompose-0.1.0-windows-x64.zip` archive and double-click `CoCompose.exe`. PowerShell, Python and Visual Studio are not required to run the app. Python is optional for the external editing helper. Default projects remain in the Windows Documents folder under `CoCompose`, outside the distribution folder.
 
-To update, close the app and extract the new ZIP to a separate folder. This is an unsigned portable build; an installer and automatic updates are not included. Local ZIP verification is in progress. The GitHub workflow is configured, but a successful remote run and downloadable artifact have not yet been confirmed.
+To update, close the app and extract the new ZIP to a separate folder. This is an unsigned portable build; an installer and automatic updates are not included. Both the local package and the CI artifact have been extracted and verified: all 10 integration checks pass against the packaged executable, and it starts by double-click with no developer tools on PATH.
 
 ## Build and run on Windows
 
@@ -27,7 +27,9 @@ cmake --build build-cocompose --config Release --target CoCompose --parallel 4
 
 To build and package a portable ZIP after initializing submodules, run `./tools/build-windows.ps1` in PowerShell. It invokes CMake and CPack and writes `build-cocompose/dist/CoCompose-0.1.0-windows-x64.zip`. Pass `-Jobs 4` to select build parallelism.
 
-`.github/workflows/cocompose-windows.yml` builds on relevant `ai-editor` pushes, pull requests targeting that branch, and manual dispatch. It uploads the ZIP as `CoCompose-windows-x64`. Remote CI execution is not yet verified.
+`.github/workflows/cocompose-windows.yml` builds on relevant `ai-editor` pushes, pull requests targeting that branch, and manual dispatch. It uploads the ZIP as `CoCompose-windows-x64`. A remote run has succeeded and its artifact was downloaded and tested.
+
+`tools/test_portable_start.ps1 -Exe <extracted CoCompose.exe>` checks that an extracted build starts with only the stock Windows directories on PATH and restores the existing default project instead of reseeding the example.
 
 The default session lives in the Windows Documents folder under `CoCompose`. Use `--project 'C:\absolute\song\project.json'` to select a different session folder. Use one folder per song.
 

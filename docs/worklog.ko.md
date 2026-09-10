@@ -54,3 +54,29 @@ CoCompose Windows Release 빌드가 MSVC 19.44.35223에서 성공했다. `tools/
 `.github/workflows/cocompose-windows.yml`에 Windows 빌드·artifact 업로드를 추가했다. 관련 경로의 `ai-editor` push, 해당 브랜치 대상 PR, 수동 실행을 지원한다. 원격 CI 실행 성공 여부는 아직 확인하지 않았다.
 
 ZIP을 모두 풀어 `CoCompose.exe`를 더블클릭하는 사용법을 문서에 반영했다. 일반 실행에는 PowerShell·Python·Visual Studio가 필요 없다. 기본 프로젝트는 문서 폴더에 저장되므로 새 배포 폴더와 분리된다. `docs/windows-portable.ko.txt`가 배포용 안내다. 현재 코드 서명·설치 프로그램·자동 업데이트는 포함하지 않는다.
+
+## 2026-09-10 — M0 인수·빌드·배포 기준선 확정
+
+`docs/claude-handoff-milestones.ko.md`의 M0 완료 조건을 검증했다. 인수 시점의 미커밋 배포 작업은 덮어쓰지 않고 검토 후 `2e45b25`로 커밋했다.
+
+### ZIP 배포 EXE 검증
+
+로컬 `build-cocompose/dist/CoCompose-0.1.0-windows-x64.zip`의 내용은 `CoCompose.exe`, `README.txt`, `licenses/`, `tools/`이며 EXE가 압축 해제 폴더 바로 아래에 있다. ZIP 안의 EXE는 `build-cocompose/CoCompose_artefacts/Release/CoCompose.exe`와 SHA-256이 같다.
+
+`python tools/test_live_sync.py --exe <압축 해제한 CoCompose.exe>`를 ZIP EXE에 대해 실행해 기존 10개 통합 검사를 모두 통과했고 종료 코드는 0이었다. 검사 항목은 위 2026-09-07 기록과 같다.
+
+### Windows CI 검증
+
+`.github/workflows/cocompose-windows.yml`이 `ai-editor` push에서 실행되어 성공했다. run 34420462358, 약 9분, 커밋 `2e45b25`. `CoCompose-windows-x64` artifact를 다운로드해 압축을 풀었고 ZIP 구조와 EXE 버전 정보(0.1.0)가 로컬 패키지와 일치했다.
+
+CI artifact의 EXE에 대해서도 `tools/test_live_sync.py`를 실행해 10개 검사를 모두 통과했다. 원격 빌드 산출물이 로컬 빌드와 동일하게 동작함을 확인했다.
+
+### 개발 도구 없는 환경 시작 검사
+
+`tools/test_portable_start.ps1`을 추가했다. PATH를 Windows 기본 디렉터리만 남기고 `cmake`, `python`, `cl`, `git`, `msbuild`가 실제로 도달 불가능한지 확인한 뒤, 인자 없이 EXE를 실행한다. 더블클릭과 같은 경로다.
+
+로컬 ZIP EXE와 CI artifact EXE 모두 창(`CoCompose`)이 뜨고, 문서 폴더의 기존 프로젝트가 그대로 복원되었다. 트랙 1개, 노트 32개, BPM 120, 트랙 이름 `CoCompose Synth`가 실행 전후로 동일했고 `state.json`이 갱신되었다. 새 예제 프로젝트로 덮어쓰지 않는다.
+
+### 남은 제한
+
+실제 청음과 타사 VST3 호환성은 여전히 미검증이다. 코드 서명·설치 프로그램·자동 업데이트는 없다. 검사는 개발 도구가 설치된 장비에서 PATH를 제한해 수행한 것이며, 완전히 새로 설치한 Windows 장비에서의 검사는 아니다.

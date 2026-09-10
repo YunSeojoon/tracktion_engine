@@ -8,7 +8,7 @@ Windows x64용 `CoCompose-0.1.0-windows-x64.zip`을 폴더에 모두 압축 해�
 
 기본 프로젝트는 Windows 문서 폴더의 `CoCompose`에 저장된다. 앱을 업데이트할 때는 종료 후 새 ZIP을 별도 폴더에 풀어 실행한다. 기본 프로젝트 데이터는 배포 폴더 밖에 있어 유지된다. 별도 `--project` 경로를 사용했다면 그 폴더를 계속 지정한다.
 
-현재 ZIP은 코드 서명이 없으며 설치 프로그램과 자동 업데이트는 포함하지 않는다. 아래 개발자 스크립트가 ZIP을 생성한다. GitHub Actions에도 ZIP 생성 workflow가 추가되어 있지만 원격 실행 성공이나 다운로드 가능한 artifact의 존재는 아직 확인하지 않았다.
+현재 ZIP은 코드 서명이 없으며 설치 프로그램과 자동 업데이트는 포함하지 않는다. 아래 개발자 스크립트가 ZIP을 생성한다. GitHub Actions workflow의 원격 실행 성공과 artifact 다운로드를 확인했고, 로컬 ZIP과 CI artifact 모두 압축 해제 후 통합 검사 10개를 통과했다.
 
 ## 개발자 빌드와 실행
 
@@ -34,7 +34,9 @@ git submodule update --init --recursive
 
 결과 경로는 `build-cocompose\dist\CoCompose-0.1.0-windows-x64.zip`이다. 병렬 빌드 수는 `-Jobs 4`처럼 조절할 수 있다. 로컬 ZIP 생성 검증은 진행 중이며, 위의 Release 실행 파일 검증과 구분한다.
 
-`.github/workflows/cocompose-windows.yml`은 `ai-editor`의 관련 경로 push, 해당 브랜치 대상 PR 또는 수동 실행에서 Windows 빌드 후 `CoCompose-windows-x64` artifact로 ZIP을 업로드하도록 구성되어 있다. 원격 CI 실행 결과는 아직 미확인이다.
+`.github/workflows/cocompose-windows.yml`은 `ai-editor`의 관련 경로 push, 해당 브랜치 대상 PR 또는 수동 실행에서 Windows 빌드 후 `CoCompose-windows-x64` artifact로 ZIP을 업로드한다. 원격 실행 성공과 artifact 실행을 확인했다.
+
+배포본 자체를 검사하려면 압축을 푼 뒤 `.	ools	est_portable_start.ps1 -Exe '<압축 해제 경로>\CoCompose.exe'`를 실행한다. PATH에서 개발 도구를 제거한 상태로 앱을 띄우고 기존 기본 프로젝트가 복원되는지 확인한다.
 
 기본 작업 파일은 Windows 문서 폴더의 `CoCompose\project.json`이다. 문서 폴더가 OneDrive 등으로 이동된 경우 화면 상단의 실제 경로를 확인한다. 폴더에 기존 작업이 없으면 내장 FourOsc 신스로 8마디 예제를 만든다. 별도 작업 폴더를 쓰려면 다음처럼 실행한다.
 
