@@ -2,6 +2,7 @@
 #include "../common/Utilities.h"
 #include "../common/Components.h"
 #include "../common/PluginWindow.h"
+#include "Theme.h"
 #include "LiveProject.h"
 #include "Recording.h"
 #include "Workspace.h"
@@ -59,6 +60,7 @@ public:
         menuBar.setModel (this);
         title.setText ("CoCompose", dontSendNotification);
         title.setFont (Font (FontOptions (18.0f, Font::bold)));
+        title.setColour (Label::textColourId, live::theme::text);
         path.setText (file.getFullPathName(), dontSendNotification);
         path.setColour (Label::textColourId, Colours::lightgrey);
         path.setFont (Font (FontOptions (11.0f)));
@@ -82,7 +84,7 @@ public:
 
         for (auto* label : std::initializer_list<Label*> { &position, &load, &focus })
         {
-            label->setColour (Label::textColourId, Colour (0xff8698b6));
+            label->setColour (Label::textColourId, live::theme::textDim);
             label->setFont (Font (FontOptions (12.0f)));
         }
         position.setJustificationType (Justification::centred);
@@ -90,6 +92,10 @@ public:
 
         Helpers::addAndMakeVisible (*this, { &menuBar, &title, &path, &play, &song, &tempo, &position,
                                              &click, &load, &focus, &status, &workspace });
+
+        // One look for the whole surface. Set before anything is laid out so every panel
+        // gets the same fonts and metrics from the start.
+        LookAndFeel::setDefaultLookAndFeel (&look);
 
         setSize (1420, 860);
         workspace.setMidiLearnHandlers ([this] (const String& source, const String& plugin, const String& parameter)
@@ -109,6 +115,9 @@ public:
 
     ~Editor() override
     {
+        // Before anything else: the child components are destroyed after this object's
+        // own members, so a look and feel that has already gone would be a dangling one.
+        LookAndFeel::setDefaultLookAndFeel (nullptr);
         stopTimer();
         menuBar.setModel (nullptr);
         // Closing during a recording still keeps the take rather than dropping it.
@@ -123,7 +132,7 @@ public:
         project.writeBackup();
     }
 
-    void paint (Graphics& g) override { g.fillAll (Colour (0xff141a24)); }
+    void paint (Graphics& g) override { g.fillAll (live::theme::window); }
 
     void resized() override
     {
@@ -1032,7 +1041,7 @@ private:
                       dontSendNotification);
         focus.setText ("Focus: " + workspace.focusedPanelName(), dontSendNotification);
 
-        status.setColour (Label::textColourId, project.error.isEmpty() ? Colour (0xff83dec0) : Colour (0xffffad83));
+        status.setColour (Label::textColourId, project.error.isEmpty() ? live::theme::accent : live::theme::warn);
         if (project.error.isNotEmpty())
             say ((project.syncState == "applied_unpersisted" ? "Applied; save pending: " : "Sync rejected: ")
                                 + project.error);
@@ -1461,6 +1470,7 @@ private:
     std::unique_ptr<PluginDirectoryScanner> scanner;
     int scanned = 0;
     String lastTransportKey;
+    live::CoComposeLookAndFeel look;
     uint32 messageAt = 0;
     int learningRow = -1;
     te::AutomatableParameter* learningParameter = nullptr;
@@ -1504,7 +1514,19 @@ public:
             openedProject = file;
             auto editor = std::make_unique<Editor> (file, args.contains ("--play"),
                                                     args.contains ("--screenshots"), uiScript);
-            window = std::make_unique<Window> (std::move (editor), ! args.contains ("--headless"));
+            // Lets a check look at the surface at the sizes people actually have, rather
+            // than only at whatever this screen happens to allow.
+            auto wanted = Rectangle<int> (1420, 860);
+            if (const auto sizeOption = args.indexOf ("--size");
+                sizeOption >= 0 && sizeOption + 1 < args.size())
+            {
+                const auto parts = StringArray::fromTokens (args[sizeOption + 1], "x", {});
+                if (parts.size() == 2)
+                    wanted = { jlimit (640, 4000, parts[0].getIntValue()),
+                               jlimit (400, 2400, parts[1].getIntValue()) };
+            }
+
+            window = std::make_unique<Window> (std::move (editor), ! args.contains ("--headless"), wanted);
         }
         catch (const std::exception& e)
         {
@@ -1545,8 +1567,8 @@ public:
 private:
     struct Window final : DocumentWindow
     {
-        Window (std::unique_ptr<Editor> editor, bool visible)
-            : DocumentWindow ("CoCompose", Colour (0xff141a24), DocumentWindow::allButtons)
+        Window (std::unique_ptr<Editor> editor, bool visible, Rectangle<int> wanted)
+            : DocumentWindow ("CoCompose", live::theme::window, DocumentWindow::allButtons)
         {
             setUsingNativeTitleBar (true);
             setContentOwned (editor.release(), true);
@@ -1557,7 +1579,8 @@ private:
             // what this display actually has room for.
             const auto room = availableSize();
             setResizeLimits (jmin (1180, room.getWidth()), jmin (620, room.getHeight()), 4000, 2400);
-            centreWithSize (jmin (1420, room.getWidth()), jmin (860, room.getHeight()));
+            centreWithSize (jmin (wanted.getWidth(), room.getWidth()),
+                            jmin (wanted.getHeight(), room.getHeight()));
             setVisible (visible);
         }
         /** The room a window has, in the units a window is sized in. userBounds is

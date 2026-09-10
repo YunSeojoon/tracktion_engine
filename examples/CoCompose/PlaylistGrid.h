@@ -69,7 +69,7 @@ public:
     //==========================================================================
     void paint (Graphics& g) override
     {
-        g.fillAll (Colour (0xff161d29));
+        g.fillAll (theme::panel);
 
         const auto beats = std::max (arrangementBeats() + 8.0, (getWidth() - laneWidth) / beatWidth());
 
@@ -85,7 +85,7 @@ public:
         {
             g.setColour (Colour (0x40ffd479));
             g.fillRect (rubberBand);
-            g.setColour (Colour (0xffffd479));
+            g.setColour (theme::warn);
             g.drawRect (rubberBand, 1);
         }
     }
@@ -927,7 +927,7 @@ private:
             if (! bar && beatWidth() < 8.0)
                 continue;
 
-            g.setColour (bar ? Colour (0xff333e52) : Colour (0xff222a38));
+            g.setColour (bar ? theme::edgeStrong : theme::rowAlt);
             g.fillRect (xForBeat (beat), rulerHeight, 1, getHeight() - rulerHeight);
         }
     }
@@ -941,14 +941,14 @@ private:
             const auto y = rulerHeight + i * laneHeight;
             const auto picked = Model::uidOf (lane) == selection.lane();
 
-            g.setColour (picked ? Colour (0xff2b3f4d) : Colour (0xff1b2330));
+            g.setColour (picked ? theme::selection : theme::panelHeader);
             g.fillRect (0, y, laneWidth - 2, laneHeight - 1);
 
-            g.setColour (static_cast<bool> (lane[ids::mute]) ? Colour (0xff6c7689) : Colours::white.withAlpha (0.85f));
+            g.setColour (static_cast<bool> (lane[ids::mute]) ? theme::textFaint : Colours::white.withAlpha (0.85f));
             g.setFont (Font (FontOptions (12.0f)));
             g.drawText (lane[ids::name].toString(), 6, y, laneWidth - 14, laneHeight - 1, Justification::centredLeft);
 
-            g.setColour (Colour (0xff222a38));
+            g.setColour (theme::rowAlt);
             g.fillRect (0, y + laneHeight - 1, getWidth(), 1);
         }
     }
@@ -970,7 +970,7 @@ private:
 
             g.setColour (picked ? colour.brighter (0.5f) : colour);
             g.fillRoundedRectangle (area.toFloat(), 3.0f);
-            g.setColour (picked ? Colours::white : Colour (0xff0e131b));
+            g.setColour (picked ? Colours::white : theme::sunken);
             g.drawRoundedRectangle (area.toFloat(), 3.0f, picked ? 1.6f : 1.0f);
 
             // Where the pattern starts over inside a clip that repeats it.
@@ -1006,7 +1006,7 @@ private:
         const File source (clip[ids::file].toString());
         const auto missing = ! source.existsAsFile();
 
-        g.setColour (missing ? Colour (0xff7a4a4a) : Colour (0xff3f6f8c));
+        g.setColour (missing ? Colour (0xff7a4a4a) : theme::clipFill);
         g.fillRoundedRectangle (area.toFloat(), 3.0f);
 
         if (! missing)
@@ -1049,7 +1049,7 @@ private:
             g.fillPath (wedge);
         }
 
-        g.setColour (picked ? Colours::white : Colour (0xff0e131b));
+        g.setColour (picked ? Colours::white : theme::sunken);
         g.drawRoundedRectangle (area.toFloat(), 3.0f, picked ? 1.6f : 1.0f);
 
         if (area.getWidth() > 34)
@@ -1086,19 +1086,19 @@ private:
             auto curve = curves.getChild (index);
             const auto area = curveArea (index);
 
-            g.setColour (index == selectedCurve ? Colour (0xff1f2b3a) : Colour (0xff181f2b));
+            g.setColour (index == selectedCurve ? theme::selection : theme::panelHeader);
             g.fillRect (area);
-            g.setColour (Colour (0xff222a38));
+            g.setColour (theme::rowAlt);
             g.fillRect (area.getX(), area.getBottom() - 1, getWidth(), 1);
 
-            g.setColour (index == selectedCurve ? Colour (0xff2b3f4d) : Colour (0xff1b2330));
+            g.setColour (index == selectedCurve ? theme::selection : theme::panelHeader);
             g.fillRect (0, area.getY(), laneWidth - 2, area.getHeight() - 1);
             // The parameter first: it is what tells two curves on one channel apart.
             g.setColour (Colours::white.withAlpha (0.9f));
             g.setFont (Font (FontOptions (11.0f, Font::bold)));
             g.drawText (curve[ids::parameter].toString(), 6, area.getY() + 6, laneWidth - 12, 13,
                         Justification::centredLeft);
-            g.setColour (Colour (0xff8698b6));
+            g.setColour (theme::textDim);
             g.setFont (Font (FontOptions (10.0f)));
             g.drawText (curveOwnerName (curve), 6, area.getY() + 20, laneWidth - 12, 12,
                         Justification::centredLeft);
@@ -1114,7 +1114,7 @@ private:
 
             if (! line.isEmpty())
             {
-                g.setColour (Colour (0xffffd479).withAlpha (0.85f));
+                g.setColour (theme::warn.withAlpha (0.85f));
                 g.strokePath (line, PathStrokeType (1.4f));
             }
 
@@ -1126,7 +1126,7 @@ private:
                 const auto at = pointPosition (area, point);
                 const auto picked = selectedCurve == index
                                      && selectedPoint == Model::uidOf (point);
-                g.setColour (picked ? Colours::white : Colour (0xffffd479));
+                g.setColour (picked ? Colours::white : theme::warn);
                 g.fillEllipse (at.x - 3.5f, at.y - 3.5f, 7.0f, 7.0f);
             }
         }
@@ -1208,21 +1208,21 @@ private:
 
     void paintRuler (Graphics& g, double beats)
     {
-        g.setColour (Colour (0xff10161f));
+        g.setColour (theme::sunken);
         g.fillRect (0, 0, getWidth(), rulerHeight);
-        g.setColour (Colour (0xff2a3242));
+        g.setColour (theme::edge);
         g.fillRect (0, rulerHeight - 1, getWidth(), 1);
 
         g.setFont (Font (FontOptions (10.0f)));
         for (double beat = 0.0; beat <= beats; beat += 4.0)
         {
             const auto x = xForBeat (beat);
-            g.setColour (Colour (0xff3d4a60));
+            g.setColour (theme::edgeStrong);
             g.fillRect (x, 6, 1, rulerHeight - 7);
 
             if (beatWidth() * 4.0 >= 26.0)
             {
-                g.setColour (Colour (0xff8698b6));
+                g.setColour (theme::textDim);
                 g.drawText (String (roundToInt (beat / 4.0) + 1), x + 3, 2, 40, rulerHeight - 4,
                             Justification::centredLeft, false);
             }
@@ -1248,7 +1248,7 @@ private:
     void paintPlayhead (Graphics& g)
     {
         const auto beat = model.edit.tempoSequence.toBeats (model.edit.getTransport().getPosition()).inBeats();
-        g.setColour (Colour (0xffffe17d));
+        g.setColour (theme::warn);
         g.fillRect (xForBeat (beat), 0, 2, getHeight());
     }
 
@@ -1258,7 +1258,7 @@ private:
         for (int i = 0; i < patterns.getNumChildren(); ++i)
             if (Model::uidOf (patterns.getChild (i)) == patternID)
                 return Colour::fromHSV (std::fmod (0.36f + i * 0.17f, 1.0f), 0.45f, 0.72f, 1.0f);
-        return Colour (0xff6fd39a);
+        return theme::good;
     }
 
     void timerCallback() override

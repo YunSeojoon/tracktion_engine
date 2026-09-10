@@ -35,7 +35,7 @@ public:
         duplicate.onClick = [this] { duplicateSelection(); };
         deleteNotes.onClick = [this] { deleteSelection(); };
 
-        hint.setColour (Label::textColourId, Colour (0xff8698b6));
+        hint.setColour (Label::textColourId, theme::textDim);
         hint.setFont (Font (FontOptions (11.0f)));
         hint.setText ("Drag to move, drag the right edge to resize, Alt-drag for velocity, "
                       "Ctrl+D duplicate, Q quantise, Delete removes", dontSendNotification);
@@ -77,7 +77,7 @@ public:
         layOutGrid();
     }
 
-    void paint (Graphics& g) override { g.fillAll (Colour (0xff151b26)); }
+    void paint (Graphics& g) override { g.fillAll (theme::panel); }
 
     bool keyPressed (const KeyPress& key) override
     {
@@ -311,22 +311,22 @@ private:
             const auto perBeat = owner.beatWidth();
             const auto gridHeight = getHeight();
 
-            g.fillAll (Colour (0xff1a2130));
+            g.fillAll (theme::panelHeader);
 
             for (int pitch = lowestNote; pitch <= highestNote; ++pitch)
             {
                 const auto y = rowY (pitch);
                 const auto black = MidiMessage::isMidiNoteBlack (pitch);
 
-                g.setColour (black ? Colour (0xff161c28) : Colour (0xff1f2735));
+                g.setColour (black ? Colour (0xff161c28) : theme::row);
                 g.fillRect (keyboardWidth, y, getWidth() - keyboardWidth, noteHeight);
 
-                g.setColour (black ? Colour (0xff11161f) : Colour (0xffd8dee9));
+                g.setColour (black ? theme::sunken : theme::text);
                 g.fillRect (0, y, keyboardWidth - 2, noteHeight - 1);
 
                 if (pitch % 12 == 0)
                 {
-                    g.setColour (Colour (0xff5c6a83));
+                    g.setColour (theme::textFaint);
                     g.drawText ("C" + String (pitch / 12 - 1), 3, y - 1, keyboardWidth - 8, noteHeight,
                                 Justification::centredLeft);
                 }
@@ -336,7 +336,7 @@ private:
             {
                 const auto x = keyboardWidth + roundToInt (beat * perBeat);
                 const auto bar = std::abs (std::fmod (beat, 4.0)) < 1.0e-6;
-                g.setColour (bar ? Colour (0xff4a5670) : Colour (0xff2a3242));
+                g.setColour (bar ? theme::edgeStrong : theme::edge);
                 g.fillRect (x, 0, bar ? 2 : 1, gridHeight);
             }
 
@@ -355,9 +355,9 @@ private:
                 const auto picked = owner.selected.contains (Model::uidOf (note));
                 const auto velocity = static_cast<int> (note[ids::velocity]);
 
-                g.setColour (picked ? Colour (0xffffd479) : Colour (0xff6fd39a));
+                g.setColour (picked ? theme::warn : theme::good);
                 g.fillRoundedRectangle (area.toFloat(), 2.0f);
-                g.setColour (Colour (0xff0e131b));
+                g.setColour (theme::sunken);
                 g.drawRoundedRectangle (area.toFloat(), 2.0f, 1.0f);
 
                 // A louder note is drawn brighter, so velocity reads without the lane.
@@ -369,7 +369,7 @@ private:
             {
                 g.setColour (Colour (0x40ffd479));
                 g.fillRect (rubberBand);
-                g.setColour (Colour (0xffffd479));
+                g.setColour (theme::warn);
                 g.drawRect (rubberBand, 1);
             }
         }
@@ -588,8 +588,8 @@ private:
 
         void paint (Graphics& g) override
         {
-            g.fillAll (Colour (0xff121821));
-            g.setColour (Colour (0xff2a3242));
+            g.fillAll (theme::sunken);
+            g.setColour (theme::edge);
             g.drawHorizontalLine (0, 0.0f, static_cast<float> (getWidth()));
 
             const auto offset = owner.viewport.getViewPositionX();
@@ -600,11 +600,11 @@ private:
                 const auto velocity = static_cast<int> (note[ids::velocity]);
                 const auto barHeight = roundToInt (velocity / 127.0 * (getHeight() - 8));
 
-                g.setColour (owner.selected.contains (Model::uidOf (note)) ? Colour (0xffffd479) : Colour (0xff4f9c78));
+                g.setColour (owner.selected.contains (Model::uidOf (note)) ? theme::warn : theme::clipFill);
                 g.fillRect (x, getHeight() - barHeight - 3, w, barHeight);
             }
 
-            g.setColour (Colour (0xff55617a));
+            g.setColour (theme::textFaint);
             g.setFont (Font (FontOptions (10.0f)));
             g.drawText ("VELOCITY", 4, 2, 70, 12, Justification::centredLeft);
         }

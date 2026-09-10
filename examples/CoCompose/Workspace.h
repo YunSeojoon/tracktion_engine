@@ -46,11 +46,11 @@ public:
     {
         const auto focused = hasKeyboardFocus (true);
         const auto bounds = getLocalBounds().toFloat();
-        g.setColour (Colour (0xff1c2331));
+        g.setColour (theme::panelHeader);
         g.fillRoundedRectangle (bounds, 4.0f);
-        g.setColour (focused ? Colour (0xff83dec0) : Colour (0xff2b3446));
+        g.setColour (focused ? theme::accent : theme::edge);
         g.drawRoundedRectangle (bounds.reduced (0.5f), 4.0f, focused ? 1.8f : 1.0f);
-        g.setColour (focused ? Colour (0xff83dec0) : Colour (0xff8698b6));
+        g.setColour (focused ? theme::accent : theme::textDim);
         g.setFont (Font (FontOptions (12.0f, Font::bold)));
         g.drawText (title.toUpperCase(), getLocalBounds().removeFromTop (headerHeight).reduced (9, 0),
                     Justification::centredLeft);
@@ -107,13 +107,13 @@ public:
             const auto onBeat = step % 4 == 0;
             const auto lit = noteInStep (sequence, step).isValid();
 
-            g.setColour (lit ? Colour (0xff7ddc9a)
-                             : onBeat ? Colour (0xff39455c) : Colour (0xff28303f));
+            g.setColour (lit ? theme::good
+                             : onBeat ? Colour (0xff39455c) : theme::edge);
             g.fillRoundedRectangle (area.toFloat(), 2.0f);
 
             if (! lit && step % 16 == 0 && step > 0)
             {
-                g.setColour (Colour (0xff55617a));
+                g.setColour (theme::textFaint);
                 g.fillRect (step * stepWidth - 1, 0, 1, getHeight());
             }
         }
@@ -261,7 +261,7 @@ public:
 
     void paint (Graphics& g) override
     {
-        g.setColour (selection.channel() == id ? Colour (0xff2f4f5f) : Colour (0xff222b3b));
+        g.setColour (selection.channel() == id ? theme::selection : theme::row);
         g.fillRoundedRectangle (getLocalBounds().toFloat().reduced (1.0f), 3.0f);
     }
 
@@ -788,7 +788,7 @@ public:
         name.onTextChange = [this] { write (ids::name, name.getText(), "Rename insert"); };
 
         feeds.setJustificationType (Justification::centred);
-        feeds.setColour (Label::textColourId, Colour (0xff8698b6));
+        feeds.setColour (Label::textColourId, theme::textDim);
         feeds.setFont (Font (FontOptions (11.0f)));
 
         gain.setSliderStyle (Slider::LinearVertical);
@@ -823,7 +823,7 @@ public:
         routing.setEnabled (master == nullptr);
 
         chain.setJustificationType (Justification::centredLeft);
-        chain.setColour (Label::textColourId, Colour (0xff9fd6c0));
+        chain.setColour (Label::textColourId, theme::accent);
         chain.setFont (Font (FontOptions (10.0f)));
 
         for (auto* child : std::initializer_list<Component*> { &name, &gain, &pan, &mute, &feeds, &effects,
@@ -839,22 +839,43 @@ public:
 
     void paint (Graphics& g) override
     {
-        g.setColour (master != nullptr ? Colour (0xff2a3550) : Colour (0xff222b3b));
+        g.setColour (master != nullptr ? theme::selection : theme::row);
         g.fillRoundedRectangle (getLocalBounds().toFloat().reduced (1.5f), 3.0f);
+        g.setColour (theme::edge);
+        g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (1.5f), 3.0f, 1.0f);
 
         // The meter sits beside the fader so a strip shows what it is actually passing.
         const auto meterArea = meterBounds();
-        g.setColour (Colour (0xff12171f));
+        g.setColour (theme::sunken);
         g.fillRect (meterArea);
 
-        const auto level = jlimit (0.0f, 1.0f, (peak + 60.0f) / 66.0f);
-        const auto height = roundToInt (level * meterArea.getHeight());
-        if (height > 0)
+        // Green up to -9, amber to -1, red at the top: the bands are where they are so a
+        // person can see they are close to clipping before they are.
+        const auto asFraction = [] (float db) { return jlimit (0.0f, 1.0f, (db + 60.0f) / 66.0f); };
+        const auto fill = [&] (float from, float to, Colour colour)
         {
-            g.setColour (peak > -1.0f ? Colour (0xffff7a6b) : peak > -9.0f ? Colour (0xffffd479) : Colour (0xff6fd39a));
-            g.fillRect (meterArea.getX(), meterArea.getBottom() - height, meterArea.getWidth(), height);
+            const auto top = meterArea.getBottom() - roundToInt (asFraction (to) * meterArea.getHeight());
+            const auto bottom = meterArea.getBottom() - roundToInt (asFraction (from) * meterArea.getHeight());
+            if (bottom > top)
+            {
+                g.setColour (colour);
+                g.fillRect (meterArea.getX(), top, meterArea.getWidth(), bottom - top);
+            }
+        };
+
+        fill (-60.0f, jmin (peak, -9.0f), theme::good);
+        if (peak > -9.0f) fill (-9.0f, jmin (peak, -1.0f), theme::warn);
+        if (peak > -1.0f) fill (-1.0f, peak, theme::danger);
+
+        // The held peak, so a short transient is still visible a moment later.
+        if (held > -59.0f)
+        {
+            const auto at = meterArea.getBottom() - roundToInt (asFraction (held) * meterArea.getHeight());
+            g.setColour (held > -1.0f ? theme::danger : theme::text);
+            g.fillRect (meterArea.getX(), at - 1, meterArea.getWidth(), 1);
         }
     }
+
 
     void resized() override
     {
@@ -1338,14 +1359,14 @@ private:
         const auto fields = StringArray::fromTokens (entries[row], "\t", "");
         if (fields[0] == selection.pattern())
         {
-            g.setColour (Colour (0xff2f4f5f));
+            g.setColour (theme::selection);
             g.fillRect (0, 0, width, height);
         }
 
         g.setColour (Colours::white.withAlpha (0.9f));
         g.setFont (Font (FontOptions (13.0f)));
         g.drawText (fields[1], 6, 0, width - 70, height, Justification::centredLeft);
-        g.setColour (Colour (0xff8698b6));
+        g.setColour (theme::textDim);
         g.setFont (Font (FontOptions (11.0f)));
         g.drawText (fields[2] + "x", width - 62, 0, 56, height, Justification::centredRight);
     }
@@ -1871,7 +1892,7 @@ private:
     struct PianoRollWindow final : DocumentWindow
     {
         PianoRollWindow (const String& windowTitle, std::unique_ptr<PianoRollEditor> editor)
-            : DocumentWindow (windowTitle, Colour (0xff151b26), DocumentWindow::allButtons)
+            : DocumentWindow (windowTitle, theme::panel, DocumentWindow::allButtons)
         {
             setUsingNativeTitleBar (true);
             setContentOwned (editor.release(), true);

@@ -1432,6 +1432,27 @@ def check_survives_the_rough_edges(exe, folder):
             process.terminate()
             process.wait(timeout=10)
 
+    # Two window sizes people actually have. What matters is that the panels are all
+    # still there and the window fits what it was asked for, not that it looks the same.
+    for size in ("1280x720", "1920x1080"):
+        (sub / "ui.png").unlink(missing_ok=True)
+        process = launch(("--size", size))
+        try:
+            wait_for(lambda: (sub / "ui.png").exists(), timeout=60)
+            time.sleep(2.0)
+            shot = read_png_size(sub / "ui.png")
+            asked = [int(part) for part in size.split("x")]
+            assert shot[0] <= asked[0] and shot[1] <= asked[1], (size, shot)
+            assert len(read(sub / "ui-state.json")["labels"]) == baseline_labels,                 (size, read(sub / "ui-state.json")["labels"])
+            assert not read(sub / "sync-status.json")["error"], (size, read(sub / "sync-status.json"))
+            control(project, "quit")
+            assert process.wait(timeout=30) == 0
+            process = None
+        finally:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                process.wait(timeout=10)
+
     # The same project at 150% and 200%: the surface has to lay out, not just start.
     # The window is measured in its own units, so scaling it up makes those units
     # cover more of the screen; what has to hold is that the window still fits the
@@ -1510,7 +1531,8 @@ def check_survives_the_rough_edges(exe, folder):
             process.terminate()
             process.wait(timeout=10)
 
-    return "The surface lays out at 150% and 200%, a missing plugin is survivable, and a killed app reopens its work"
+    return ("The surface lays out at 1280x720 and 1920x1080 and at 150% and 200%, a missing "
+            "plugin is survivable, and a killed app reopens its work")
 
 
 PNG_MAGIC = bytes([137, 80, 78, 71, 13, 10, 26, 10])

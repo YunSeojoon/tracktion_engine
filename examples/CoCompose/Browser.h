@@ -37,7 +37,7 @@ public:
         list.setRowHeight (19);
         list.setColour (ListBox::backgroundColourId, Colours::transparentBlack);
 
-        search.setTextToShowWhenEmpty ("Search samples", Colour (0xff5c6a83));
+        search.setTextToShowWhenEmpty ("Search samples", theme::textFaint);
         search.onTextChange = [this] { rebuild(); };
         search.onReturnKey = [this] { rebuild(); };
 
@@ -430,18 +430,18 @@ private:
 
         if (picked)
         {
-            g.setColour (Colour (0xff2f4f5f));
+            g.setColour (theme::selection);
             g.fillRect (0, 0, width, height);
         }
 
         if (item.expandable)
         {
-            g.setColour (Colour (0xff8698b6));
+            g.setColour (theme::textDim);
             g.drawText (item.expanded ? "-" : "+", 2 + item.depth * 10, 0, 10, height, Justification::centredLeft);
         }
 
-        g.setColour (item.missing ? Colour (0xffff9a8c)
-                   : item.header ? Colour (0xff8698b6) : Colours::white.withAlpha (0.88f));
+        g.setColour (item.missing ? theme::danger
+                   : item.header ? theme::textDim : Colours::white.withAlpha (0.88f));
         g.setFont (Font (FontOptions (item.header ? 12.0f : 13.0f, item.header ? Font::bold : Font::plain)));
         g.drawText (item.label + (item.missing ? "  (missing)" : ""), 12, 0, width - 16, height,
                     Justification::centredLeft);
