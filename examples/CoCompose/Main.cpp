@@ -14,7 +14,8 @@ namespace commands
 enum
 {
     playStop = 0x2000, songMode, save, saveCopy, revealFolder, quitApp,
-    undo, redo, addChannel, newPattern, placePattern, makeUnique, transposeUp, transposeDown,
+    undo, redo, addChannel, newPattern, placePattern, makeUnique, splitClip, duplicateClip,
+    transposeUp, transposeDown,
     metronome, focusNextPanel, scanPlugins, audioSettings, about,
     togglePanelBase // + panel index
 };
@@ -28,15 +29,11 @@ class Editor final : public Component,
 public:
     Editor (const File& file, bool playOnStart, bool snapshots, const File& uiScript)
         : engine ("CoCompose", std::make_unique<ExtendedUIBehaviour>(), nullptr),
-          project (engine, file), selection (engine),
-          workspace (*project.model, selection, engine),
+          project (engine, file), workspace (*project.model, engine),
           saveSnapshots (snapshots), startPlayback (playOnStart)
     {
-        if (uiScript.existsAsFile())
-        {
-            script = JSON::parse (uiScript.loadFileAsString());
-            live::require (script.isArray(), "UI script must be a JSON array of actions");
-        }
+        scriptFile = uiScript;
+        loadScript();
 
         commandManager.registerAllCommandsForTarget (this);
         // Without an explicit target the manager looks for one via keyboard focus, which
@@ -141,7 +138,8 @@ public:
                 menu.addCommandItem (&commandManager, id);
             menu.addSeparator();
             for (auto id : { commands::addChannel, commands::newPattern, commands::placePattern,
-                             commands::makeUnique, commands::transposeUp, commands::transposeDown })
+                             commands::makeUnique, commands::splitClip, commands::duplicateClip,
+                             commands::transposeUp, commands::transposeDown })
                 menu.addCommandItem (&commandManager, id);
         }
         else if (index == 2)
@@ -174,7 +172,8 @@ public:
         ids.addArray ({ commands::playStop, commands::songMode, commands::save, commands::saveCopy,
                         commands::revealFolder, commands::quitApp, commands::undo, commands::redo,
                         commands::addChannel, commands::newPattern, commands::placePattern,
-                        commands::makeUnique, commands::transposeUp, commands::transposeDown,
+                        commands::makeUnique, commands::splitClip, commands::duplicateClip,
+                        commands::transposeUp, commands::transposeDown,
                         commands::metronome, commands::focusNextPanel, commands::scanPlugins,
                         commands::audioSettings, commands::about });
         for (int panel = 0; panel < live::numPanels; ++panel)
@@ -248,6 +247,16 @@ public:
             case commands::makeUnique:
                 info.setInfo ("Make placement unique", "Give the selected clip its own copy of the pattern", "Edit", 0);
                 info.addDefaultKeypress ('u', ModifierKeys::ctrlModifier);
+                info.setActive (selectedInstance().isValid());
+                break;
+            case commands::splitClip:
+                info.setInfo ("Split clip at playhead", "Cut the selected clips where the playhead is", "Edit", 0);
+                info.addDefaultKeypress ('e', ModifierKeys::ctrlModifier);
+                info.setActive (selectedInstance().isValid());
+                break;
+            case commands::duplicateClip:
+                info.setInfo ("Duplicate clip", "Repeat the selected clips after themselves", "Edit", 0);
+                info.addDefaultKeypress ('r', ModifierKeys::ctrlModifier);
                 info.setActive (selectedInstance().isValid());
                 break;
             case commands::transposeUp:
@@ -369,16 +378,24 @@ public:
                 return true;
             }
 
+            case commands::splitClip:
+                workspace.playlistGrid().splitSelectionAt (
+                    project.edit->tempoSequence.toBeats (project.edit->getTransport().getPosition()).inBeats());
+                workspace.refresh();
+                return true;
+
+            case commands::duplicateClip:
+                workspace.playlistGrid().duplicateSelection();
+                workspace.refresh();
+                return true;
+
             case commands::makeUnique:
             {
                 auto instance = selectedInstance();
                 if (! instance.isValid())
                     return true;
 
-                undoManager.beginNewTransaction ("Make placement unique");
-                auto copy = project.model->makeUnique (instance, &undoManager);
-                project.model->renderIfNeeded();
-                workspace.selection.setPattern (live::Model::uidOf (copy));
+                workspace.playlistGrid().makeSelectionUnique();
                 workspace.refresh();
                 return true;
             }
@@ -410,7 +427,6 @@ public:
 private:
     te::Engine engine;
     live::Project project;
-    te::SelectionManager selection;
     live::Workspace workspace;
     ApplicationCommandManager commandManager;
     MenuBarComponent menuBar;
@@ -422,9 +438,10 @@ private:
     bool startPlayback;
     int startupTicks = 0;
     int lastSnapshotRevision = -1;
-    String lastControl, lastLabels, scriptError;
+    String lastControl, lastLabels, scriptError, lastScript;
+    File scriptFile;
     var script;
-    int scriptStep = 0;
+    int scriptStep = 0, scriptRound = 0;
 
     bool isSongMode() const
     {
@@ -463,20 +480,12 @@ private:
 
     ValueTree selectedInstance() const
     {
-        if (auto* clip = dynamic_cast<te::MidiClip*> (selection.getSelectedObject (0)))
-            return project.model->instanceFor (clip->state[live::ids::clipInstance].toString());
-        return {};
+        const auto clips = workspace.playlistGrid().selectedClips();
+        return clips.isEmpty() ? ValueTree() : project.model->instanceFor (clips[0]);
     }
 
     ValueTree selectedSequence() const
     {
-        auto instance = selectedInstance();
-        if (instance.isValid())
-            if (auto* clip = dynamic_cast<te::MidiClip*> (selection.getSelectedObject (0)))
-                return live::Model::findSequence (
-                    project.model->patternFor (instance[live::ids::pattern].toString()),
-                    clip->state[live::ids::clipChannel].toString());
-
         return live::Model::findSequence (project.model->patternFor (workspace.selection.pattern()),
                                           workspace.selection.channel());
     }
@@ -627,8 +636,33 @@ private:
     /** Replays recorded work-surface actions against the real panels, one per tick, so
         a check can drive the UI instead of writing to the model behind its back. It is
         a diagnostic like --screenshots, not part of the live sync contract. */
+    /** Reloads when the file changes, so one session can be driven through several
+        stages instead of restarting for each one. */
+    void loadScript()
+    {
+        if (! scriptFile.existsAsFile())
+            return;
+
+        const auto contents = scriptFile.loadFileAsString();
+        if (contents == lastScript || contents.isEmpty())
+            return;
+
+        auto parsed = JSON::parse (contents);
+        if (! parsed.isArray() || parsed.size() == 0)
+            return;
+
+        lastScript = contents;
+        script = parsed;
+        scriptStep = 0;
+        scriptError.clear();
+        ++scriptRound;
+    }
+
     void runScriptStep()
     {
+        if (! script.isArray() || scriptStep > script.size())
+            loadScript();
+
         if (! script.isArray() || scriptStep > script.size())
             return;
 
@@ -649,7 +683,7 @@ private:
 
         live::atomicWrite (project.source.getSiblingFile ("ui-script-status.json"), JSON::toString (live::object ({
             { "done", scriptStep }, { "total", script.size() }, { "error", scriptError },
-            { "finished", scriptStep >= script.size() } }), false));
+            { "round", scriptRound }, { "finished", scriptStep >= script.size() } }), false));
 
         if (failure.isEmpty())
             ++scriptStep;
@@ -685,6 +719,33 @@ private:
             return step.isArray() && step.size() == 2
                     && workspace.toggleStep (static_cast<int> (step[0]), static_cast<int> (step[1]));
         }
+
+        if (action.hasProperty ("place"))
+        {
+            const auto place = action["place"];
+            return place.isArray() && place.size() == 2
+                    && workspace.playlistGrid().placeAt (static_cast<int> (place[0]),
+                                                         static_cast<double> (place[1]));
+        }
+
+        if (action.hasProperty ("pick_clip"))
+        {
+            const auto pick = action["pick_clip"];
+            return pick.isArray() && pick.size() == 2
+                    && workspace.playlistGrid().selectClipAt (static_cast<int> (pick[0]),
+                                                              static_cast<double> (pick[1]));
+        }
+
+        if (action.hasProperty ("move_clip"))
+        {
+            const auto move = action["move_clip"];
+            return move.isArray() && move.size() == 2
+                    && workspace.playlistGrid().moveSelection (static_cast<double> (move[0]),
+                                                               static_cast<int> (move[1]));
+        }
+
+        if (action.hasProperty ("split_clip"))
+            return workspace.playlistGrid().splitSelectionAt (static_cast<double> (action["split_clip"]));
 
         if (action.hasProperty ("note"))
         {

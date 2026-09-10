@@ -1,8 +1,8 @@
 #pragma once
 
-#include "../common/Components.h"
 #include "Model.h"
 #include "PianoRoll.h"
+#include "PlaylistGrid.h"
 
 namespace live
 {
@@ -14,12 +14,6 @@ namespace live
     Panel sizes, visibility and the current selection are stored in the Edit, so a
     reopened session comes back with the same work surface.
 */
-namespace layoutIds
-{
-    const Identifier LAYOUT ("COCOMPOSELAYOUT");
-    const Identifier visible ("visible"), sizes ("sizes"), selectedChannel ("selectedChannel"),
-        selectedPattern ("selectedPattern"), selectedLane ("selectedLane"), patternMode ("patternMode");
-}
 
 enum PanelIndex { panelBrowser = 0, panelChannelRack, panelMixer, panelPatternPicker, panelPlaylist, numPanels };
 
@@ -76,24 +70,6 @@ public:
     Component& content;
 };
 
-//==============================================================================
-/** What the panels agree is currently being worked on. Stored in the Edit so it
-    survives a reopen; not undoable, because selecting is not an edit. */
-class Selection
-{
-public:
-    explicit Selection (ValueTree layoutState) : state (layoutState) {}
-
-    String channel() const { return state[layoutIds::selectedChannel].toString(); }
-    String pattern() const { return state[layoutIds::selectedPattern].toString(); }
-    String lane()    const { return state[layoutIds::selectedLane].toString(); }
-
-    void setChannel (const String& value) { state.setProperty (layoutIds::selectedChannel, value, nullptr); }
-    void setPattern (const String& value) { state.setProperty (layoutIds::selectedPattern, value, nullptr); }
-    void setLane (const String& value)    { state.setProperty (layoutIds::selectedLane, value, nullptr); }
-
-    ValueTree state;
-};
 
 //==============================================================================
 class ProjectBrowser final : public Component,
@@ -955,6 +931,15 @@ private:
 
     int getNumRows() override { return entries.size(); }
 
+    /** Lets a pattern be dragged straight onto a playlist lane. */
+    var getDragSourceDescription (const SparseSet<int>& rows) override
+    {
+        if (rows.isEmpty() || ! isPositiveAndBelow (rows[0], entries.size()))
+            return {};
+
+        return StringArray::fromTokens (entries[rows[0]], "\t", "")[0];
+    }
+
     void paintListBoxItem (int row, Graphics& g, int width, int height, bool) override
     {
         if (! isPositiveAndBelow (row, entries.size()))
@@ -993,20 +978,16 @@ private:
 };
 
 //==============================================================================
-/** Playlist lanes beside the engine timeline. Placing and moving clips by mouse is
-    M3; for now the lane list and the Place button drive the arrangement and the
-    timeline shows the clips the model produced. */
-class PlaylistPanel final : public Component,
-                            private ListBoxModel
+/** The arrangement, with the lane list built into the grid itself. */
+class PlaylistPanel final : public Component
 {
 public:
-    PlaylistPanel (Model& m, Selection& s, te::SelectionManager& sm, std::function<void()> onChange)
-        : model (m), selection (s), changed (std::move (onChange)),
-          timeline (std::make_unique<EditComponent> (m.edit, sm))
+    PlaylistPanel (Model& m, Selection& s, std::function<void()> onChange)
+        : model (m), selection (s), changed (onChange),
+          grid (std::make_unique<PlaylistGrid> (m, s, onChange))
     {
-        list.setModel (this);
-        list.setRowHeight (20);
-        list.setColour (ListBox::backgroundColourId, Colours::transparentBlack);
+        viewport.setViewedComponent (grid.get(), false);
+        viewport.setScrollBarsShown (true, true);
 
         addLane.onClick = [this]
         {
@@ -1018,120 +999,123 @@ public:
             notify();
         };
 
-        place.onClick = [this]
+        removeLane.onClick = [this]
         {
             auto lane = model.laneFor (selection.lane());
-            auto pattern = model.patternFor (selection.pattern());
-            if (! lane.isValid() || ! pattern.isValid())
+            if (! lane.isValid())
                 return;
 
             auto& undo = model.edit.getUndoManager();
-            undo.beginNewTransaction ("Place pattern");
-            model.addInstance (selection.lane(), selection.pattern(),
-                               model.laneEndBeat (selection.lane()), &undo);
+            undo.beginNewTransaction ("Remove playlist lane");
+            for (int i = model.instances().getNumChildren(); --i >= 0;)
+                if (model.instances().getChild (i)[ids::lane].toString() == selection.lane())
+                    model.instances().removeChild (i, &undo);
+            model.lanes().removeChild (lane, &undo);
+            model.renderIfNeeded();
+            selection.setLane ({});
+            notify();
+        };
+
+        muteLane.onClick = [this]
+        {
+            auto lane = model.laneFor (selection.lane());
+            if (! lane.isValid())
+                return;
+
+            auto& undo = model.edit.getUndoManager();
+            undo.beginNewTransaction ("Mute playlist lane");
+            lane.setProperty (ids::mute, ! static_cast<bool> (lane[ids::mute]), &undo);
             model.renderIfNeeded();
             notify();
         };
 
-        // Track headers, footers and device rows do not fit a side panel, and the rack
-        // already carries the per-channel controls; the timeline needs the width.
-        auto& view = timeline->getEditViewState();
-        view.showHeaders = false;
-        view.showFooters = false;
-        view.showMidiDevices = false;
-        view.showWaveDevices = false;
-        view.viewX1 = te::TimePosition();
-        view.viewX2 = te::TimePosition::fromSeconds (20.0);
+        duplicate.onClick = [this] { grid->duplicateSelection(); };
+        makeUnique.onClick = [this] { grid->makeSelectionUnique(); };
+        remove.onClick = [this] { grid->deleteSelection(); };
 
-        addAndMakeVisible (list);
-        addAndMakeVisible (*timeline);
-        addAndMakeVisible (addLane);
-        addAndMakeVisible (place);
+        for (const auto& choice : { std::pair<const char*, double> { "Bar", 4.0 },
+                                    { "1/2", 2.0 }, { "1/4", 1.0 }, { "1/8", 0.5 }, { "Off", 0.0 } })
+            snapChoices.add (choice.second);
+
+        snap.addItem ("Snap: bar", 1);
+        snap.addItem ("Snap: 1/2", 2);
+        snap.addItem ("Snap: 1/4", 3);
+        snap.addItem ("Snap: 1/8", 4);
+        snap.addItem ("Snap: off", 5);
+        snap.setSelectedId (1, dontSendNotification);
+        snap.onChange = [this] { grid->setSnap (snapChoices[snap.getSelectedId() - 1]); };
+
+        zoom.setSliderStyle (Slider::LinearHorizontal);
+        zoom.setRange (2.0, 40.0, 0.5);
+        zoom.setValue (grid->getZoom(), dontSendNotification);
+        zoom.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
+        zoom.setTooltip ("Zoom");
+        zoom.onValueChange = [this] { grid->setZoom (zoom.getValue()); layOutGrid(); };
+
+        addAndMakeVisible (viewport);
+        for (auto* child : std::initializer_list<Component*> { &addLane, &removeLane, &muteLane,
+                                                              &duplicate, &makeUnique, &remove, &snap, &zoom })
+            addAndMakeVisible (*child);
     }
 
     void resized() override
     {
         auto r = getLocalBounds();
         auto bar = r.removeFromBottom (26);
-        addLane.setBounds (bar.removeFromLeft (80).reduced (2));
-        place.setBounds (bar.removeFromLeft (110).reduced (2));
-        list.setBounds (r.removeFromLeft (jlimit (70, 140, r.getWidth() / 4)));
-        timeline->setBounds (r.withTrimmedLeft (4));
+        addLane.setBounds (bar.removeFromLeft (62).reduced (1));
+        removeLane.setBounds (bar.removeFromLeft (62).reduced (1));
+        muteLane.setBounds (bar.removeFromLeft (52).reduced (1));
+        duplicate.setBounds (bar.removeFromLeft (74).reduced (1));
+        makeUnique.setBounds (bar.removeFromLeft (74).reduced (1));
+        remove.setBounds (bar.removeFromLeft (62).reduced (1));
+        snap.setBounds (bar.removeFromLeft (92).reduced (1));
+        zoom.setBounds (bar.reduced (2, 1));
+        viewport.setBounds (r);
+        layOutGrid();
     }
 
     void refresh()
     {
-        StringArray rebuilt;
-        for (auto lane : model.lanes())
-        {
-            const auto laneID = Model::uidOf (lane);
-            int count = 0;
-            for (auto instance : model.instances())
-                if (instance[ids::lane].toString() == laneID)
-                    ++count;
-            rebuilt.add (laneID + "\t" + lane[ids::name].toString() + "\t" + String (count));
-        }
-
-        if (rebuilt != entries)
-        {
-            entries = rebuilt;
-            list.updateContent();
-        }
-
-        place.setEnabled (model.laneFor (selection.lane()).isValid()
-                           && model.patternFor (selection.pattern()).isValid());
-        list.repaint();
-        timeline->repaint();
+        const auto hasLane = model.laneFor (selection.lane()).isValid();
+        const auto hasClips = ! grid->selectedClips().isEmpty();
+        removeLane.setEnabled (hasLane);
+        muteLane.setEnabled (hasLane);
+        duplicate.setEnabled (hasClips);
+        makeUnique.setEnabled (hasClips);
+        remove.setEnabled (hasClips);
+        layOutGrid();
+        grid->repaint();
     }
+
+    PlaylistGrid& getGrid() { return *grid; }
 
 private:
     void notify() { if (changed != nullptr) changed(); }
 
-    int getNumRows() override { return entries.size(); }
-
-    void paintListBoxItem (int row, Graphics& g, int width, int height, bool) override
+    void layOutGrid()
     {
-        if (! isPositiveAndBelow (row, entries.size()))
-            return;
-
-        const auto fields = StringArray::fromTokens (entries[row], "\t", "");
-        if (fields[0] == selection.lane())
-        {
-            g.setColour (Colour (0xff2f4f5f));
-            g.fillRect (0, 0, width, height);
-        }
-
-        g.setColour (Colours::white.withAlpha (0.9f));
-        g.setFont (Font (FontOptions (13.0f)));
-        g.drawText (fields[1], 6, 0, width - 46, height, Justification::centredLeft);
-        g.setColour (Colour (0xff8698b6));
-        g.setFont (Font (FontOptions (11.0f)));
-        g.drawText (fields[2] + "x", width - 42, 0, 36, height, Justification::centredRight);
-    }
-
-    void listBoxItemClicked (int row, const MouseEvent&) override
-    {
-        if (! isPositiveAndBelow (row, entries.size()))
-            return;
-
-        selection.setLane (StringArray::fromTokens (entries[row], "\t", "")[0]);
-        notify();
+        grid->setSize (std::max (grid->preferredWidth(), viewport.getWidth() - viewport.getScrollBarThickness()),
+                       std::max (grid->preferredHeight(), viewport.getHeight() - viewport.getScrollBarThickness()));
     }
 
     Model& model;
     Selection& selection;
     std::function<void()> changed;
-    std::unique_ptr<EditComponent> timeline;
-    ListBox list;
-    StringArray entries;
-    TextButton addLane { "+ Lane" }, place { "Place pattern" };
+    std::unique_ptr<PlaylistGrid> grid;
+    Viewport viewport;
+    TextButton addLane { "+ Lane" }, removeLane { "- Lane" }, muteLane { "Mute" },
+               duplicate { "Duplicate" }, makeUnique { "Unique" }, remove { "Delete" };
+    ComboBox snap;
+    Slider zoom;
+    Array<double> snapChoices;
 };
 
 //==============================================================================
-class Workspace final : public Component
+class Workspace final : public Component,
+                       public DragAndDropContainer
 {
 public:
-    Workspace (Model& m, te::SelectionManager& sm, te::Engine& engine)
+    Workspace (Model& m, te::Engine& engine)
         : model (m),
           layout (m.edit.state.getOrCreateChildWithName (layoutIds::LAYOUT, nullptr)),
           selection (layout)
@@ -1142,7 +1126,7 @@ public:
         rack = std::make_unique<ChannelRack> (model, selection, onChange, [this] { openPianoRoll(); });
         mixer = std::make_unique<MixerPanel> (model);
         picker = std::make_unique<PatternPicker> (model, selection, onChange);
-        playlist = std::make_unique<PlaylistPanel> (model, selection, sm, onChange);
+        playlist = std::make_unique<PlaylistPanel> (model, selection, onChange);
 
         Component* contents[numPanels] = { browser.get(), rack.get(), mixer.get(), picker.get(), playlist.get() };
         for (int i = 0; i < numPanels; ++i)
@@ -1315,6 +1299,8 @@ public:
     }
 
     bool toggleStep (int channelIndex, int step) { return rack->toggleStep (channelIndex, step); }
+
+    PlaylistGrid& playlistGrid() const { return playlist->getGrid(); }
 
     /** The open note editor, so --screenshots can capture it too. */
     Component* pianoRollContent() const

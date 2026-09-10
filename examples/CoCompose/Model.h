@@ -28,7 +28,8 @@ namespace ids
         pattern ("pattern"), lane ("lane"), start ("start"), length ("length"), pitch ("pitch"),
         velocity ("velocity"), gainDb ("gainDb"), pan ("pan"), mute ("mute"), solo ("solo"),
         insert ("insert"), index ("index"),
-        instrument ("instrument"), sample ("sample"), stepPitch ("stepPitch"), stepLength ("stepLength");
+        instrument ("instrument"), sample ("sample"), stepPitch ("stepPitch"), stepLength ("stepLength"),
+        offset ("offset");
 
     // Written onto engine clips so a derived clip can be matched back to the model.
     const Identifier clipInstance ("coComposeInstance"), clipChannel ("coComposeChannel");
@@ -43,6 +44,33 @@ constexpr double stepBeats = 0.25;
 // Channel instruments are named by these, or by a scanned plugin's identifier string.
 const String builtInSynth ("4osc"), builtInSampler ("sampler");
 
+namespace layoutIds
+{
+    const Identifier LAYOUT ("COCOMPOSELAYOUT");
+    const Identifier visible ("visible"), sizes ("sizes"), selectedChannel ("selectedChannel"),
+        selectedPattern ("selectedPattern"), selectedLane ("selectedLane"), patternMode ("patternMode");
+}
+
+//==============================================================================
+/** What the panels agree is currently being worked on. Stored in the Edit so it
+    survives a reopen; not undoable, because selecting is not an edit. */
+class Selection
+{
+public:
+    explicit Selection (ValueTree layoutState) : state (layoutState) {}
+
+    String channel() const { return state[layoutIds::selectedChannel].toString(); }
+    String pattern() const { return state[layoutIds::selectedPattern].toString(); }
+    String lane()    const { return state[layoutIds::selectedLane].toString(); }
+
+    void setChannel (const String& value) { state.setProperty (layoutIds::selectedChannel, value, nullptr); }
+    void setPattern (const String& value) { state.setProperty (layoutIds::selectedPattern, value, nullptr); }
+    void setLane (const String& value)    { state.setProperty (layoutIds::selectedLane, value, nullptr); }
+
+    ValueTree state;
+};
+
+//==============================================================================
 class Model  : private ValueTree::Listener
 {
 public:
@@ -191,6 +219,7 @@ public:
         instance.setProperty (ids::pattern, patternID, nullptr);
         instance.setProperty (ids::start, startBeat, nullptr);
         instance.setProperty (ids::length, static_cast<double> (pattern[ids::length]), nullptr);
+        instance.setProperty (ids::offset, 0.0, nullptr);
         instances().appendChild (instance, undo);
         return instance;
     }
@@ -461,6 +490,8 @@ private:
             const auto instanceID = uidOf (instance);
             const auto startBeat = static_cast<double> (instance[ids::start]);
             const auto lengthBeats = std::max (0.001, static_cast<double> (instance[ids::length]));
+            const auto patternBeats = std::max (0.001, static_cast<double> (pattern[ids::length]));
+            const auto offsetBeats = std::max (0.0, static_cast<double> (instance.getProperty (ids::offset, 0.0)));
 
             for (auto sequence : pattern)
             {
@@ -473,7 +504,8 @@ private:
                     continue;
 
                 wanted.insert (instanceID + "/" + channelID);
-                syncClip (*track, instanceID, channelID, sequence, startBeat, lengthBeats);
+                syncClip (*track, instanceID, channelID, sequence, startBeat, lengthBeats,
+                          patternBeats, offsetBeats);
             }
         }
 
@@ -491,8 +523,11 @@ private:
         }
     }
 
+    /** A placement shows its pattern tiled from offsetBeats, for lengthBeats. A clip
+        shorter than the pattern is a slice of it; a longer one repeats it. */
     void syncClip (te::AudioTrack& track, const String& instanceID, const String& channelID,
-                   ValueTree sequence, double startBeat, double lengthBeats)
+                   ValueTree sequence, double startBeat, double lengthBeats,
+                   double patternBeats, double offsetBeats)
     {
         te::MidiClip* clip = nullptr;
         for (auto* existing : track.getClips())
@@ -516,39 +551,57 @@ private:
         auto& notes = clip->getSequence();
         std::set<String> keep;
 
-        for (auto note : sequence)
+        const auto repeats = static_cast<int> (std::ceil ((offsetBeats + lengthBeats) / patternBeats));
+
+        for (int repeat = 0; repeat < std::min (repeats, 512); ++repeat)
         {
-            if (! note.hasType (ids::NOTE))
-                continue;
+            for (auto note : sequence)
+            {
+                if (! note.hasType (ids::NOTE))
+                    continue;
 
-            const auto noteID = uidOf (note);
-            keep.insert (noteID);
+                const auto sourceStart = static_cast<double> (note[ids::start]) + repeat * patternBeats;
+                const auto start = sourceStart - offsetBeats;
+                auto length = std::max (0.001, static_cast<double> (note[ids::length]));
 
-            const auto position = te::BeatPosition::fromBeats (static_cast<double> (note[ids::start]));
-            const auto duration = te::BeatDuration::fromBeats (std::max (0.001, static_cast<double> (note[ids::length])));
-            const auto notePitch = jlimit (0, 127, static_cast<int> (note[ids::pitch]));
-            const auto noteVelocity = jlimit (1, 127, static_cast<int> (note[ids::velocity]));
+                if (start + length <= 1.0e-6 || start >= lengthBeats - 1.0e-6)
+                    continue;
 
-            te::MidiNote* engineNote = nullptr;
-            for (auto* candidate : notes.getNotes())
-                if (candidate->state["coComposeId"].toString() == noteID)
+                // A note the slice starts inside keeps only the part that is inside it.
+                const auto visibleStart = std::max (0.0, start);
+                length = std::min (length - (visibleStart - start), lengthBeats - visibleStart);
+                if (length <= 1.0e-6)
+                    continue;
+
+                const auto noteID = uidOf (note) + "#" + String (repeat);
+                keep.insert (noteID);
+
+                const auto position = te::BeatPosition::fromBeats (visibleStart);
+                const auto duration = te::BeatDuration::fromBeats (length);
+                const auto notePitch = jlimit (0, 127, static_cast<int> (note[ids::pitch]));
+                const auto noteVelocity = jlimit (1, 127, static_cast<int> (note[ids::velocity]));
+
+                te::MidiNote* engineNote = nullptr;
+                for (auto* candidate : notes.getNotes())
+                    if (candidate->state["coComposeId"].toString() == noteID)
+                    {
+                        engineNote = candidate;
+                        break;
+                    }
+
+                if (engineNote == nullptr)
                 {
-                    engineNote = candidate;
-                    break;
+                    engineNote = notes.addNote (notePitch, position, duration, noteVelocity, 0, nullptr);
+                    require (engineNote != nullptr, "Cannot create pattern note");
+                    engineNote->state.setProperty ("coComposeId", noteID, nullptr);
                 }
-
-            if (engineNote == nullptr)
-            {
-                engineNote = notes.addNote (notePitch, position, duration, noteVelocity, 0, nullptr);
-                require (engineNote != nullptr, "Cannot create pattern note");
-                engineNote->state.setProperty ("coComposeId", noteID, nullptr);
-            }
-            else
-            {
-                if (engineNote->getNoteNumber() != notePitch) engineNote->setNoteNumber (notePitch, nullptr);
-                if (engineNote->getVelocity() != noteVelocity) engineNote->setVelocity (noteVelocity, nullptr);
-                if (engineNote->getStartBeat() != position || engineNote->getLengthBeats() != duration)
-                    engineNote->setStartAndLength (position, duration, nullptr);
+                else
+                {
+                    if (engineNote->getNoteNumber() != notePitch) engineNote->setNoteNumber (notePitch, nullptr);
+                    if (engineNote->getVelocity() != noteVelocity) engineNote->setVelocity (noteVelocity, nullptr);
+                    if (engineNote->getStartBeat() != position || engineNote->getLengthBeats() != duration)
+                        engineNote->setStartAndLength (position, duration, nullptr);
+                }
             }
         }
 
@@ -619,6 +672,7 @@ private:
                 auto instance = addInstance (uidOf (lane), clipID, startBeat, nullptr);
                 instance.setProperty (ids::uid, clipID + "-placement", nullptr);
                 instance.setProperty (ids::length, lengthBeats, nullptr);
+                instance.setProperty (ids::offset, 0.0, nullptr);
 
                 // Adopt the clip that is already playing instead of rebuilding it.
                 clip->state.setProperty (ids::clipInstance, uidOf (instance), nullptr);

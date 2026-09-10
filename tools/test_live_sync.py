@@ -262,6 +262,7 @@ def run(exe, folder):
         checks.append(check_legacy_json_input(launch, folder))
         checks.append(check_workspace_layout(launch, folder))
         checks.append(check_pattern_built_in_the_ui(exe, folder))
+        checks.append(check_arrangement_built_in_the_ui(exe, folder))
 
         report = {"passed": checks, "folder": str(folder), "executable": str(exe)}
         atomic_write(folder / "test-report.json", report)
@@ -476,6 +477,113 @@ def check_pattern_built_in_the_ui(exe, folder):
             process.wait(timeout=10)
 
     return "Drum, bass and melody channels built through the rack and piano roll play, save and reload"
+
+
+def engine_clip_for(state, clip_id):
+    for track in state["engine"]["tracks"]:
+        for clip in track["clips"]:
+            if clip["clip"] == clip_id:
+                return clip
+    return None
+
+
+def check_arrangement_built_in_the_ui(exe, folder):
+    """Builds a thirty-two bar arrangement in the playlist grid: place, move, split and
+    undo, all in one running session, and confirms the sound, the screen and state.json
+    agree. Then an outside placement lands while it is still playing."""
+    sub = folder / "arrangement"
+    sub.mkdir()
+    project = sub / "project.json"
+    script = sub / "ui-script.json"
+    stage = {"round": 0}
+
+    def run(actions):
+        stage["round"] += 1
+        atomic_write(script, actions)
+        wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
+                          and read(sub / "ui-script-status.json").get("finished")), timeout=90)
+        status = read(sub / "ui-script-status.json")
+        assert not status["error"], status
+        return read(sub / "state.json")
+
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+    process = subprocess.Popen([str(exe), "--project", str(project), "--headless", "--play",
+                                "--screenshots", "--ui-script", str(script)], startupinfo=startup)
+    try:
+        wait_for(lambda: read(sub / "sync-status.json").get("playing"), timeout=40)
+        session = read(sub / "sync-status.json")["session_id"]
+
+        # A four-bar pattern of eighth notes, so a split has something to cut through.
+        state = run([{"command": "New pattern"}, {"select_pattern": 1}, {"select_channel": 0}]
+                    + [{"step": [0, step]} for step in range(0, 16, 2)])
+        built = state["patterns"][1]["id"]
+
+        data = read(sub / "state.json")
+        next(p for p in data["patterns"] if p["id"] == built)["length"] = 16.0
+        assert next(p for p in submit(project, data)["patterns"] if p["id"] == built)["length"] == 16.0
+
+        # Eight placements of a four-bar pattern make thirty-two bars.
+        state = run([{"select_pattern": 1}, {"select_lane": 0}]
+                    + [{"place": [0, bar * 16.0]} for bar in range(8)])
+        placed = [c for c in state["playlist"]["clips"] if c["pattern"] == built]
+        assert len(placed) == 8, placed
+        assert max(c["start"] + c["length"] for c in placed) == 128.0, placed
+        assert len(engine_clips(state, built)) == 8, "The arrangement did not reach the engine"
+        assert read(sub / "sync-status.json")["playing"], "The arrangement stopped playing"
+
+        # Move the last clip a bar later.
+        state = run([{"pick_clip": [0, 112.0]}, {"move_clip": [4.0, 0]}])
+        moved = next(c for c in state["playlist"]["clips"] if abs(c["start"] - 116.0) < 1e-6)
+        assert abs(engine_clip_for(state, moved["id"])["start"] - 116.0) < 1e-6, \
+            "The engine clip did not follow the move"
+
+        # Split it in half; the second half continues further into the pattern.
+        state = run([{"pick_clip": [0, 116.0]}, {"split_clip": 124.0}])
+        halves = sorted((c for c in state["playlist"]["clips"]
+                         if abs(c["start"] - 116.0) < 1e-6 or abs(c["start"] - 124.0) < 1e-6),
+                        key=lambda c: c["start"])
+        assert len(halves) == 2, halves
+        assert abs(halves[0]["length"] - 8.0) < 1e-6 and abs(halves[1]["length"] - 8.0) < 1e-6, halves
+        assert abs(halves[1]["offset"] - 8.0) < 1e-6, "The second half does not continue the pattern"
+        first, second = (engine_clip_for(state, half["id"]) for half in halves)
+        assert first is not None and second is not None, "A half lost its engine clip"
+        assert len(first["notes"]) + len(second["notes"]) == 8, (first["notes"], second["notes"])
+        assert all(n["start"] < 8.0 for n in second["notes"]), second["notes"]
+
+        # One undo puts the clip back together, on screen and in the engine.
+        control(project, "undo")
+        time.sleep(0.5)
+        state = read(sub / "state.json")
+        rejoined = [c for c in state["playlist"]["clips"] if abs(c["start"] - 116.0) < 1e-6]
+        assert len(rejoined) == 1 and abs(rejoined[0]["length"] - 16.0) < 1e-6, rejoined
+        assert len(engine_clip_for(state, rejoined[0]["id"])["notes"]) == 8, "Undo left the engine split"
+
+        # Duplicating a clip repeats it directly after itself. Bar 13 is clear of the
+        # eight-bar example placement the empty project starts with.
+        state = run([{"pick_clip": [0, 48.0]}, {"command": "Duplicate clip"}])
+        assert len([c for c in state["playlist"]["clips"] if c["pattern"] == built]) == 9,             [c["start"] for c in state["playlist"]["clips"] if c["pattern"] == built]
+
+        # An outside change to the arrangement lands while it is still playing.
+        assert read(sub / "sync-status.json")["playing"]
+        outside = read(sub / "state.json")
+        outside["playlist"]["clips"].append({"id": "outside-clip", "lane": outside["playlist"]["lanes"][0]["id"],
+                                             "pattern": built, "start": 140.0, "length": 16.0, "offset": 0.0})
+        updated = submit(project, outside)
+        assert engine_clip_for(updated, "outside-clip") is not None, "Outside placement never played"
+        assert read(sub / "sync-status.json")["session_id"] == session, "The project was reopened"
+        assert read(sub / "sync-status.json")["playing"], "The outside change stopped playback"
+
+        control(project, "quit")
+        assert process.wait(timeout=20) == 0
+        process = None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+    return "A thirty-two bar arrangement placed, moved, split and undone in the playlist grid"
 
 
 if __name__ == "__main__":

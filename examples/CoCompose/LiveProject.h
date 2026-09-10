@@ -213,7 +213,8 @@ public:
             clips.add (object ({ { "id", Model::uidOf (instance) },
                 { "lane", instance[ids::lane].toString() }, { "pattern", instance[ids::pattern].toString() },
                 { "start", static_cast<double> (instance[ids::start]) },
-                { "length", static_cast<double> (instance[ids::length]) } }));
+                { "length", static_cast<double> (instance[ids::length]) },
+                { "offset", static_cast<double> (instance.getProperty (ids::offset, 0.0)) } }));
 
         Array<var> inserts;
         for (auto insert : model->mixer())
@@ -377,7 +378,8 @@ public:
             { "playlist", object ({
                 { "lanes", Array<var> { object ({ { "id", "lane-1" }, { "name", "Playlist 1" }, { "mute", false } }) } },
                 { "clips", Array<var> { object ({ { "id", "placement-1" }, { "lane", "lane-1" },
-                    { "pattern", "phrase-1" }, { "start", 0.0 }, { "length", 32.0 } }) } } }) },
+                    { "pattern", "phrase-1" }, { "start", 0.0 }, { "length", 32.0 },
+                    { "offset", 0.0 } }) } } }) },
             { "mixer", object ({ { "inserts", Array<var> { object ({ { "id", "insert-1" }, { "index", 1 },
                 { "name", "CoCompose Synth" }, { "gain_db", 0.0 }, { "pan", 0.0 }, { "mute", false } }) } } }) } });
     }
@@ -523,12 +525,15 @@ private:
         require (playlist["clips"].isArray() && playlist["clips"].size() <= 4096, "clips must be an array (max 4096)");
         for (const auto& clip : *playlist["clips"].getArray())
         {
-            knownFields (clip, "id lane pattern start length");
+            knownFields (clip, "id lane pattern start length offset");
             require (instanceIDs.insert (id (clip)).second, "Duplicate playlist clip id");
             require (laneIDs.count (clip["lane"].toString()) > 0, "Playlist clip references an unknown lane");
             require (patternIDs.count (clip["pattern"].toString()) > 0, "Playlist clip references an unknown pattern");
             number (clip, "start", 0, 100000);
             number (clip, "length", 0.001, 100000);
+            // A clip shows its pattern from this beat onwards; it arrived with the playlist editor.
+            if (clip.hasProperty ("offset"))
+                number (clip, "offset", 0, 100000);
         }
 
         const auto mixerState = root["mixer"];
@@ -614,6 +619,8 @@ private:
                            instance.setProperty (ids::pattern, desired["pattern"].toString(), um);
                            instance.setProperty (ids::start, static_cast<double> (desired["start"]), um);
                            instance.setProperty (ids::length, static_cast<double> (desired["length"]), um);
+                           instance.setProperty (ids::offset, desired.hasProperty ("offset")
+                                                                  ? static_cast<double> (desired["offset"]) : 0.0, um);
                        });
 
             // The model owns the channel fader, so render it before the explicit
