@@ -696,6 +696,71 @@ private:
         project.model->renderIfNeeded();
     }
 
+    /** Scans for plugins one file per tick, so the app stays alive and a check can
+        watch it happen. A plugin that takes the app down leaves its name in the
+        dead man's pedal file, which is how the next run skips it. */
+    bool startPluginScan()
+    {
+        if (scanner != nullptr)
+            return false;
+
+        auto* format = engine.getPluginManager().pluginFormatManager.getFormat (0);
+        for (int i = 0; i < engine.getPluginManager().pluginFormatManager.getNumFormats(); ++i)
+            if (auto* candidate = engine.getPluginManager().pluginFormatManager.getFormat (i))
+                if (candidate->getName().containsIgnoreCase ("VST3"))
+                    format = candidate;
+
+        if (format == nullptr)
+            return false;
+
+        scanner = std::make_unique<PluginDirectoryScanner> (
+            engine.getPluginManager().knownPluginList, *format,
+            format->getDefaultLocationsToSearch(), true,
+            engine.getTemporaryFileManager().getTempFile ("PluginScanDeadMansPedal"), false);
+
+        scanned = 0;
+        writeScanStatus (true, {});
+        return true;
+    }
+
+    void continuePluginScan()
+    {
+        if (scanner == nullptr)
+            return;
+
+        String beingScanned;
+        const auto more = scanner->scanNextFile (true, beingScanned);
+        ++scanned;
+
+        if (more)
+        {
+            writeScanStatus (true, beingScanned);
+            return;
+        }
+
+        scanner.reset();
+        writeScanStatus (false, {});
+        workspace.refresh();
+    }
+
+    void writeScanStatus (bool running, const String& current)
+    {
+        Array<var> found;
+        for (const auto& type : engine.getPluginManager().knownPluginList.getTypes())
+            found.add (live::object ({ { "name", type.name }, { "format", type.pluginFormatName },
+                                       { "manufacturer", type.manufacturerName },
+                                       { "version", type.version },
+                                       { "instrument", type.isInstrument },
+                                       { "identifier", type.createIdentifierString() },
+                                       { "file", type.fileOrIdentifier } }));
+
+        live::atomicWrite (project.source.getSiblingFile ("plugin-scan.json"),
+                           JSON::toString (live::object ({ { "running", running },
+                                                           { "scanned", scanned },
+                                                           { "current", current },
+                                                           { "found", found } }), false));
+    }
+
     void showPluginScanner()
     {
         DialogWindow::LaunchOptions options;
@@ -821,6 +886,7 @@ private:
                 + "  |  Edit project.json externally; changes appear here automatically", dontSendNotification);
 
         collectRenderResult();
+        continuePluginScan();
         project.writeBackupIfDue();
         project.writeStatus();
         commandManager.commandStatusChanged();
@@ -1002,6 +1068,9 @@ private:
                     && recorder.arm (live::Model::uidOf (channel), static_cast<bool> (arm[1]));
         }
 
+        if (action.hasProperty ("scan"))
+            return startPluginScan();
+
         if (action.hasProperty ("automate"))
         {
             const auto request = action["automate"];
@@ -1180,6 +1249,8 @@ private:
     }
 
     std::unique_ptr<FileChooser> chooser;
+    std::unique_ptr<PluginDirectoryScanner> scanner;
+    int scanned = 0;
 };
 
 class Application final : public JUCEApplication
