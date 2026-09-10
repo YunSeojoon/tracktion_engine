@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Support.h"
+#include "Saturation.h"
 
 namespace live
 {
@@ -22,18 +23,23 @@ namespace ids
     const Identifier COCOMPOSE ("COCOMPOSE"), CHANNELS ("CHANNELS"), CHANNEL ("CHANNEL"),
         PATTERNS ("PATTERNS"), PATTERN ("PATTERN"), SEQUENCE ("SEQUENCE"), NOTE ("NOTE"),
         PLAYLIST ("PLAYLIST"), LANES ("LANES"), LANE ("LANE"), CLIPS ("CLIPS"), INSTANCE ("INSTANCE"),
-        MIXER ("MIXER"), INSERT ("INSERT"), AUDIO ("AUDIO");
+        MIXER ("MIXER"), INSERT ("INSERT"), AUDIO ("AUDIO"), EFFECT ("EFFECT"), SEND ("SEND");
 
     const Identifier uid ("id"), name ("name"), schema ("schema"), channel ("channel"),
         pattern ("pattern"), lane ("lane"), start ("start"), length ("length"), pitch ("pitch"),
         velocity ("velocity"), gainDb ("gainDb"), pan ("pan"), mute ("mute"), solo ("solo"),
         insert ("insert"), index ("index"),
         instrument ("instrument"), sample ("sample"), stepPitch ("stepPitch"), stepLength ("stepLength"),
-        offset ("offset"), file ("file"), fadeIn ("fadeIn"), fadeOut ("fadeOut"), speed ("speed");
+        offset ("offset"), file ("file"), fadeIn ("fadeIn"), fadeOut ("fadeOut"), speed ("speed"),
+        type ("type"), bypass ("bypass"), wet ("wet"), target ("target"), level ("level"),
+        output ("output");
 
     // Written onto engine clips so a derived clip can be matched back to the model.
     const Identifier clipInstance ("coComposeInstance"), clipChannel ("coComposeChannel"),
         clipAudio ("coComposeAudio");
+
+    // Written onto engine plugins so a derived effect can be matched back to the model.
+    const Identifier pluginEffect ("coComposeEffect");
 }
 
 constexpr int modelSchema = 2;
@@ -44,6 +50,34 @@ constexpr double stepBeats = 0.25;
 
 // Channel instruments are named by these, or by a scanned plugin's identifier string.
 const String builtInSynth ("4osc"), builtInSampler ("sampler");
+
+/** The mixer slot everything reaches in the end. */
+const String masterInsert ("master");
+
+/** The six effects the mixer offers, mapped to the engine plugin that provides each.
+    Only saturation had to be written; the rest are Tracktion's own. */
+inline const std::pair<const char*, const char*>& effectTypes (int index)
+{
+    static const std::pair<const char*, const char*> types[] = {
+        { "eq",         "4bandEq" },
+        { "limiter",    "compressor" },
+        { "saturation", "coComposeSaturation" },
+        { "delay",      "delay" },
+        { "chorus",     "chorus" },
+        { "reverb",     "reverb" },
+    };
+    return types[jlimit (0, 5, index)];
+}
+
+constexpr int numEffectTypes = 6;
+
+inline String enginePluginFor (const String& effectType)
+{
+    for (int i = 0; i < numEffectTypes; ++i)
+        if (effectType == effectTypes (i).first)
+            return effectTypes (i).second;
+    return {};
+}
 
 namespace layoutIds
 {
@@ -143,6 +177,18 @@ public:
         holds audio owns an engine track of its own. */
     static String laneTrackID (const String& laneID) { return "lane:" + laneID; }
 
+    /** A mixer insert is a bus track: everything assigned to it plays through its
+        effect chain and its fader before reaching wherever it is routed. */
+    static String insertTrackID (const String& insertID) { return "insert:" + insertID; }
+
+    ValueTree insertForSlot (int slot) const
+    {
+        for (auto child : mixer())
+            if (static_cast<int> (child[ids::index]) == slot)
+                return child;
+        return {};
+    }
+
     bool laneHasAudio (const String& laneID) const
     {
         for (auto clip : instances())
@@ -239,8 +285,64 @@ public:
         insert.setProperty (ids::gainDb, 0.0, nullptr);
         insert.setProperty (ids::pan, 0.0, nullptr);
         insert.setProperty (ids::mute, false, nullptr);
+        insert.setProperty (ids::output, masterInsert, nullptr);
         mixer().appendChild (insert, undo);
         return insert;
+    }
+
+    /** Adds one of the six effects to an insert's chain, at the end. */
+    ValueTree addEffect (ValueTree insert, const String& effectType, UndoManager* undo)
+    {
+        require (enginePluginFor (effectType).isNotEmpty(), "Unknown effect: " + effectType);
+
+        ValueTree effect (ids::EFFECT);
+        effect.setProperty (ids::uid, Uuid().toString(), nullptr);
+        effect.setProperty (ids::type, effectType, nullptr);
+        effect.setProperty (ids::bypass, false, nullptr);
+        effect.setProperty (ids::wet, 1.0, nullptr);
+        insert.appendChild (effect, undo);
+        return effect;
+    }
+
+    /** Feeds some of an insert's signal to another insert, which is how a reverb bus
+        is fed without moving the dry sound off the channel. */
+    ValueTree addSend (ValueTree insert, const String& targetInsertID, double sendLevel, UndoManager* undo)
+    {
+        require (insertFor (targetInsertID).isValid(), "Unknown mixer insert: " + targetInsertID);
+        require (uidOf (insert) != targetInsertID, "An insert cannot send to itself");
+
+        for (auto child : insert)
+            if (child.hasType (ids::SEND) && child[ids::target].toString() == targetInsertID)
+            {
+                child.setProperty (ids::level, sendLevel, undo);
+                return child;
+            }
+
+        ValueTree send (ids::SEND);
+        send.setProperty (ids::uid, Uuid().toString(), nullptr);
+        send.setProperty (ids::target, targetInsertID, nullptr);
+        send.setProperty (ids::level, sendLevel, nullptr);
+        insert.appendChild (send, undo);
+        return send;
+    }
+
+    /** Refuses a routing that would send a signal back into itself. */
+    bool wouldFeedBack (const String& fromInsertID, const String& toInsertID) const
+    {
+        StringArray seen;
+        auto current = toInsertID;
+
+        while (current.isNotEmpty() && current != masterInsert && ! seen.contains (current))
+        {
+            if (current == fromInsertID)
+                return true;
+
+            seen.add (current);
+            auto insert = insertFor (current);
+            current = insert.isValid() ? insert.getProperty (ids::output, masterInsert).toString() : String();
+        }
+
+        return false;
     }
 
     ValueTree addPattern (const String& patternName, double lengthBeats, UndoManager* undo)
@@ -354,7 +456,8 @@ public:
     {
         for (auto* plugin : track.pluginList)
             if (dynamic_cast<te::VolumeAndPanPlugin*> (plugin) == nullptr
-                 && dynamic_cast<te::LevelMeterPlugin*> (plugin) == nullptr)
+                 && dynamic_cast<te::LevelMeterPlugin*> (plugin) == nullptr
+                 && ! plugin->state.hasProperty (ids::pluginEffect))
                 return plugin;
         return nullptr;
     }
@@ -501,14 +604,19 @@ private:
             }
 
             syncInstrument (*track, channel);
-            track->setName (channel[ids::name].toString());
-            track->setMute (static_cast<bool> (channel[ids::mute]));
-            track->setSolo (static_cast<bool> (channel[ids::solo]));
+            if (track->getName() != channel[ids::name].toString())
+                track->setName (channel[ids::name].toString());
+            if (track->isMuted (false) != static_cast<bool> (channel[ids::mute]))
+                track->setMute (static_cast<bool> (channel[ids::mute]));
+            if (track->isSolo (false) != static_cast<bool> (channel[ids::solo]))
+                track->setSolo (static_cast<bool> (channel[ids::solo]));
 
             if (auto* volume = track->getVolumePlugin())
             {
-                volume->setVolumeDb (static_cast<float> (channel[ids::gainDb]));
-                volume->setPan (static_cast<float> (channel[ids::pan]));
+                const auto wantedGain = static_cast<float> (channel[ids::gainDb]);
+                const auto wantedPan = static_cast<float> (channel[ids::pan]);
+                if (std::abs (volume->getVolumeDb() - wantedGain) > 1.0e-4f) volume->setVolumeDb (wantedGain);
+                if (std::abs (volume->getPan() - wantedPan) > 1.0e-4f) volume->setPan (wantedPan);
             }
         }
 
@@ -532,13 +640,49 @@ private:
                     track->state.setProperty ("coComposeId", trackID, nullptr);
                 }
 
-                track->setName (lane[ids::name].toString());
-                track->setMute (static_cast<bool> (lane[ids::mute]));
+                if (track->getName() != lane[ids::name].toString())
+                    track->setName (lane[ids::name].toString());
+                if (track->isMuted (false) != static_cast<bool> (lane[ids::mute]))
+                    track->setMute (static_cast<bool> (lane[ids::mute]));
             }
+
+        for (auto insert : mixer())
+        {
+            const auto trackID = insertTrackID (uidOf (insert));
+            wanted.insert (trackID);
+
+            auto* track = trackFor (trackID);
+            if (track == nullptr)
+            {
+                const auto count = te::getAudioTracks (edit).size();
+                edit.ensureNumberOfAudioTracks (count + 1);
+                track = te::getAudioTracks (edit)[count];
+                require (track != nullptr, "Cannot create insert track");
+                track->state.setProperty ("coComposeId", trackID, nullptr);
+            }
+
+            const auto insertName = String (static_cast<int> (insert[ids::index])) + " "
+                                      + insert[ids::name].toString();
+            if (track->getName() != insertName) track->setName (insertName);
+            if (track->isMuted (false) != static_cast<bool> (insert[ids::mute]))
+                track->setMute (static_cast<bool> (insert[ids::mute]));
+
+            if (auto* volume = track->getVolumePlugin())
+            {
+                const auto wantedGain = static_cast<float> (insert[ids::gainDb]);
+                const auto wantedPan = static_cast<float> (insert.getProperty (ids::pan, 0.0));
+                if (std::abs (volume->getVolumeDb() - wantedGain) > 1.0e-4f) volume->setVolumeDb (wantedGain);
+                if (std::abs (volume->getPan() - wantedPan) > 1.0e-4f) volume->setPan (wantedPan);
+            }
+
+            syncEffects (*track, insert);
+        }
 
         for (auto* track : te::getAudioTracks (edit))
             if (wanted.find (stableID (track->state)) == wanted.end())
                 edit.deleteTrack (track);
+
+        syncRouting();
 
         te::AudioTrack* previous = nullptr;
         int position = 0;
@@ -549,6 +693,197 @@ private:
                 edit.moveTrack (track, te::TrackInsertPoint (nullptr, previous));
             ++position;
             previous = track;
+        }
+    }
+
+    /** Puts each insert's effects on its bus track in the model's order, keeping any
+        plugin that is already the right one so its settings survive a reorder. */
+    void syncEffects (te::AudioTrack& track, ValueTree insert)
+    {
+        StringArray wanted;
+        for (auto effect : insert)
+            if (effect.hasType (ids::EFFECT))
+                wanted.add (uidOf (effect));
+
+        for (auto* plugin : track.pluginList)
+            if (plugin->state.hasProperty (ids::pluginEffect)
+                 && ! wanted.contains (plugin->state[ids::pluginEffect].toString()))
+                plugin->deleteFromParent();
+
+        int slot = 0;
+        for (auto effect : insert)
+        {
+            if (! effect.hasType (ids::EFFECT))
+                continue;
+
+            const auto effectID = uidOf (effect);
+            const auto wantedType = enginePluginFor (effect[ids::type].toString());
+
+            te::Plugin* plugin = nullptr;
+            for (auto* candidate : track.pluginList)
+                if (candidate->state[ids::pluginEffect].toString() == effectID)
+                    plugin = candidate;
+
+            if (plugin != nullptr && plugin->getPluginType() != wantedType)
+            {
+                plugin->deleteFromParent();
+                plugin = nullptr;
+            }
+
+            if (plugin == nullptr)
+            {
+                if (wantedType.isEmpty())
+                    continue;
+
+                auto created = edit.getPluginCache().createNewPlugin (wantedType, {});
+                if (created == nullptr)
+                    continue;
+
+                created->state.setProperty (ids::pluginEffect, effectID, nullptr);
+                track.pluginList.insertPlugin (*created, slot, nullptr);
+                plugin = created.get();
+            }
+
+            // Rendering runs after every change, so it must write nothing when nothing
+            // differs; an idle write would land in the caller's undo transaction.
+            const auto shouldBeEnabled = ! static_cast<bool> (effect[ids::bypass]);
+            if (plugin->isEnabled() != shouldBeEnabled)
+                plugin->setEnabled (shouldBeEnabled);
+
+            // Not every effect has a wet control, so drive the one it does have.
+            const auto wetValue = static_cast<float> (effect.getProperty (ids::wet, 1.0));
+            auto wetParameter = plugin->getAutomatableParameterByID ("wet");
+            if (wetParameter == nullptr)
+                wetParameter = plugin->getAutomatableParameterByID ("mix");
+
+            if (wetParameter != nullptr
+                 && std::abs (wetParameter->valueRange.convertTo0to1 (wetParameter->getCurrentExplicitValue()) - wetValue) > 1.0e-6f)
+                wetParameter->setParameter (wetParameter->valueRange.convertFrom0to1 (wetValue), sendNotification);
+
+            // Reordering the chain has to move the plugin, not rebuild it, or its
+            // settings would be lost every time the order changed.
+            const auto current = track.pluginList.state.indexOf (plugin->state);
+            if (current >= 0 && current != slot)
+                track.pluginList.state.moveChild (current, jlimit (0, track.pluginList.state.getNumChildren() - 1, slot),
+                                                  nullptr);
+
+            ++slot;
+        }
+    }
+
+    /** Channels and lanes feed their insert, inserts feed whatever they are routed to,
+        and a send taps a copy of an insert into another one. */
+    void syncRouting()
+    {
+        for (auto channel : channels())
+            routeTo (trackFor (uidOf (channel)), static_cast<int> (channel[ids::insert]));
+
+        for (auto lane : lanes())
+            if (laneHasAudio (uidOf (lane)))
+                routeTo (trackFor (laneTrackID (uidOf (lane))), 1);
+
+        for (auto insert : mixer())
+        {
+            auto* track = trackFor (insertTrackID (uidOf (insert)));
+            if (track == nullptr)
+                continue;
+
+            const auto destination = insert.getProperty (ids::output, masterInsert).toString();
+            auto* target = destination == masterInsert || wouldFeedBack (uidOf (insert), destination)
+                             ? nullptr : trackFor (insertTrackID (destination));
+
+            if (track->getOutput().getDestinationTrack() != target)
+            {
+                if (target != nullptr) track->getOutput().setOutputToTrack (target);
+                else                   track->getOutput().setOutputToDefaultDevice (false);
+            }
+
+            syncSends (*track, insert);
+        }
+    }
+
+    void routeTo (te::AudioTrack* track, int slot)
+    {
+        if (track == nullptr)
+            return;
+
+        auto insert = insertForSlot (slot);
+        auto* target = insert.isValid() ? trackFor (insertTrackID (uidOf (insert))) : nullptr;
+
+        if (track->getOutput().getDestinationTrack() == target)
+            return;
+
+        if (target != nullptr) track->getOutput().setOutputToTrack (target);
+        else                   track->getOutput().setOutputToDefaultDevice (false);
+    }
+
+    void syncSends (te::AudioTrack& track, ValueTree insert)
+    {
+        StringArray wanted;
+        for (auto send : insert)
+            if (send.hasType (ids::SEND) && ! wouldFeedBack (uidOf (insert), send[ids::target].toString()))
+                wanted.add (uidOf (send));
+
+        for (auto* plugin : track.pluginList)
+            if (plugin->state.hasProperty (ids::pluginEffect)
+                 && dynamic_cast<te::AuxSendPlugin*> (plugin) != nullptr
+                 && ! wanted.contains (plugin->state[ids::pluginEffect].toString()))
+                plugin->deleteFromParent();
+
+        for (auto send : insert)
+        {
+            if (! send.hasType (ids::SEND))
+                continue;
+
+            const auto sendID = uidOf (send);
+            if (! wanted.contains (sendID))
+                continue;
+
+            auto target = insertFor (send[ids::target].toString());
+            auto* targetTrack = target.isValid() ? trackFor (insertTrackID (uidOf (target))) : nullptr;
+            if (targetTrack == nullptr)
+                continue;
+
+            const auto bus = static_cast<int> (target[ids::index]);
+            ensureAuxReturn (*targetTrack, bus);
+
+            te::AuxSendPlugin* aux = nullptr;
+            for (auto* candidate : track.pluginList)
+                if (candidate->state[ids::pluginEffect].toString() == sendID)
+                    aux = dynamic_cast<te::AuxSendPlugin*> (candidate);
+
+            if (aux == nullptr)
+            {
+                auto created = edit.getPluginCache().createNewPlugin (te::AuxSendPlugin::xmlTypeName, {});
+                if (created == nullptr)
+                    continue;
+
+                created->state.setProperty (ids::pluginEffect, sendID, nullptr);
+                track.pluginList.insertPlugin (*created, track.pluginList.size(), nullptr);
+                aux = dynamic_cast<te::AuxSendPlugin*> (created.get());
+            }
+
+            if (aux == nullptr)
+                continue;
+
+            const auto sendLevel = static_cast<float> (send.getProperty (ids::level, -6.0));
+            if (aux->busNumber != bus) aux->busNumber = bus;
+            if (std::abs (aux->getGainDb() - sendLevel) > 1.0e-4f) aux->setGainDb (sendLevel);
+        }
+    }
+
+    void ensureAuxReturn (te::AudioTrack& track, int bus)
+    {
+        for (auto* plugin : track.pluginList)
+            if (auto* aux = dynamic_cast<te::AuxReturnPlugin*> (plugin))
+                if (aux->busNumber == bus)
+                    return;
+
+        if (auto created = edit.getPluginCache().createNewPlugin (te::AuxReturnPlugin::xmlTypeName, {}))
+        {
+            if (auto* aux = dynamic_cast<te::AuxReturnPlugin*> (created.get()))
+                aux->busNumber = bus;
+            track.pluginList.insertPlugin (*created, 0, nullptr);
         }
     }
 

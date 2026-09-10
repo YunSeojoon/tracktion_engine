@@ -171,7 +171,8 @@ def run(exe, folder):
                                     "mute": False, "solo": False, "insert": 2, "parameters": []})
         result = submit(project, data)
         assert [c["id"] for c in result["channels"]] == ["second", channel_id], [c["id"] for c in result["channels"]]
-        assert [t["channel"] for t in result["engine"]["tracks"]] == ["second", channel_id], \
+        wanted = [c["id"] for c in result["channels"]]
+        assert [t["channel"] for t in result["engine"]["tracks"] if t["channel"] in wanted] == wanted, \
             "Channel order did not reach the engine tracks"
         data = live_state()
         data["channels"] = [c for c in data["channels"] if c["id"] != "second"]
@@ -266,6 +267,7 @@ def run(exe, folder):
         checks.append(check_pattern_built_in_the_ui(exe, folder))
         checks.append(check_arrangement_built_in_the_ui(exe, folder))
         checks.append(check_audio_clips_and_assets(exe, folder))
+        checks.append(check_mixer_routing_and_effects(exe, folder))
 
         report = {"passed": checks, "folder": str(folder), "executable": str(exe)}
         atomic_write(folder / "test-report.json", report)
@@ -723,6 +725,164 @@ def check_audio_clips_and_assets(exe, folder):
             process.wait(timeout=10)
 
     return "A dropped WAV plays, trims, fades and stretches, and survives collecting and moving the folder"
+
+
+def engine_track(state, channel_id):
+    return next((t for t in state["engine"]["tracks"] if t["channel"] == channel_id), None)
+
+
+def check_mixer_routing_and_effects(exe, folder):
+    """Three instruments into their own inserts, the drums into a bus, the bus sending
+    to a reverb insert, everything reaching the master. Then the six effects, a
+    refused feedback loop, and a reopen."""
+    sub = folder / "mixer"
+    sub.mkdir()
+    project = sub / "project.json"
+    script = sub / "ui-script.json"
+    stage = {"round": 0}
+
+    def run(actions):
+        stage["round"] += 1
+        atomic_write(script, actions)
+        wait_for(lambda: (read(sub / "ui-script-status.json").get("round") == stage["round"]
+                          and read(sub / "ui-script-status.json").get("finished")), timeout=90)
+        status = read(sub / "ui-script-status.json")
+        assert not status["error"], status
+        return read(sub / "state.json")
+
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+    process = subprocess.Popen([str(exe), "--project", str(project), "--headless", "--play",
+                                "--screenshots", "--ui-script", str(script)], startupinfo=startup)
+    try:
+        wait_for(lambda: read(sub / "sync-status.json").get("playing"), timeout=40)
+        session = read(sub / "sync-status.json")["session_id"]
+
+        state = run([{"command": "Add channel"}, {"command": "Add channel"}])
+        assert len(state["channels"]) == 3
+        assert len(state["mixer"]["inserts"]) == 3
+
+        # Every channel already plays through its own insert, which reaches the master.
+        for channel in state["channels"]:
+            slot = channel["insert"]
+            insert = next(i for i in state["mixer"]["inserts"] if i["index"] == slot)
+            track = engine_track(state, channel["id"])
+            assert track["output"] == "insert:" + insert["id"], (channel["name"], track["output"])
+            assert engine_track(state, "insert:" + insert["id"])["output"] == "master"
+
+        # A drum bus and a reverb bus, with the drums routed into the bus and sending
+        # to the reverb. The insert the drums used becomes the bus.
+        data = read(sub / "state.json")
+        drums, bass, lead = data["channels"]
+        inserts = data["mixer"]["inserts"]
+        data["mixer"]["inserts"] += [
+            {"id": "bus", "index": 4, "name": "Drum bus", "gain_db": -2.0, "pan": 0.0, "mute": False,
+             "output": "master",
+             "effects": [{"id": "fx-eq", "type": "eq", "bypass": False, "wet": 1.0, "parameters": []},
+                         {"id": "fx-sat", "type": "saturation", "bypass": False, "wet": 1.0, "parameters": []},
+                         {"id": "fx-lim", "type": "limiter", "bypass": False, "wet": 1.0, "parameters": []}],
+             "sends": [{"id": "send-verb", "target": "verb", "level": -8.0}]},
+            {"id": "verb", "index": 5, "name": "Reverb bus", "gain_db": -4.0, "pan": 0.0, "mute": False,
+             "output": "master",
+             "effects": [{"id": "fx-delay", "type": "delay", "bypass": False, "wet": 0.4, "parameters": []},
+                         {"id": "fx-chorus", "type": "chorus", "bypass": False, "wet": 0.5, "parameters": []},
+                         {"id": "fx-reverb", "type": "reverb", "bypass": False, "wet": 0.6, "parameters": []}],
+             "sends": []}]
+        # The drum insert now feeds the bus instead of the master.
+        next(i for i in data["mixer"]["inserts"] if i["index"] == drums["insert"])["output"] = "bus"
+        state = submit(project, data)
+
+        bus = next(i for i in state["mixer"]["inserts"] if i["id"] == "bus")
+        verb = next(i for i in state["mixer"]["inserts"] if i["id"] == "verb")
+        assert [e["type"] for e in bus["effects"]] == ["eq", "saturation", "limiter"], bus["effects"]
+        assert [e["type"] for e in verb["effects"]] == ["delay", "chorus", "reverb"], verb["effects"]
+
+        drum_insert = next(i for i in state["mixer"]["inserts"] if i["index"] == drums["insert"])
+        assert engine_track(state, "insert:" + drum_insert["id"])["output"] == "insert:bus", \
+            "The drums do not reach the bus"
+        assert engine_track(state, "insert:bus")["output"] == "master"
+
+        # The six effects are real plugins on the bus tracks, in order.
+        bus_plugins = [p for p in engine_track(state, "insert:bus")["plugins"] if p["effect"]]
+        assert [p["type"] for p in bus_plugins][:3] == ["4bandEq", "coComposeSaturation", "compressor"], bus_plugins
+        verb_plugins = [p for p in engine_track(state, "insert:verb")["plugins"] if p["effect"]]
+        assert [p["type"] for p in verb_plugins][:3] == ["delay", "chorus", "reverb"], verb_plugins
+        assert any(p["type"] == "auxsend" for p in engine_track(state, "insert:bus")["plugins"]), \
+            "The send never reached the engine"
+        assert any(p["type"] == "auxreturn" for p in engine_track(state, "insert:verb")["plugins"]), \
+            "The reverb bus has no return"
+
+        # An effect parameter is written and read back from the engine, then undone.
+        data = read(sub / "state.json")
+        target = next(e for e in next(i for i in data["mixer"]["inserts"] if i["id"] == "bus")["effects"]
+                      if e["type"] == "saturation")
+        drive = next(p for p in target["parameters"] if p["id"] == "drive")
+        before = drive["value"]
+        drive["value"] = 0.62
+        state = submit(project, data)
+        actual = next(p for p in next(e for e in next(i for i in state["mixer"]["inserts"] if i["id"] == "bus")["effects"]
+                                      if e["type"] == "saturation")["parameters"] if p["id"] == "drive")
+        assert abs(actual["value"] - 0.62) < 0.01, actual
+        control(project, "undo")
+        time.sleep(0.4)
+        actual = next(p for p in next(e for e in next(i for i in read(sub / "state.json")["mixer"]["inserts"]
+                                                      if i["id"] == "bus")["effects"]
+                                      if e["type"] == "saturation")["parameters"] if p["id"] == "drive")
+        assert abs(actual["value"] - before) < 0.01, (actual, before)
+
+        # Bypassing an effect disables the plugin without removing it.
+        data = read(sub / "state.json")
+        next(e for e in next(i for i in data["mixer"]["inserts"] if i["id"] == "bus")["effects"]
+             if e["type"] == "limiter")["bypass"] = True
+        state = submit(project, data)
+        limiter = next(p for p in engine_track(state, "insert:bus")["plugins"] if p["type"] == "compressor")
+        assert not limiter["enabled"], limiter
+
+        # A routing that would feed back on itself is refused, and nothing changes.
+        before_state = read(sub / "state.json")
+        loop = read(sub / "state.json")
+        next(i for i in loop["mixer"]["inserts"] if i["id"] == "verb")["output"] = "verb"
+        atomic_write(project, loop)
+        wait_for(lambda: "cannot be routed to itself" in read(sub / "sync-status.json").get("error", ""))
+        assert read(sub / "state.json") == before_state, "A refused routing changed the project"
+
+        # Reordering the chain keeps the plugins and their settings.
+        data = read(sub / "state.json")
+        effects = next(i for i in data["mixer"]["inserts"] if i["id"] == "bus")["effects"]
+        effects.insert(0, effects.pop())
+        state = submit(project, data)
+        assert [e["type"] for e in next(i for i in state["mixer"]["inserts"] if i["id"] == "bus")["effects"]] \
+            == ["limiter", "eq", "saturation"]
+        bus_plugins = [p for p in engine_track(state, "insert:bus")["plugins"] if p["effect"]]
+        assert [p["type"] for p in bus_plugins][:3] == ["compressor", "4bandEq", "coComposeSaturation"], bus_plugins
+
+        assert read(sub / "sync-status.json")["session_id"] == session, "The project was reopened"
+        assert read(sub / "sync-status.json")["playing"], "The mixer work stopped playback"
+
+        control(project, "quit")
+        assert process.wait(timeout=20) == 0
+
+        # The routing, the chains and the sends all come back from the saved session.
+        process = subprocess.Popen([str(exe), "--project", str(project), "--headless"], startupinfo=startup)
+        wait_for(lambda: read(sub / "sync-status.json")["session_id"] != session, timeout=40)
+        time.sleep(0.6)
+        reopened = read(sub / "state.json")
+        bus = next(i for i in reopened["mixer"]["inserts"] if i["id"] == "bus")
+        assert [e["type"] for e in bus["effects"]] == ["limiter", "eq", "saturation"], bus["effects"]
+        assert [s["target"] for s in bus["sends"]] == ["verb"], bus["sends"]
+        assert engine_track(reopened, "insert:" + drum_insert["id"])["output"] == "insert:bus"
+        assert any(p["type"] == "coComposeSaturation"
+                   for p in engine_track(reopened, "insert:bus")["plugins"]), "The saturation was not restored"
+        control(project, "quit")
+        assert process.wait(timeout=20) == 0
+        process = None
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+    return "Three instruments through their inserts, a drum bus with a reverb send, and the six effects"
 
 
 if __name__ == "__main__":

@@ -54,7 +54,8 @@ inline var upgradeToSchema2 (const var& root)
             { "sample", "" }, { "step_pitch", 60 }, { "step_length", stepBeats },
             { "parameters", track["parameters"].isArray() ? track["parameters"] : var (Array<var>()) } }));
         inserts.add (object ({ { "id", channelID + "-insert" }, { "index", slot },
-            { "name", trackName }, { "gain_db", 0.0 }, { "pan", 0.0 }, { "mute", false } }));
+            { "name", trackName }, { "gain_db", 0.0 }, { "pan", 0.0 }, { "mute", false },
+            { "output", masterInsert }, { "effects", Array<var>() }, { "sends", Array<var>() } }));
 
         const auto laneID = channelID + "-lane";
         lanes.add (object ({ { "id", laneID }, { "name", trackName }, { "mute", false } }));
@@ -89,6 +90,10 @@ public:
           statusFile (source.getSiblingFile ("sync-status.json")),
           nativeFile (source.getSiblingFile ("session.tracktionedit"))
     {
+        // The Edit is about to be loaded, and a session can contain this plugin, so the
+        // type has to exist before anything is restored.
+        engine.getPluginManager().createBuiltInType<SaturationPlugin>();
+
         require (source.getParentDirectory().createDirectory().wasOk(), "Cannot create project folder");
         require (source.hasFileExtension ("json") && ! StringArray { "state.json", "sync-status.json",
             "control.json", "control-status.json" }.contains (source.getFileName(), true), "Use a separate project.json input file");
@@ -239,11 +244,46 @@ public:
 
         Array<var> inserts;
         for (auto insert : model->mixer())
+        {
+            Array<var> effects, sends;
+            auto* insertTrack = model->trackFor (Model::insertTrackID (Model::uidOf (insert)));
+
+            for (auto child : insert)
+            {
+                if (child.hasType (ids::EFFECT))
+                {
+                    Array<var> parameters;
+                    if (insertTrack != nullptr)
+                        for (auto* plugin : insertTrack->pluginList)
+                            if (plugin->state[ids::pluginEffect].toString() == Model::uidOf (child))
+                                for (auto* parameter : plugin->getAutomatableParameters())
+                                    parameters.add (object ({ { "plugin_id", plugin->itemID.toString() },
+                                        { "plugin_name", plugin->getName() }, { "id", parameter->paramID },
+                                        { "name", parameter->getParameterName() },
+                                        { "value", parameter->valueRange.convertTo0to1 (parameter->getCurrentExplicitValue()) } }));
+
+                    effects.add (object ({ { "id", Model::uidOf (child) },
+                        { "type", child[ids::type].toString() },
+                        { "bypass", static_cast<bool> (child[ids::bypass]) },
+                        { "wet", static_cast<double> (child.getProperty (ids::wet, 1.0)) },
+                        { "parameters", parameters } }));
+                }
+                else if (child.hasType (ids::SEND))
+                {
+                    sends.add (object ({ { "id", Model::uidOf (child) },
+                        { "target", child[ids::target].toString() },
+                        { "level", static_cast<double> (child.getProperty (ids::level, -6.0)) } }));
+                }
+            }
+
             inserts.add (object ({ { "id", Model::uidOf (insert) }, { "index", static_cast<int> (insert[ids::index]) },
                 { "name", insert[ids::name].toString() },
                 { "gain_db", static_cast<double> (insert[ids::gainDb]) },
                 { "pan", static_cast<double> (insert[ids::pan]) },
-                { "mute", static_cast<bool> (insert[ids::mute]) } }));
+                { "mute", static_cast<bool> (insert[ids::mute]) },
+                { "output", insert.getProperty (ids::output, masterInsert).toString() },
+                { "effects", effects }, { "sends", sends } }));
+        }
 
         return object ({ { "schema", modelSchema }, { "bpm", edit->tempoSequence.getTempo (0)->getBpm() },
                          { "channels", channels }, { "patterns", patterns },
@@ -296,7 +336,16 @@ public:
                     { "length", edit->tempoSequence.toBeats (range.getEnd()).inBeats() - start },
                     { "notes", notes } }));
             }
+            Array<var> plugins;
+            for (auto* plugin : track->pluginList)
+                plugins.add (object ({ { "type", plugin->getPluginType() }, { "name", plugin->getName() },
+                                       { "enabled", plugin->isEnabled() },
+                                       { "effect", plugin->state[ids::pluginEffect].toString() } }));
+
+            auto* destination = track->getOutput().getDestinationTrack();
             tracks.add (object ({ { "channel", stableID (track->state) }, { "name", track->getName() },
+                                  { "output", destination != nullptr ? stableID (destination->state) : String ("master") },
+                                  { "plugins", plugins },
                                   { "clips", clips }, { "audio", waves } }));
         }
         return object ({ { "tracks", tracks } });
@@ -361,9 +410,34 @@ public:
         }
     }
 
+    /** Every edit this app makes opens a named transaction. The engine also writes its
+        own bookkeeping — a plugin folding its state back into the Edit, for one — and
+        that lands in whatever transaction is open at the time. Undo therefore steps
+        over the unnamed transactions and reverts the last thing a person actually did. */
     void undo()
     {
-        edit->getUndoManager().undo();
+        auto& undoManager = edit->getUndoManager();
+        undoManager.beginNewTransaction();
+
+        while (undoManager.canUndo() && undoManager.getUndoDescription().isEmpty())
+            undoManager.undo();
+
+        if (undoManager.canUndo())
+            undoManager.undo();
+
+        poll();
+    }
+
+    void redo()
+    {
+        auto& undoManager = edit->getUndoManager();
+
+        while (undoManager.canRedo() && undoManager.getRedoDescription().isEmpty())
+            undoManager.redo();
+
+        if (undoManager.canRedo())
+            undoManager.redo();
+
         poll();
     }
 
@@ -473,6 +547,10 @@ private:
 
     String pluginSignature()
     {
+        // Flushing writes each plugin's own state back into the Edit. That is
+        // bookkeeping, not an edit, so it must not join the user's undo transaction.
+        const te::Edit::UndoTransactionInhibitor inhibitor (*edit);
+
         String states;
         for (auto* track : te::getAudioTracks (*edit))
             for (auto* plugin : track->pluginList)
@@ -655,7 +733,7 @@ private:
         std::set<int> insertSlots;
         for (const auto& insert : *mixerState["inserts"].getArray())
         {
-            knownFields (insert, "id index name gain_db pan mute");
+            knownFields (insert, "id index name gain_db pan mute output effects sends");
             require (insertIDs.insert (id (insert)).second, "Duplicate insert id");
             require (insertSlots.insert (static_cast<int> (number (insert, "index", 1, 256, true))).second,
                      "Duplicate insert index");
@@ -664,6 +742,50 @@ private:
             number (insert, "pan", -1, 1);
             require (insert["mute"].isBool(), "mute must be boolean");
         }
+        for (const auto& insert : *mixerState["inserts"].getArray())
+        {
+            if (insert.hasProperty ("output"))
+            {
+                const auto destination = insert["output"].toString();
+                require (destination == masterInsert || insertIDs.count (destination) > 0,
+                         "Insert is routed to a mixer insert that does not exist");
+                require (destination != id (insert), "An insert cannot be routed to itself");
+            }
+
+            if (insert.hasProperty ("effects"))
+            {
+                require (insert["effects"].isArray() && insert["effects"].size() <= 16,
+                         "effects must be an array (max 16)");
+                std::set<String> effectIDs;
+                for (const auto& effect : *insert["effects"].getArray())
+                {
+                    knownFields (effect, "id type bypass wet parameters");
+                    require (effectIDs.insert (id (effect)).second, "Duplicate effect id");
+                    require (enginePluginFor (effect["type"].toString()).isNotEmpty(),
+                             "Unknown effect: " + effect["type"].toString());
+                    require (effect["bypass"].isVoid() || effect["bypass"].isBool(), "bypass must be boolean");
+                    if (effect.hasProperty ("wet")) number (effect, "wet", 0, 1);
+                }
+            }
+
+            if (insert.hasProperty ("sends"))
+            {
+                require (insert["sends"].isArray() && insert["sends"].size() <= 16,
+                         "sends must be an array (max 16)");
+                std::set<String> sendTargets;
+                for (const auto& send : *insert["sends"].getArray())
+                {
+                    knownFields (send, "id target level");
+                    id (send);
+                    const auto destination = send["target"].toString();
+                    require (insertIDs.count (destination) > 0, "Send targets a mixer insert that does not exist");
+                    require (destination != id (insert), "An insert cannot send to itself");
+                    require (sendTargets.insert (destination).second, "Duplicate send target");
+                    number (send, "level", -60, 6);
+                }
+            }
+        }
+
         for (const auto& channel : *root["channels"].getArray())
             require (insertSlots.count (static_cast<int> (channel["insert"])) > 0,
                      "Channel is assigned to a mixer insert that does not exist");
@@ -680,13 +802,34 @@ private:
             edit->tempoSequence.getTempo (0)->setBpm (static_cast<double> (root["bpm"]));
 
             applyList (model->mixer(), ids::INSERT, root["mixer"]["inserts"], undo,
-                       [] (ValueTree insert, const var& desired, UndoManager* um)
+                       [this] (ValueTree insert, const var& desired, UndoManager* um)
                        {
                            insert.setProperty (ids::index, static_cast<int> (desired["index"]), um);
                            insert.setProperty (ids::name, desired["name"].toString(), um);
                            insert.setProperty (ids::gainDb, static_cast<double> (desired["gain_db"]), um);
                            insert.setProperty (ids::pan, static_cast<double> (desired["pan"]), um);
                            insert.setProperty (ids::mute, static_cast<bool> (desired["mute"]), um);
+                           insert.setProperty (ids::output, desired.hasProperty ("output")
+                                                                ? desired["output"].toString() : masterInsert, um);
+
+                           if (desired.hasProperty ("effects"))
+                               applyList (insert, ids::EFFECT, desired["effects"], *um,
+                                          [] (ValueTree effect, const var& wanted, UndoManager* undoManager)
+                                          {
+                                              effect.setProperty (ids::type, wanted["type"].toString(), undoManager);
+                                              effect.setProperty (ids::bypass, static_cast<bool> (wanted["bypass"]), undoManager);
+                                              effect.setProperty (ids::wet, wanted.hasProperty ("wet")
+                                                                                ? static_cast<double> (wanted["wet"]) : 1.0,
+                                                                  undoManager);
+                                          });
+
+                           if (desired.hasProperty ("sends"))
+                               applyList (insert, ids::SEND, desired["sends"], *um,
+                                          [] (ValueTree send, const var& wanted, UndoManager* undoManager)
+                                          {
+                                              send.setProperty (ids::target, wanted["target"].toString(), undoManager);
+                                              send.setProperty (ids::level, static_cast<double> (wanted["level"]), undoManager);
+                                          });
                        });
 
             applyList (model->channels(), ids::CHANNEL, root["channels"], undo,
@@ -758,6 +901,32 @@ private:
             // The model owns the channel fader, so render it before the explicit
             // parameter edits that are read back from the engine.
             model->render();
+
+            for (const auto& insert : *root["mixer"]["inserts"].getArray())
+            {
+                if (! insert.hasProperty ("effects"))
+                    continue;
+
+                auto* insertTrack = model->trackFor (Model::insertTrackID (id (insert)));
+                if (insertTrack == nullptr)
+                    continue;
+
+                for (const auto& effect : *insert["effects"].getArray())
+                    if (effect.hasProperty ("parameters"))
+                        for (const auto& p : *effect["parameters"].getArray())
+                            for (auto* plugin : insertTrack->pluginList)
+                                if (plugin->itemID.toString() == p["plugin_id"].toString())
+                                    if (auto param = plugin->getAutomatableParameterByID (p["id"].toString()))
+                                        if (std::abs (param->valueRange.convertTo0to1 (param->getCurrentExplicitValue())
+                                                       - static_cast<float> (p["value"])) > 0.000001f)
+                                        {
+                                            const auto before = param->getCurrentExplicitValue();
+                                            const auto after = param->valueRange.convertFrom0to1 (static_cast<float> (p["value"]));
+                                            param->setParameter (after, sendNotification);
+                                            undo.perform (new ParameterAction (*edit, p["plugin_id"].toString(),
+                                                                               param->paramID, before, after));
+                                        }
+            }
 
             for (const auto& channel : *root["channels"].getArray())
                 for (const auto& p : *channel["parameters"].getArray())
@@ -885,7 +1054,11 @@ private:
         data.getDynamicObject()->setProperty ("session_id", sessionID);
         const auto contents = JSON::toString (data, false);
         edit->state.setProperty ("coComposeRevision", revision, nullptr);
-        edit->flushState();
+        {
+            // Saving is not an edit either.
+            const te::Edit::UndoTransactionInhibitor inhibitor (*edit);
+            edit->flushState();
+        }
         lastPlugins = pluginSignature();
         atomicWrite (nativeFile, edit->state.createXml()->toString());
         atomicWrite (stateFile, contents);

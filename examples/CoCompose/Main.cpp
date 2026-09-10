@@ -348,8 +348,7 @@ public:
                 return true;
 
             case commands::redo:
-                undoManager.redo();
-                project.poll();
+                project.redo();
                 return true;
 
             case commands::addChannel:
@@ -583,7 +582,7 @@ private:
                            "Revision conflict");
             const auto action = request["action"].toString();
             if (action == "undo") project.undo();
-            else if (action == "redo") { project.edit->getUndoManager().redo(); project.poll(); }
+            else if (action == "redo") project.redo();
             else if (action == "play") { startPlayback = true; project.edit->getTransport().play (false); }
             else if (action == "stop") { startPlayback = false; project.edit->getTransport().stop (false, false); }
             else if (action == "quit") JUCEApplication::getInstance()->systemRequestedQuit();

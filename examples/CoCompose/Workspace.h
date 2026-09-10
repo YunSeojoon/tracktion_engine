@@ -548,17 +548,20 @@ private:
 };
 
 //==============================================================================
-/** One mixer strip. Inserts are modelled and stored now; the audio still runs
-    straight from each channel to the master until M5 wires the routing. */
+/** One mixer strip: a meter, the fader and pan, mute, the effect chain, the sends,
+    and where the strip is routed. */
 class MixerStrip final : public Component
 {
 public:
-    MixerStrip (Model& m, const String& insertID, te::VolumeAndPanPlugin* masterPlugin)
-        : model (m), id (insertID), master (masterPlugin)
+    MixerStrip (Model& m, const String& insertID, te::VolumeAndPanPlugin* masterPlugin,
+                std::function<void()> onChange)
+        : model (m), id (insertID), master (masterPlugin), changed (std::move (onChange))
     {
         name.setJustificationType (Justification::centred);
         name.setColour (Label::textColourId, Colours::white);
         name.setFont (Font (FontOptions (12.0f, Font::bold)));
+        name.setEditable (false, master == nullptr, false);
+        name.onTextChange = [this] { write (ids::name, name.getText(), "Rename insert"); };
 
         feeds.setJustificationType (Justification::centred);
         feeds.setColour (Label::textColourId, Colour (0xff8698b6));
@@ -590,34 +593,70 @@ public:
         };
         mute.setEnabled (master == nullptr);
 
-        for (auto* child : std::initializer_list<Component*> { &name, &gain, &pan, &mute, &feeds })
+        effects.onClick = [this] { showEffectsMenu(); };
+        routing.onClick = [this] { showRoutingMenu(); };
+        effects.setEnabled (master == nullptr);
+        routing.setEnabled (master == nullptr);
+
+        chain.setJustificationType (Justification::centredLeft);
+        chain.setColour (Label::textColourId, Colour (0xff9fd6c0));
+        chain.setFont (Font (FontOptions (10.0f)));
+
+        for (auto* child : std::initializer_list<Component*> { &name, &gain, &pan, &mute, &feeds, &effects,
+                                                               &routing, &chain })
             addAndMakeVisible (*child);
+    }
+
+    ~MixerStrip() override
+    {
+        if (attached != nullptr)
+            attached->measurer.removeClient (client);
     }
 
     void paint (Graphics& g) override
     {
         g.setColour (master != nullptr ? Colour (0xff2a3550) : Colour (0xff222b3b));
         g.fillRoundedRectangle (getLocalBounds().toFloat().reduced (1.5f), 3.0f);
+
+        // The meter sits beside the fader so a strip shows what it is actually passing.
+        const auto meterArea = meterBounds();
+        g.setColour (Colour (0xff12171f));
+        g.fillRect (meterArea);
+
+        const auto level = jlimit (0.0f, 1.0f, (peak + 60.0f) / 66.0f);
+        const auto height = roundToInt (level * meterArea.getHeight());
+        if (height > 0)
+        {
+            g.setColour (peak > -1.0f ? Colour (0xffff7a6b) : peak > -9.0f ? Colour (0xffffd479) : Colour (0xff6fd39a));
+            g.fillRect (meterArea.getX(), meterArea.getBottom() - height, meterArea.getWidth(), height);
+        }
     }
 
     void resized() override
     {
         auto r = getLocalBounds().reduced (4, 5);
         name.setBounds (r.removeFromTop (16));
-        feeds.setBounds (r.removeFromBottom (14));
-        mute.setBounds (r.removeFromBottom (22).reduced (6, 1));
-        pan.setBounds (r.removeFromBottom (20).reduced (2, 0));
-        gain.setBounds (r);
+        feeds.setBounds (r.removeFromBottom (13));
+        routing.setBounds (r.removeFromBottom (19).reduced (2, 1));
+        chain.setBounds (r.removeFromBottom (13));
+        effects.setBounds (r.removeFromBottom (19).reduced (2, 1));
+        mute.setBounds (r.removeFromBottom (20).reduced (6, 1));
+        pan.setBounds (r.removeFromBottom (18).reduced (2, 0));
+        gain.setBounds (r.removeFromRight (r.getWidth() - 12));
     }
 
     void refresh()
     {
+        peak = readPeak();
+
         if (master != nullptr)
         {
             name.setText ("Master", dontSendNotification);
             gain.setValue (master->getVolumeDb(), dontSendNotification);
             pan.setValue (master->getPan(), dontSendNotification);
             feeds.setText ("all inserts", dontSendNotification);
+            chain.setText ({}, dontSendNotification);
+            repaint();
             return;
         }
 
@@ -626,41 +665,268 @@ public:
             return;
 
         const auto slot = static_cast<int> (insert[ids::index]);
-        name.setText (String (slot) + "  " + insert[ids::name].toString(), dontSendNotification);
+        if (! name.isBeingEdited())
+            name.setText (String (slot) + "  " + insert[ids::name].toString(), dontSendNotification);
         gain.setValue (static_cast<double> (insert[ids::gainDb]), dontSendNotification);
         pan.setValue (static_cast<double> (insert[ids::pan]), dontSendNotification);
         mute.setToggleState (static_cast<bool> (insert[ids::mute]), dontSendNotification);
+
+        StringArray names;
+        int sendCount = 0;
+        for (auto child : insert)
+        {
+            if (child.hasType (ids::EFFECT))
+                names.add (static_cast<bool> (child[ids::bypass]) ? "(" + child[ids::type].toString() + ")"
+                                                                  : child[ids::type].toString());
+            else if (child.hasType (ids::SEND))
+                ++sendCount;
+        }
+
+        chain.setText (names.isEmpty() ? "no effects" : names.joinIntoString (" > "), dontSendNotification);
+        chain.setTooltip (chain.getText());
+
+        const auto destination = insert.getProperty (ids::output, masterInsert).toString();
+        auto target = model.insertFor (destination);
+        routing.setButtonText (target.isValid() ? "> " + String (static_cast<int> (target[ids::index]))
+                                                : "> Master");
 
         int fed = 0;
         for (auto channel : model.channels())
             if (static_cast<int> (channel[ids::insert]) == slot)
                 ++fed;
-        feeds.setText (fed == 1 ? "1 channel" : String (fed) + " channels", dontSendNotification);
+
+        feeds.setText (String (fed) + (fed == 1 ? " ch" : " chs")
+                        + (sendCount > 0 ? ", " + String (sendCount) + " snd" : ""), dontSendNotification);
+        repaint();
     }
 
     const String id;
 
 private:
+    Rectangle<int> meterBounds() const
+    {
+        auto r = getLocalBounds().reduced (4, 5);
+        r.removeFromTop (16);
+        r.removeFromBottom (13 + 19 + 13 + 19 + 20 + 18);
+        return r.removeFromLeft (10).reduced (1, 2);
+    }
+
+    /** A level meter reports to registered clients, so the strip keeps one attached to
+        whichever meter belongs to it and reads what has arrived since the last frame. */
+    te::LevelMeterPlugin* findMeter() const
+    {
+        if (master != nullptr)
+        {
+            for (auto* plugin : te::getAllPlugins (model.edit, true))
+                if (auto* meter = dynamic_cast<te::LevelMeterPlugin*> (plugin))
+                    if (meter->getOwnerTrack() == nullptr)
+                        return meter;
+            return nullptr;
+        }
+
+        if (auto* track = model.trackFor (Model::insertTrackID (id)))
+            for (auto* plugin : track->pluginList)
+                if (auto* meter = dynamic_cast<te::LevelMeterPlugin*> (plugin))
+                    return meter;
+
+        return nullptr;
+    }
+
+    float readPeak()
+    {
+        auto* meter = findMeter();
+
+        if (meter != attached)
+        {
+            if (attached != nullptr)
+                attached->measurer.removeClient (client);
+
+            attached = meter;
+
+            if (attached != nullptr)
+                attached->measurer.addClient (client);
+        }
+
+        if (attached == nullptr)
+            return -100.0f;
+
+        const auto left = client.getAndClearAudioLevel (0).dB;
+        const auto right = client.getAndClearAudioLevel (1).dB;
+        const auto now = std::max (left, right);
+
+        // Meters fall back gently instead of flickering with every buffer.
+        held = now > held ? now : std::max (now, held - 3.0f);
+        return held;
+    }
+
+    void notify() { if (changed != nullptr) changed(); }
+
     template <typename Value>
     void write (const Identifier& property, Value value, const String& description)
     {
         auto& undo = model.edit.getUndoManager();
         undo.beginNewTransaction (description);
         model.insertFor (id).setProperty (property, value, &undo);
+        model.renderIfNeeded();
+        notify();
+    }
+
+    void showEffectsMenu()
+    {
+        auto insert = model.insertFor (id);
+        if (! insert.isValid())
+            return;
+
+        PopupMenu add;
+        for (int i = 0; i < numEffectTypes; ++i)
+            add.addItem (100 + i, String (effectTypes (i).first));
+
+        PopupMenu menu;
+        menu.addSubMenu ("Add effect", add);
+
+        int index = 0;
+        for (auto child : insert)
+        {
+            if (! child.hasType (ids::EFFECT))
+                continue;
+
+            PopupMenu item;
+            item.addItem (1000 + index * 10 + 0, "Open");
+            item.addItem (1000 + index * 10 + 1, "Bypass", true, static_cast<bool> (child[ids::bypass]));
+            item.addItem (1000 + index * 10 + 2, "Move up", index > 0);
+            item.addItem (1000 + index * 10 + 3, "Move down");
+            item.addItem (1000 + index * 10 + 4, "Remove");
+            menu.addSubMenu (String (index + 1) + ". " + child[ids::type].toString(), item);
+            ++index;
+        }
+
+        PopupMenu sendTo;
+        for (auto other : model.mixer())
+            if (Model::uidOf (other) != id && ! model.wouldFeedBack (id, Model::uidOf (other)))
+                sendTo.addItem (500 + static_cast<int> (other[ids::index]),
+                                String (static_cast<int> (other[ids::index])) + " " + other[ids::name].toString());
+
+        menu.addSeparator();
+        menu.addSubMenu ("Send to", sendTo, sendTo.containsAnyActiveItems());
+
+        menu.showMenuAsync (PopupMenu::Options().withTargetComponent (effects),
+                            [this] (int choice) { handleEffectChoice (choice); });
+    }
+
+    void handleEffectChoice (int choice)
+    {
+        auto insert = model.insertFor (id);
+        if (choice <= 0 || ! insert.isValid())
+            return;
+
+        auto& undo = model.edit.getUndoManager();
+
+        if (choice >= 100 && choice < 500)
+        {
+            undo.beginNewTransaction ("Add effect");
+            model.addEffect (insert, effectTypes (choice - 100).first, &undo);
+        }
+        else if (choice >= 500 && choice < 1000)
+        {
+            auto target = model.insertForSlot (choice - 500);
+            if (! target.isValid())
+                return;
+
+            undo.beginNewTransaction ("Add send");
+            model.addSend (insert, Model::uidOf (target), -6.0, &undo);
+        }
+        else
+        {
+            const auto index = (choice - 1000) / 10;
+            const auto action = (choice - 1000) % 10;
+
+            int seen = 0;
+            for (auto child : insert)
+            {
+                if (! child.hasType (ids::EFFECT))
+                    continue;
+
+                if (seen++ != index)
+                    continue;
+
+                if (action == 0)
+                {
+                    if (auto* track = model.trackFor (Model::insertTrackID (id)))
+                        for (auto* plugin : track->pluginList)
+                            if (plugin->state[ids::pluginEffect].toString() == Model::uidOf (child))
+                                plugin->showWindowExplicitly();
+                    return;
+                }
+
+                undo.beginNewTransaction ("Edit effect chain");
+                const auto position = insert.indexOf (child);
+
+                if (action == 1)      child.setProperty (ids::bypass, ! static_cast<bool> (child[ids::bypass]), &undo);
+                else if (action == 2) insert.moveChild (position, std::max (0, position - 1), &undo);
+                else if (action == 3) insert.moveChild (position, std::min (insert.getNumChildren() - 1, position + 1), &undo);
+                else                  insert.removeChild (child, &undo);
+                break;
+            }
+        }
+
+        model.renderIfNeeded();
+        notify();
+    }
+
+    void showRoutingMenu()
+    {
+        auto insert = model.insertFor (id);
+        if (! insert.isValid())
+            return;
+
+        const auto destination = insert.getProperty (ids::output, masterInsert).toString();
+
+        PopupMenu menu;
+        menu.addItem (1, "Master", true, destination == masterInsert);
+        for (auto other : model.mixer())
+        {
+            const auto otherID = Model::uidOf (other);
+            if (otherID == id)
+                continue;
+
+            menu.addItem (100 + static_cast<int> (other[ids::index]),
+                          String (static_cast<int> (other[ids::index])) + " " + other[ids::name].toString(),
+                          ! model.wouldFeedBack (id, otherID), destination == otherID);
+        }
+
+        menu.showMenuAsync (PopupMenu::Options().withTargetComponent (routing),
+            [this] (int choice)
+            {
+                if (choice <= 0)
+                    return;
+
+                if (choice == 1)
+                {
+                    write (ids::output, masterInsert, "Route insert");
+                    return;
+                }
+
+                if (auto target = model.insertForSlot (choice - 100); target.isValid())
+                    write (ids::output, Model::uidOf (target), "Route insert");
+            });
     }
 
     Model& model;
     te::VolumeAndPanPlugin* master;
-    Label name, feeds;
+    std::function<void()> changed;
+    Label name, feeds, chain;
     Slider gain, pan;
-    TextButton mute { "Mute" };
+    TextButton mute { "Mute" }, effects { "FX" }, routing { "> Master" };
+    te::LevelMeasurer::Client client;
+    te::LevelMeterPlugin* attached = nullptr;
+    float peak = -100.0f, held = -100.0f;
 };
 
 //==============================================================================
 class MixerPanel final : public Component
 {
 public:
-    explicit MixerPanel (Model& m) : model (m)
+    MixerPanel (Model& m, std::function<void()> onChange) : model (m), changed (std::move (onChange))
     {
         strips.setInterceptsMouseClicks (false, true);
         viewport.setViewedComponent (&strips, false);
@@ -676,7 +942,7 @@ public:
 
     void refresh()
     {
-        StringArray wanted { "master" };
+        StringArray wanted { masterInsert };
         for (auto insert : model.mixer())
             wanted.add (Model::uidOf (insert));
 
@@ -690,7 +956,7 @@ public:
             for (const auto& insertID : wanted)
             {
                 auto* strip = mixerStrips.add (new MixerStrip (model, insertID,
-                    insertID == "master" ? model.edit.getMasterVolumePlugin().get() : nullptr));
+                    insertID == masterInsert ? model.edit.getMasterVolumePlugin().get() : nullptr, changed));
                 strips.addAndMakeVisible (strip);
             }
             layoutStrips();
@@ -703,15 +969,16 @@ public:
 private:
     void layoutStrips()
     {
-        const auto height = std::max (120, viewport.getHeight() - viewport.getScrollBarThickness());
+        const auto height = std::max (150, viewport.getHeight() - viewport.getScrollBarThickness());
         strips.setSize (std::max (viewport.getWidth(), mixerStrips.size() * stripWidth), height);
         for (int i = 0; i < mixerStrips.size(); ++i)
             mixerStrips[i]->setBounds (i * stripWidth, 0, stripWidth, height);
     }
 
-    static constexpr int stripWidth = 84;
+    static constexpr int stripWidth = 92;
 
     Model& model;
+    std::function<void()> changed;
     Viewport viewport;
     Component strips;
     OwnedArray<MixerStrip> mixerStrips;
@@ -1017,7 +1284,7 @@ public:
 
         browser = std::make_unique<Browser> (model, selection, onChange);
         rack = std::make_unique<ChannelRack> (model, selection, onChange, [this] { openPianoRoll(); });
-        mixer = std::make_unique<MixerPanel> (model);
+        mixer = std::make_unique<MixerPanel> (model, onChange);
         picker = std::make_unique<PatternPicker> (model, selection, onChange);
         playlist = std::make_unique<PlaylistPanel> (model, selection, onChange);
 
