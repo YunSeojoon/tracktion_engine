@@ -878,6 +878,29 @@ private:
                     && recorder.arm (live::Model::uidOf (channel), static_cast<bool> (arm[1]));
         }
 
+        if (action.hasProperty ("take"))
+        {
+            const auto take = action["take"];
+            if (! take.isArray() || take.size() < 4)
+                return false;
+
+            auto channel = project.model->channels().getChild (static_cast<int> (take[0]));
+            Array<int> pitches;
+            for (int i = 3; i < take.size(); ++i)
+                pitches.add (static_cast<int> (take[i]));
+
+            return channel.isValid()
+                    && recorder.simulateTake (live::Model::uidOf (channel), static_cast<double> (take[1]),
+                                              static_cast<double> (take[2]), pitches);
+        }
+
+        if (action.hasProperty ("keep_takes"))
+        {
+            status.setText (recorder.keepTakes(), dontSendNotification);
+            workspace.refresh();
+            return true;
+        }
+
         if (action.hasProperty ("automation"))
         {
             const auto curve = action["automation"];

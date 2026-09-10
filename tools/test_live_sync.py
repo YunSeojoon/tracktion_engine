@@ -940,7 +940,7 @@ def read_wav(path):
 
 
 def check_automation_and_render(exe, folder):
-    """Automates a synth filter and a channel fader, records into an armed channel,
+    """Automates a synth filter and a channel fader, keeps a take on an armed channel,
     then renders the arrangement and its stems and checks the files are real audio."""
     sub = folder / "automation"
     sub.mkdir()
@@ -1002,9 +1002,34 @@ def check_automation_and_render(exe, folder):
         wait_for(lambda: "parameter that does not exist" in read(sub / "sync-status.json").get("error", ""))
         assert read(sub / "state.json") == before, "A refused curve changed the project"
 
-        # Arming a channel and recording with nothing plugged in must not break anything.
+        # Arming a channel, then a take landing on it. No MIDI keyboard is plugged in
+        # here, so the take is put on the track the way a recording leaves one and the
+        # fold-back has to claim it: notes into a new pattern, placed where it was played.
         state = run([{"arm": [0, True]}])
         assert state["channels"][0]["arm"], state["channels"][0]
+
+        patterns_before = {p["id"] for p in state["patterns"]}
+        take_pitches = [60, 63, 67, 70]
+        state = run([{"take": [0, 16.0, 4.0] + take_pitches}, {"keep_takes": True}])
+
+        kept = [p for p in state["patterns"] if p["id"] not in patterns_before]
+        assert len(kept) == 1, [p["name"] for p in state["patterns"]]
+        take = kept[0]
+        assert round(take["length"], 3) == 4.0, take
+        notes = notes_of(take, state["channels"][0]["id"])
+        assert sorted(n["pitch"] for n in notes) == sorted(take_pitches), notes
+
+        placement = next(c for c in state["playlist"]["clips"] if c["pattern"] == take["id"])
+        assert round(placement["start"], 3) == 16.0, placement
+        played = next(c for c in engine_clips(state, take["id"]))
+        assert len(played["notes"]) == len(take_pitches), played
+        assert round(played["start"], 3) == 16.0, played
+
+        # One undo takes the take back out of the arrangement.
+        control(project, "undo")
+        time.sleep(0.5)
+        assert not [c for c in settled(sub)["playlist"]["clips"] if c["pattern"] == take["id"]]
+
         state = run([{"arm": [0, False]}])
         assert not state["channels"][0]["arm"]
 
@@ -1080,7 +1105,7 @@ def check_automation_and_render(exe, folder):
             process.terminate()
             process.wait(timeout=10)
 
-    return "A filter sweep automates, records arm and disarm, and the mix and stems render as real audio"
+    return "Automation is heard and beats the stored value, a take is kept, and mix and stems render as real audio"
 
 
 def check_external_agent_session(exe, folder):

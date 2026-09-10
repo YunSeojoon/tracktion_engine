@@ -105,6 +105,14 @@ public:
         transport.stop (false, false);
         model.edit.clickTrackEnabled = clickWasEnabled;
 
+        return keepTakes();
+    }
+
+    /** Folds whatever is sitting on the armed channels into the model. Stopping a
+        recording does this; it is also how a check can exercise the fold-back without
+        a MIDI keyboard plugged in. */
+    String keepTakes()
+    {
         int captured = 0;
         for (const auto& channelID : armedChannels())
             captured += adoptTake (channelID);
@@ -112,6 +120,33 @@ public:
         model.render();
         return captured == 0 ? "Nothing was recorded"
                              : "Recorded " + String (captured) + (captured == 1 ? " take" : " takes");
+    }
+
+    /** Puts a clip on an armed channel's track the way a recording leaves one: no
+        model tag, so the fold-back has to claim it. Diagnostic only. */
+    bool simulateTake (const String& channelID, double startBeat, double lengthBeats,
+                       const Array<int>& pitches)
+    {
+        auto* track = model.trackFor (channelID);
+        if (track == nullptr || pitches.isEmpty())
+            return false;
+
+        auto& tempo = model.edit.tempoSequence;
+        const te::TimeRange range { tempo.toTime (te::BeatPosition::fromBeats (startBeat)),
+                                    tempo.toTime (te::BeatPosition::fromBeats (startBeat + lengthBeats)) };
+
+        auto* clip = track->insertMIDIClip ("Recording", range, nullptr).get();
+        if (clip == nullptr)
+            return false;
+
+        auto& sequence = clip->getSequence();
+        const auto step = lengthBeats / pitches.size();
+
+        for (int i = 0; i < pitches.size(); ++i)
+            sequence.addNote (pitches[i], te::BeatPosition::fromBeats (i * step),
+                              te::BeatDuration::fromBeats (step * 0.8), 100, 0, nullptr);
+
+        return true;
     }
 
 private:
