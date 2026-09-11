@@ -29,6 +29,17 @@ public:
     static constexpr int laneWidth = 96, rulerHeight = 22, laneHeight = 30, curveHeight = 46;
 
     double beatWidth() const { return zoom; }
+    /** What the left button does on empty space, the same pair as the note editor.
+
+        The arrangement behaved as though Draw were always on: clicking empty space
+        placed a clip, so dragging out a selection left a clip behind, and the only way
+        to select a region was to hold a modifier. Select is the default here, as it is
+        in every arrangement view, and placing is a thing you choose to do. */
+    enum Tool { select, draw };
+
+    void setTool (Tool which) { tool = which; repaint(); }
+    Tool getTool() const { return tool; }
+
     void setZoom (double pixelsPerBeat) { zoom = jlimit (1.5, 40.0, pixelsPerBeat); resized(); repaint(); }
     double getZoom() const { return zoom; }
 
@@ -101,7 +112,11 @@ public:
 
         if (const auto curve = curveIndexAt (e.y); curve >= 0)
         {
-            editCurve (curve, e.getPosition(), e.mods.isRightButtonDown(),
+            // Right-click used to take a point away here, which is the behaviour that
+            // was just removed from clips and notes for the same reason: it destroys
+            // before a person can see what they aimed at. Left alone as a gesture; the
+            // point is deleted with Delete, like everything else.
+            editCurve (curve, e.getPosition(), false,
                        e.mods.isCtrlDown() || e.mods.isAltDown());
             return;
         }
@@ -162,14 +177,14 @@ public:
                 dragMode = none;
                 showEmptyMenu (e.getPosition());
             }
-            else if (e.mods.isAltDown())
+            else if (tool == draw)
             {
-                dragMode = rubber;
-                rubberStart = e.getPosition();
+                place (e.getPosition());
             }
             else
             {
-                place (e.getPosition());
+                dragMode = rubber;
+                rubberStart = e.getPosition();
             }
 
             repaint();
@@ -227,6 +242,8 @@ public:
 
     void mouseDrag (const MouseEvent& e) override
     {
+        snapSuspended = e.mods.isAltDown();
+
         if (dragMode == curveShape)
         {
             bendSegment (e.getPosition());
@@ -324,6 +341,8 @@ public:
         // A drag across the ruler passes over every position between where it started
         // and where it meant, so the seek happens once, here, rather than at each of
         // them - which is how you get a stutter and a stuck note.
+        snapSuspended = false;
+
         if (dragMode == scrub)
             seekTo (scrubBeat);
 
@@ -375,12 +394,40 @@ public:
         return runCommand && runCommand ("Piano roll");
     }
 
+    /** Wheel scrolls, shift-wheel scrolls sideways, ctrl-wheel zooms. The same three
+        in the note editor, because a person who learns it in one window should not
+        have to learn it again in the other.
+
+        Zooming keeps whatever is under the pointer under the pointer. Zooming about
+        the left edge instead - which is what changing the width alone does - throws
+        away the thing you were looking at, every time, which is why it feels like the
+        view is running away from you. */
     void mouseWheelMove (const MouseEvent& e, const MouseWheelDetails& wheel) override
     {
-        if (e.mods.isCtrlDown())
-            setZoom (zoom * (1.0 + wheel.deltaY));
-        else
+        if (! e.mods.isCtrlDown())
+        {
+            if (e.mods.isShiftDown())
+                if (auto* view = findParentComponentOfClass<Viewport>())
+                {
+                    view->setViewPosition (jmax (0, view->getViewPositionX()
+                                                      - roundToInt (wheel.deltaY * 240.0f)),
+                                           view->getViewPositionY());
+                    return;
+                }
+
             Component::mouseWheelMove (e, wheel);
+            return;
+        }
+
+        const auto under = beatAt (e.x);
+        setZoom (zoom * (1.0 + wheel.deltaY));
+
+        if (auto* view = findParentComponentOfClass<Viewport>())
+        {
+            // Where that beat has moved to, less where the pointer is on screen.
+            const auto wanted = xForBeat (under) - (e.x - view->getViewPositionX());
+            view->setViewPosition (jmax (0, wanted), view->getViewPositionY());
+        }
     }
 
     bool keyPressed (const KeyPress& key) override
@@ -965,6 +1012,11 @@ public:
         one. Set by the app; a menu item that has nowhere to go is not offered. */
     std::function<bool (const String&)> runCommand;
 
+    /** Set by the panel that owns the toolbar, so choosing a tool from the menu moves
+        the box on screen too. Without it the two would drift apart and the app would
+        be holding a different tool from the one it says it is. */
+    std::function<void (bool)> onToolChosen;
+
 private:
     struct Start { String id; double start, length; int lane; };
     enum DragMode { none, move, resize, rubber, loop, curvePoint, curveShape,
@@ -1017,6 +1069,9 @@ private:
         PopupMenu menu;
         menu.addItem (1, "Place the selected pattern here");
         menu.addSeparator();
+        menu.addItem (5, "Select tool", true, tool == select);
+        menu.addItem (6, "Draw tool", true, tool == draw);
+        menu.addSeparator();
         menu.addItem (2, "Set loop to the marked range", timeTo > timeFrom);
         menu.addItem (3, "Clear the marked range", timeTo > timeFrom);
         menu.addSeparator();
@@ -1030,6 +1085,8 @@ private:
                 case 2: setLoopRange (timeFrom, timeTo); repaint(); break;
                 case 3: clearTimeSelection(); break;
                 case 4: if (runCommand) runCommand ("Ask AI about the region"); break;
+                case 5: if (onToolChosen) onToolChosen (false); break;
+                case 6: if (onToolChosen) onToolChosen (true);  break;
                 default: break;
             }
 
@@ -1073,12 +1130,11 @@ public:
         whether Windows delivers the click. That part is for a person. */
     bool pointerGesture (const String& what, double fromBeat, double toBeat, int laneIndex = -1)
     {
-        const auto mods = what == "shift-drag" ? ModifierKeys (ModifierKeys::shiftModifier
-                                                                 | ModifierKeys::leftButtonModifier)
-                        : what.startsWith ("right") ? ModifierKeys (ModifierKeys::rightButtonModifier)
-                        : what.startsWith ("shift") ? ModifierKeys (ModifierKeys::shiftModifier
-                                                                      | ModifierKeys::leftButtonModifier)
-                                                : ModifierKeys (ModifierKeys::leftButtonModifier);
+        auto mods = ModifierKeys (ModifierKeys::leftButtonModifier);
+        if (what.startsWith ("right"))  mods = ModifierKeys (ModifierKeys::rightButtonModifier);
+        if (what.startsWith ("shift"))  mods = mods.withFlags (ModifierKeys::shiftModifier);
+        if (what.startsWith ("alt"))    mods = mods.withFlags (ModifierKeys::altModifier);
+        if (what.startsWith ("ctrl"))   mods = mods.withFlags (ModifierKeys::ctrlModifier);
 
         // A negative lane means the ruler; otherwise the middle of that lane's row.
         const auto y = laneIndex < 0 ? rulerHeight / 2
@@ -1117,7 +1173,20 @@ public:
 private:
     void notify() { if (changed != nullptr) changed(); repaint(); }
 
-    double snapped (double beat) const { return snap <= 0.0 ? beat : std::round (beat / snap) * snap; }
+    /** Alt suspends snapping for as long as it is held.
+
+        Alt used to mean "rubber-band select" here, which the Select tool now does
+        properly, so the modifier was free. It means the same thing in most
+        arrangements: put the grid away for a moment, I know where this goes.
+
+        The note editor keeps Alt for velocity dragging - a long-standing behaviour
+        there, and changing it would break muscle memory to buy consistency the spec
+        does not insist on. The two are different windows with different tools; where
+        they disagree it is written down rather than quietly reconciled. */
+    double snapped (double beat) const
+    {
+        return (snapSuspended || snap <= 0.0) ? beat : std::round (beat / snap) * snap;
+    }
     double beatAt (int x) const { return std::max (0.0, (x - laneWidth) / beatWidth()); }
     int xForBeat (double beat) const { return laneWidth + roundToInt (beat * beatWidth()); }
 
@@ -1632,6 +1701,8 @@ private:
     StringArray selected;
     Array<Start> starts;
     DragMode dragMode = none;
+    Tool tool = select;
+    bool snapSuspended = false;
     Point<int> bendAnchor;
     double bendStart = 0.0;
     Point<int> dragAnchor, rubberStart;

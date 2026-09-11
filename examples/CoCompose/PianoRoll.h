@@ -190,6 +190,11 @@ private:
     }
 
     double beatWidth() const { return zoom.getValue(); }
+
+    void setBeatWidth (double width)
+    {
+        zoom.setValue (jlimit (zoom.getMinimum(), zoom.getMaximum(), width), sendNotificationSync);
+    }
     static constexpr int noteHeight = 11;
 
     void layOutGrid()
@@ -388,6 +393,37 @@ private:
     {
     public:
         explicit Grid (PianoRollEditor& o) : owner (o) { setWantsKeyboardFocus (false); }
+
+        /** The same wheel contract as the arrangement: scroll, shift for sideways,
+            ctrl to zoom about the pointer. */
+        void mouseWheelMove (const MouseEvent& e, const MouseWheelDetails& wheel) override
+        {
+            auto* view = findParentComponentOfClass<Viewport>();
+
+            if (! e.mods.isCtrlDown())
+            {
+                if (e.mods.isShiftDown() && view != nullptr)
+                {
+                    view->setViewPosition (jmax (0, view->getViewPositionX()
+                                                      - roundToInt (wheel.deltaY * 240.0f)),
+                                           view->getViewPositionY());
+                    return;
+                }
+
+                Component::mouseWheelMove (e, wheel);
+                return;
+            }
+
+            const auto under = (e.x - keyboardWidth) / owner.beatWidth();
+            owner.setBeatWidth (owner.beatWidth() * (1.0 + wheel.deltaY));
+
+            if (view != nullptr)
+            {
+                const auto moved = keyboardWidth + roundToInt (under * owner.beatWidth());
+                view->setViewPosition (jmax (0, moved - (e.x - view->getViewPositionX())),
+                                       view->getViewPositionY());
+            }
+        }
 
         void paint (Graphics& g) override
         {

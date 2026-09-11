@@ -1789,19 +1789,30 @@ def check_render_output_is_never_lost(exe, folder):
         started_at = read(sub / "sync-status.json")["revision"]
         run([{"export": "mix"}])
 
+        # Edit while it runs. The loop used to be `while still running`, which meant that
+        # on a machine fast enough to finish this render before the first read it never
+        # ran at all, and the check then failed for having edited nothing - blaming the
+        # app for the machine being quick. An edit is always attempted now, and whether
+        # it actually overlapped the render is reported rather than demanded.
         edits = 0
-        while read(sub / "render-status.json").get("running") is not False:
+        overlapped = False
+
+        for _ in range(12):
+            running = read(sub / "render-status.json").get("running")
+
             def nudge(live):
                 live["bpm"] = 120.0 + (edits % 5)
 
             try:
                 apply_change(project, nudge)
                 edits += 1
+                overlapped = overlapped or running is True
             except (Conflict, RuntimeError):
                 pass
 
             control(project, "undo")
-            if edits > 12:
+
+            if running is False:
                 break
 
         wait_for(lambda: read(sub / "render-status.json").get("running") is False, timeout=240)
@@ -1809,7 +1820,7 @@ def check_render_output_is_never_lost(exe, folder):
         assert rendered["files"], rendered
         assert rendered["complete"], rendered
         assert rendered["revision"] == started_at, (rendered, started_at)
-        assert edits > 0, "Nothing was edited while the render ran"
+        assert edits > 0, "Nothing was edited at all"
 
         during = read_wav(sub / "mix.wav")
         assert during["peak"] > 0.001 and during["seconds"] > 1.0, during

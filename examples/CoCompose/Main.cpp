@@ -24,6 +24,7 @@ enum
     transposeUp, transposeDown,
     metronome, focusNextPanel, scanPlugins, audioSettings, savePreset, loadPreset, about,
     returnToStart, followPlayhead, stopPlayback, openPianoRoll,
+    fitWholeSong, fitSelection, restoreZoom,
     togglePanelBase // + panel index
 };
 }
@@ -259,6 +260,7 @@ public:
                         commands::addChannel, commands::newPattern, commands::placePattern,
                         commands::makeUnique, commands::splitClip, commands::duplicateClip,
                         commands::transposeUp, commands::transposeDown, commands::openPianoRoll,
+                        commands::fitWholeSong, commands::fitSelection, commands::restoreZoom,
                         commands::metronome, commands::focusNextPanel, commands::scanPlugins,
                         commands::audioSettings, commands::savePreset, commands::loadPreset,
                         commands::about });
@@ -285,6 +287,15 @@ public:
                 break;
             case commands::stopPlayback:
                 info.setInfo ("Stop", "Stop, or return to where playing began", "Transport", 0);
+                break;
+            case commands::fitWholeSong:
+                info.setInfo ("Fit whole song", "Zoom the arrangement so all of it is visible", "View", 0);
+                break;
+            case commands::fitSelection:
+                info.setInfo ("Fit selection", "Zoom to what is picked out", "View", 0);
+                break;
+            case commands::restoreZoom:
+                info.setInfo ("Back to previous zoom", "Undo the last fit", "View", 0);
                 break;
             case commands::openPianoRoll:
                 info.setInfo ("Piano roll", "Open the notes of the selected pattern", "Edit", 0);
@@ -483,6 +494,19 @@ public:
                     startPlayback = true;
                     project.edit->getTransport().play (false);
                 }
+                return true;
+
+            case commands::fitWholeSong:
+                workspace.fitWholeSong();
+                return true;
+
+            case commands::fitSelection:
+                if (! workspace.fitSelection())
+                    say ("Pick out some clips, or mark a stretch on the ruler, first");
+                return true;
+
+            case commands::restoreZoom:
+                workspace.restoreZoom();
                 return true;
 
             case commands::openPianoRoll:
@@ -1359,6 +1383,7 @@ private:
                              + (workspace.chatPanel().entryHasFocus() ? "1" : "0") + ":"
                              + String (workspace.suggestedNoteCount()) + ":"
                              + workspace.noteEditorHeading() + ":"
+                             + workspace.arrangementTool() + ":"
                              + String (project.revision);
 
         if (shape == lastInspectorShape)
@@ -1376,6 +1401,7 @@ private:
             fields->setProperty ("waiting", bridge != nullptr && bridge->isWaiting());
             fields->setProperty ("conversation_id", conversation != nullptr ? conversation->id() : String());
             fields->setProperty ("suggested_notes_drawn", workspace.suggestedNoteCount());
+            fields->setProperty ("grid_tool", workspace.arrangementTool());
             fields->setProperty ("editor_open", workspace.isNoteEditorOpen());
             fields->setProperty ("editor_heading", workspace.noteEditorHeading());
             // Which component has the keyboard, so a check about "while typing" can see
@@ -1779,6 +1805,9 @@ private:
             const auto lane = gesture.size() > 3 ? static_cast<int> (gesture[3]) : -1;
             return workspace.playlistGrid().pointerGesture (gesture[0].toString(), from, to, lane);
         }
+
+        if (action.hasProperty ("grid_tool"))
+            return workspace.setArrangementTool (action["grid_tool"].toString());
 
         if (action.hasProperty ("piano_tool"))
             return workspace.setNoteTool (action["piano_tool"].toString());

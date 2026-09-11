@@ -297,4 +297,89 @@ public:
     }
 };
 
+//==============================================================================
+/** A slider with the two gestures people arrive expecting, whatever shape it is.
+
+    Double-click puts it back where it started. Right-click asks for a number, because
+    dragging is hopeless when you want exactly -6 dB and the control is twenty pixels
+    across. Neither is a preference: they are what every mixer does, and a control
+    without them reads as unfinished no matter how well it is drawn.
+
+    Knobs and faders both get it, which is why this is not called a knob. The default
+    is whatever the control was set up with, so "back to default" means what the
+    project means by it rather than wherever the slider's range happens to begin.
+*/
+class ValueSlider final : public juce::Slider
+{
+public:
+    explicit ValueSlider (juce::Slider::SliderStyle style = juce::Slider::RotaryVerticalDrag)
+        : juce::Slider (style, juce::Slider::NoTextBox) {}
+
+    /** Sets the value and remembers it as the one to come back to. */
+    void setDefaultValue (double value)
+    {
+        defaultValue = value;
+        setDoubleClickReturnValue (true, value);
+    }
+
+    /** How a number should read once typed - "dB", "Hz", or empty. Display only. */
+    juce::String units;
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (! e.mods.isRightButtonDown())
+        {
+            juce::Slider::mouseDown (e);
+            return;
+        }
+
+        juce::PopupMenu menu;
+        menu.addItem (1, "Type a value...");
+        menu.addItem (2, "Back to " + juce::String (defaultValue, 2) + units);
+
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+                            [this] (int chosen)
+        {
+            if (chosen == 2)
+                setValue (defaultValue, juce::sendNotificationSync);
+            else if (chosen == 1)
+                askForANumber();
+        });
+    }
+
+private:
+    void askForANumber()
+    {
+        auto* box = new juce::AlertWindow (getName().isNotEmpty() ? getName() : "Value",
+                                           "Type a value" + (units.isNotEmpty() ? " in " + units : juce::String()),
+                                           juce::MessageBoxIconType::NoIcon);
+        box->addTextEditor ("value", juce::String (getValue(), 3));
+        box->addButton ("Set", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        box->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+        box->enterModalState (true, juce::ModalCallbackFunction::create (
+            [this, box] (int result)
+            {
+                std::unique_ptr<juce::AlertWindow> owned (box);
+
+                if (result != 1)
+                    return;
+
+                const auto typed = owned->getTextEditorContents ("value").trim();
+
+                // A box that was left empty, or filled with something that is not a
+                // number, means "never mind" - not zero, which would be an edit nobody
+                // asked for and, on a gain control, a silent one.
+                if (typed.isEmpty() || ! typed.containsOnly ("0123456789.,-+eE"))
+                    return;
+
+                setValue (juce::jlimit (getMinimum(), getMaximum(), typed.getDoubleValue()),
+                          juce::sendNotificationSync);
+            }), false);
+    }
+
+    double defaultValue = 0.0;
+};
+
+
 } // namespace live

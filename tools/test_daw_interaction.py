@@ -343,6 +343,75 @@ def check_select_does_not_draw(exe, folder, report):
         session.close()
 
 
+def check_select_does_not_place_clips(exe, folder, report):
+    """D3: the arrangement behaved as though Draw were always on.
+
+    Clicking empty space placed a clip, so dragging out a selection left a clip behind
+    and the only way to select a region was to hold a modifier. Select is the default
+    now, as it is in every arrangement view, and placing is something you choose."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open()
+    try:
+        prepare_song(session)
+        state = session.settled()
+        before = len(state["playlist"]["clips"])
+
+        report.expect("Select is what the arrangement starts with",
+                      read(folder / "chat-inspector.json").get("grid_tool") == "select",
+                      read(folder / "chat-inspector.json").get("grid_tool"))
+
+        session.run([{"ruler": ["click", 200.0, 200.0, 0]}])
+        time.sleep(0.6)
+        report.expect("clicking empty arrangement with Select places nothing",
+                      len(session.settled()["playlist"]["clips"]) == before,
+                      (before, len(session.settled()["playlist"]["clips"])))
+
+        session.run([{"grid_tool": "draw"}, {"ruler": ["click", 200.0, 200.0, 0]}])
+        time.sleep(0.6)
+        report.expect("and with Draw places one",
+                      len(session.settled()["playlist"]["clips"]) == before + 1,
+                      (before, len(session.settled()["playlist"]["clips"])))
+
+        session.run([{"grid_tool": "select"}])
+        time.sleep(0.3)
+        report.expect("the tool can be put back",
+                      read(folder / "chat-inspector.json").get("grid_tool") == "select")
+    finally:
+        session.close()
+
+
+def check_alt_puts_the_grid_away(exe, folder, report):
+    """D3: Alt suspends snapping while it is held.
+
+    Alt used to mean rubber-band select here, which the Select tool now does properly,
+    so the modifier was free for what it means in most arrangements: put the grid away
+    for a moment, I know where this goes."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open()
+    try:
+        prepare_song(session)
+        state = session.settled()
+        clip = state["playlist"]["clips"][0]
+        start = clip["start"]
+
+        # A whole number of beats, snapped, from a drag that asks for a fraction.
+        session.run([{"pick_clip": [0, start + 0.5]},
+                     {"ruler": ["drag", start + 0.5, start + 4.3, 0]}])
+        time.sleep(0.8)
+        snapped_to = session.settled()["playlist"]["clips"][0]["start"]
+        report.expect("an ordinary drag lands on the grid",
+                      abs(snapped_to - round(snapped_to)) < 1e-6, snapped_to)
+
+        session.run([{"pick_clip": [0, snapped_to + 0.5]},
+                     {"ruler": ["alt-drag", snapped_to + 0.5, snapped_to + 4.3, 0]}])
+        time.sleep(0.8)
+        free = session.settled()["playlist"]["clips"][0]["start"]
+        report.expect("holding Alt lands between the lines",
+                      abs(free - round(free)) > 1e-6, free)
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -370,6 +439,12 @@ def run(exe, output):
     print()
     print("Select selects, Draw draws")
     check_select_does_not_draw(exe, output / "tools", report)
+    print()
+    print("the arrangement has the same two tools")
+    check_select_does_not_place_clips(exe, output / "gridtools", report)
+    print()
+    print("Alt puts the grid away")
+    check_alt_puts_the_grid_away(exe, output / "snap", report)
 
     print()
     if report.unchecked:

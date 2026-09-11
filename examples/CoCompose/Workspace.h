@@ -315,10 +315,11 @@ public:
         mute.onClick = [this] { write (ids::mute, mute.getToggleState(), "Mute channel"); };
         solo.onClick = [this] { write (ids::solo, solo.getToggleState(), "Solo channel"); };
 
-        gain.setSliderStyle (Slider::RotaryVerticalDrag);
         gain.setRange (-60.0, 6.0, 0.1);
-        gain.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
         gain.setTooltip ("Channel volume");
+        gain.setName ("Channel volume");
+        gain.units = " dB";
+        gain.setDefaultValue (0.0);
         gain.onValueChange = [this] { write (ids::gainDb, gain.getValue(), "Channel volume"); };
 
         insert.setSliderStyle (Slider::IncDecButtons);
@@ -327,10 +328,10 @@ public:
         insert.setTooltip ("Mixer insert");
         insert.onValueChange = [this] { write (ids::insert, static_cast<int> (insert.getValue()), "Mixer insert"); };
 
-        pan.setSliderStyle (Slider::RotaryVerticalDrag);
         pan.setRange (-1.0, 1.0, 0.01);
-        pan.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
         pan.setTooltip ("Channel pan");
+        pan.setName ("Channel pan");
+        pan.setDefaultValue (0.0);
         pan.onValueChange = [this] { write (ids::pan, pan.getValue(), "Channel pan"); };
 
         instrument.onChange = [this]
@@ -402,6 +403,15 @@ public:
     void mouseDown (const MouseEvent&) override
     {
         selection.setChannel (id);
+
+        // Picking a channel points the mixer at the insert it feeds. A person who
+        // clicks the bass and then looks at the mixer expects to be looking at the
+        // bass; having to find its strip by eye, every time, is the kind of small
+        // friction that makes a mixer feel like a separate program.
+        if (auto tree = channel(); tree.isValid())
+            if (auto feeds = model.insertForSlot (static_cast<int> (tree[ids::insert])); feeds.isValid())
+                selection.setInsert (Model::uidOf (feeds));
+
         if (changed != nullptr) changed();
     }
 
@@ -706,7 +716,8 @@ private:
     TextButton mute { "M" }, solo { "S" }, openInstrument { "..." }, sample { "WAV" },
                stepSettings { "1/16" }, presets { "P" };
     ComboBox instrument;
-    Slider gain, pan, insert;
+    ValueSlider gain, pan;
+    Slider insert;
     StepGrid steps;
     Array<std::pair<String, String>> instruments;
     Array<File> presetFiles;
@@ -900,6 +911,9 @@ public:
         feeds.setColour (Label::textColourId, theme::textDim);
         feeds.setFont (Font (FontOptions (11.0f)));
 
+        gain.setName ("Insert volume");
+        gain.units = " dB";
+        gain.setDefaultValue (0.0);
         gain.setSliderStyle (Slider::LinearVertical);
         gain.setRange (-60.0, 6.0, 0.1);
         gain.setTextBoxStyle (Slider::TextBoxBelow, false, 56, 18);
@@ -909,6 +923,8 @@ public:
             write (ids::gainDb, gain.getValue(), "Insert volume");
         };
 
+        pan.setName ("Insert pan");
+        pan.setDefaultValue (0.0);
         pan.setSliderStyle (Slider::LinearHorizontal);
         pan.setRange (-1.0, 1.0, 0.01);
         pan.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
@@ -1280,7 +1296,7 @@ private:
     te::VolumeAndPanPlugin* master;
     std::function<void()> changed;
     Label name, feeds, chain;
-    Slider gain, pan;
+    ValueSlider gain, pan;
     TextButton mute { "Mute" }, effects { "FX" }, routing { "> Master" };
     te::LevelMeasurer::Client client;
     te::LevelMeterPlugin* attached = nullptr;
@@ -1581,9 +1597,20 @@ public:
         zoom.setTooltip ("Zoom");
         zoom.onValueChange = [this] { grid->setZoom (zoom.getValue()); layOutGrid(); };
 
+        tools.addItem ("Select", 1);
+        tools.addItem ("Draw", 2);
+        tools.setSelectedId (1, dontSendNotification);
+        tools.onChange = [this]
+        {
+            grid->setTool (tools.getSelectedId() == 2 ? PlaylistGrid::draw : PlaylistGrid::select);
+        };
+
+        grid->onToolChosen = [this] (bool drawing) { setTool (drawing); };
+
         addAndMakeVisible (viewport);
         for (auto* child : std::initializer_list<Component*> { &addLane, &removeLane, &muteLane,
-                                                              &duplicate, &makeUnique, &remove, &snap, &zoom })
+                                                              &duplicate, &makeUnique, &remove,
+                                                              &tools, &snap, &zoom })
             addAndMakeVisible (*child);
     }
 
@@ -1598,6 +1625,7 @@ public:
         makeUnique.setBounds (bar.removeFromLeft (56).reduced (1));
         remove.setBounds (bar.removeFromLeft (48).reduced (1));
         automate.setBounds (bar.removeFromLeft (72).reduced (1));
+        tools.setBounds (bar.removeFromLeft (78).reduced (1));
         snap.setBounds (bar.removeFromLeft (80).reduced (1));
         zoom.setBounds (bar.reduced (2, 1));
         viewport.setBounds (r);
@@ -1618,6 +1646,60 @@ public:
     }
 
     PlaylistGrid& getGrid() { return *grid; }
+
+    /** One place decides which tool is held, so the toolbar, the right-click menu and
+        a script cannot disagree about it. */
+    /** Zoom so the whole song fits, or so what is picked out fills the window, and
+        back to where the zoom was before either. Hunting for the end of an arrangement
+        with a wheel is the sort of thing people stop doing by stopping using the app. */
+    void fitWholeSong()
+    {
+        rememberZoom();
+        fitBeats (0.0, std::max (16.0, grid->arrangementBeats() + 4.0));
+    }
+
+    bool fitSelection()
+    {
+        const auto marked = grid->timeSelection();
+        auto from = marked.getStart(), to = marked.getEnd();
+
+        if (to <= from)
+        {
+            auto any = false;
+            for (const auto& id : grid->selectedClips())
+                if (auto clip = model.instanceFor (id); clip.isValid())
+                {
+                    const auto start = static_cast<double> (clip[ids::start]);
+                    const auto end = start + static_cast<double> (clip[ids::length]);
+                    from = any ? std::min (from, start) : start;
+                    to = any ? std::max (to, end) : end;
+                    any = true;
+                }
+
+            if (! any)
+                return false;
+        }
+
+        rememberZoom();
+        fitBeats (from, to);
+        return true;
+    }
+
+    void restoreZoom()
+    {
+        if (previousZoom <= 0.0)
+            return;
+
+        grid->setZoom (previousZoom);
+        viewport.setViewPosition (previousScroll, viewport.getViewPositionY());
+        previousZoom = 0.0;
+    }
+
+    void setTool (bool drawing)
+    {
+        grid->setTool (drawing ? PlaylistGrid::draw : PlaylistGrid::select);
+        tools.setSelectedId (drawing ? 2 : 1, dontSendNotification);
+    }
 
     /** Whether the view chases the playhead during playback.
 
@@ -1696,6 +1778,25 @@ public:
 private:
     bool following = true, pausedByHand = false;
     int lastScrolledTo = 0;
+    double previousZoom = 0.0;
+    int previousScroll = 0;
+
+    void rememberZoom()
+    {
+        previousZoom = grid->getZoom();
+        previousScroll = viewport.getViewPositionX();
+    }
+
+    /** Sets the zoom so a stretch of beats fills the visible width, and scrolls to it. */
+    void fitBeats (double from, double to)
+    {
+        const auto beats = std::max (1.0, to - from);
+        const auto usable = std::max (120, viewport.getWidth() - PlaylistGrid::laneWidth - 16);
+
+        grid->setZoom (usable / beats);
+        layOutGrid();
+        scrollTo (jmax (0, grid->xForBeatPublic (from) - PlaylistGrid::laneWidth));
+    }
 
     /** Says so once, when it actually changes. Anything that tells the rest of the app
         something happened has to be sure something did. */
@@ -1843,6 +1944,7 @@ private:
     TextButton addLane { "+ Lane" }, removeLane { "- Lane" }, muteLane { "Mute" },
                duplicate { "Copy" }, makeUnique { "Unique" }, remove { "Delete" },
                automate { "Automate" };
+    ComboBox tools;
     ComboBox snap;
     Slider zoom;
     Array<double> snapChoices;
@@ -2174,6 +2276,10 @@ public:
     std::function<bool (const String&)> menuRunner;
     std::function<void()> askNotes;
 
+    void fitWholeSong() { playlist->fitWholeSong(); }
+    bool fitSelection() { return playlist->fitSelection(); }
+    void restoreZoom() { playlist->restoreZoom(); }
+
     void setFollowPlayhead (bool shouldFollow) { playlist->setFollowPlayhead (shouldFollow); }
     bool isFollowPaused() const { return playlist->isFollowPaused(); }
 
@@ -2419,6 +2525,17 @@ public:
         if (auto* editor = pianoRollEditor())
             return editor->heading_();
         return {};
+    }
+
+    bool setArrangementTool (const String& which)
+    {
+        playlist->setTool (which == "draw");
+        return true;
+    }
+
+    String arrangementTool() const
+    {
+        return playlist->getGrid().getTool() == PlaylistGrid::draw ? "draw" : "select";
     }
 
     bool setNoteTool (const String& which)
