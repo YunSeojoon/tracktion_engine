@@ -91,7 +91,9 @@ namespace layoutIds
 {
     const Identifier LAYOUT ("COCOMPOSELAYOUT");
     const Identifier visible ("visible"), sizes ("sizes"), selectedChannel ("selectedChannel"),
-        selectedPattern ("selectedPattern"), selectedLane ("selectedLane"), patternMode ("patternMode");
+        selectedPattern ("selectedPattern"), selectedLane ("selectedLane"), patternMode ("patternMode"),
+        collapsed ("collapsed"), maximised ("maximised"), selectedInsert ("selectedInsert"),
+        projectID ("projectId");
 }
 
 //==============================================================================
@@ -105,10 +107,12 @@ public:
     String channel() const { return state[layoutIds::selectedChannel].toString(); }
     String pattern() const { return state[layoutIds::selectedPattern].toString(); }
     String lane()    const { return state[layoutIds::selectedLane].toString(); }
+    String insert()  const { return state[layoutIds::selectedInsert].toString(); }
 
     void setChannel (const String& value) { state.setProperty (layoutIds::selectedChannel, value, nullptr); }
     void setPattern (const String& value) { state.setProperty (layoutIds::selectedPattern, value, nullptr); }
     void setLane (const String& value)    { state.setProperty (layoutIds::selectedLane, value, nullptr); }
+    void setInsert (const String& value)  { state.setProperty (layoutIds::selectedInsert, value, nullptr); }
 
     ValueTree state;
 };

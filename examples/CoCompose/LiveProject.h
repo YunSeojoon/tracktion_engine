@@ -170,7 +170,42 @@ public:
     std::unique_ptr<te::Edit> edit;
     std::unique_ptr<Model> model;
     const File source, stateFile, statusFile, nativeFile;
+    /** Two different lifetimes, deliberately kept apart.
+
+        sessionID identifies this run of the app: it is what a live-sync request is
+        checked against, and it is different every time the app starts.
+
+        projectID identifies the project itself and outlives every run. A conversation
+        is bound to it, so reopening a project reaches the same conversation while the
+        session it now belongs to is a fresh one. Renaming or moving the folder keeps
+        it, because it lives inside the session file rather than in the path; saving a
+        copy clears it, because a copy is a different project and must not share a
+        conversation with its original.
+    */
     const String sessionID = Uuid().toString();
+
+    String projectID() const
+    {
+        auto layout = edit->state.getChildWithName (layoutIds::LAYOUT);
+        if (! layout.isValid())
+        {
+            layout = ValueTree (layoutIds::LAYOUT);
+            edit->state.appendChild (layout, nullptr);
+        }
+
+        if (! layout.hasProperty (layoutIds::projectID))
+            layout.setProperty (layoutIds::projectID, Uuid().toString(), nullptr);
+
+        return layout[layoutIds::projectID].toString();
+    }
+
+    /** Called when a project is copied, so the copy earns an identity of its own the
+        next time it is asked for one. */
+    static void clearProjectID (te::Edit& target)
+    {
+        if (auto layout = target.state.getChildWithName (layoutIds::LAYOUT); layout.isValid())
+            layout.removeProperty (layoutIds::projectID, nullptr);
+    }
     String error;
     String recoveredFrom;
     String syncState = "synced";
@@ -756,6 +791,7 @@ public:
     void writeStatus()
     {
         atomicWrite (statusFile, JSON::toString (object ({ { "session_id", sessionID },
+            { "project_id", projectID() },
             { "revision", revision }, { "applied", applied }, { "error", error },
             { "status", syncState },
             { "edit_instance", String::toHexString (reinterpret_cast<int64> (edit.get())) },

@@ -452,7 +452,8 @@ def check_workspace_layout(launch, folder):
     assert layout is not None, "The session has no saved workspace layout"
 
     sizes = [float(v) for v in layout.get("sizes", "").split()]
-    assert len(sizes) == 4 and all(size > 1.0 for size in sizes), layout.get("sizes")
+    # One number per shared split. The chat panel added a fifth when it became a column.
+    assert len(sizes) == 5 and all(size > 1.0 for size in sizes), layout.get("sizes")
     assert layout.get("visible") == "11111", layout.get("visible")
     assert layout.get("selectedChannel") == state["channels"][0]["id"]
     assert layout.get("selectedPattern") == state["patterns"][0]["id"]
@@ -463,7 +464,7 @@ def check_workspace_layout(launch, folder):
     tree = ElementTree.parse(session)
     edited = tree.getroot().find("COCOMPOSELAYOUT")
     edited.set("visible", "11010")
-    edited.set("sizes", "160 %s %s %s" % tuple(str(size) for size in sizes[1:]))
+    edited.set("sizes", "160 " + " ".join(str(size) for size in sizes[1:]))
     tree.write(session, encoding="UTF-8", xml_declaration=True)
 
     with_session(launch, folder, "workspace-reopened", lambda target:

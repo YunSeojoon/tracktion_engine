@@ -4,6 +4,8 @@
 #include "PianoRoll.h"
 #include "PlaylistGrid.h"
 #include "Browser.h"
+#include "Attachment.h"
+#include "ChatPanel.h"
 
 namespace live
 {
@@ -16,7 +18,8 @@ namespace live
     reopened session comes back with the same work surface.
 */
 
-enum PanelIndex { panelBrowser = 0, panelChannelRack, panelMixer, panelPatternPicker, panelPlaylist, numPanels };
+enum PanelIndex { panelBrowser = 0, panelChannelRack, panelMixer, panelPatternPicker,
+                  panelPlaylist, panelChat, numPanels };
 
 inline const char* panelName (int index)
 {
@@ -26,12 +29,16 @@ inline const char* panelName (int index)
         case panelChannelRack:   return "Channel Rack";
         case panelMixer:         return "Mixer";
         case panelPatternPicker: return "Pattern picker";
+        case panelChat:          return "AI chat";
         default:                 return "Playlist";
     }
 }
 
 //==============================================================================
-/** A titled, focusable frame around one panel's content. */
+/** A titled, focusable frame around one panel's content, with the three window
+    controls a person expects on a pane: collapse to its header, fill the surface,
+    and put it away. Closing a panel is a layout decision and nothing more - it never
+    throws away what the panel was holding. */
 class Panel final : public Component
 {
 public:
@@ -40,7 +47,43 @@ public:
     {
         setWantsKeyboardFocus (true);
         addAndMakeVisible (content);
+
+        // Drawn rather than typed, so they stay sharp at any display scale and do not
+        // depend on a font having the glyphs.
+        for (auto* button : { &collapse, &maximise, &close })
+        {
+            button->setWantsKeyboardFocus (false);
+            addAndMakeVisible (*button);
+        }
+
+        collapse.onClick = [this] { if (onCollapse)  onCollapse(); };
+        maximise.onClick = [this] { if (onMaximise)  onMaximise(); };
+        close.onClick    = [this] { if (onClose)     onClose(); };
+
+        collapse.setTooltip ("Minimise");
+        maximise.setTooltip ("Maximise");
+        close.setTooltip ("Close");
     }
+
+    /** What the buttons ask the workspace to do. The panel itself decides nothing. */
+    std::function<void()> onCollapse, onMaximise, onClose;
+
+    void setCollapsed (bool shouldBeCollapsed)
+    {
+        collapsed = shouldBeCollapsed;
+        content.setVisible (! collapsed);
+        resized();
+        repaint();
+    }
+
+    void setMaximised (bool shouldBeMaximised)
+    {
+        maximised = shouldBeMaximised;
+        maximise.setShape (maximised);
+        repaint();
+    }
+
+    bool isCollapsed() const { return collapsed; }
 
     void paint (Graphics& g) override
     {
@@ -52,12 +95,21 @@ public:
         g.drawRoundedRectangle (bounds.reduced (0.5f), 4.0f, focused ? 1.8f : 1.0f);
         g.setColour (focused ? theme::accent : theme::textDim);
         g.setFont (Font (FontOptions (12.0f, Font::bold)));
-        g.drawText (title.toUpperCase(), getLocalBounds().removeFromTop (headerHeight).reduced (9, 0),
+        // Leave room for the three controls so a long title never runs under them.
+        g.drawText (title.toUpperCase(),
+                    getLocalBounds().removeFromTop (headerHeight).reduced (9, 0)
+                        .withTrimmedRight (3 * (headerHeight - 4)),
                     Justification::centredLeft);
     }
 
     void resized() override
     {
+        auto header = getLocalBounds().removeFromTop (headerHeight).reduced (6, 4);
+        const auto button = header.getHeight() + 4;
+        close.setBounds (header.removeFromRight (button));
+        maximise.setBounds (header.removeFromRight (button));
+        collapse.setBounds (header.removeFromRight (button));
+
         content.setBounds (getLocalBounds().withTrimmedTop (headerHeight).reduced (6, 5));
     }
 
@@ -66,6 +118,63 @@ public:
     void focusLost (FocusChangeType) override   { repaint(); }
 
     static constexpr int headerHeight = 22;
+
+    /** The three controls, drawn as shapes. A button says what it does by its mark, not
+        only by its colour, and the maximise mark changes once the panel is filling the
+        surface so the same button reads as "put it back". */
+    struct HeaderButton final : public Button
+    {
+        enum Kind { minimise, maximiseOrRestore, dismiss };
+
+        explicit HeaderButton (Kind k) : Button ({}), kind (k) {}
+
+        void setShape (bool restore) { showsRestore = restore; repaint(); }
+
+        void paintButton (Graphics& g, bool over, bool down) override
+        {
+            const auto area = getLocalBounds().toFloat();
+            if (over || down)
+            {
+                g.setColour (kind == dismiss ? theme::danger.withAlpha (down ? 0.5f : 0.3f)
+                                             : theme::edgeStrong.withAlpha (down ? 0.9f : 0.6f));
+                g.fillRoundedRectangle (area, 2.0f);
+            }
+
+            const auto mark = area.withSizeKeepingCentre (8.0f, 8.0f);
+            g.setColour (over ? theme::text : theme::textDim);
+
+            if (kind == minimise)
+            {
+                g.fillRect (mark.getX(), mark.getBottom() - 1.0f, mark.getWidth(), 1.0f);
+            }
+            else if (kind == maximiseOrRestore)
+            {
+                if (showsRestore)
+                {
+                    // Two overlapping frames: the shape of coming back to a smaller size.
+                    g.drawRect (mark.withTrimmedRight (2.0f).withTrimmedTop (2.0f), 1.0f);
+                    g.drawRect (mark.withTrimmedLeft (2.0f).withTrimmedBottom (2.0f), 1.0f);
+                }
+                else
+                {
+                    g.drawRect (mark, 1.0f);
+                }
+            }
+            else
+            {
+                g.drawLine (mark.getX(), mark.getY(), mark.getRight(), mark.getBottom(), 1.2f);
+                g.drawLine (mark.getX(), mark.getBottom(), mark.getRight(), mark.getY(), 1.2f);
+            }
+        }
+
+        Kind kind;
+        bool showsRestore = false;
+    };
+
+    HeaderButton collapse { HeaderButton::minimise };
+    HeaderButton maximise { HeaderButton::maximiseOrRestore };
+    HeaderButton close    { HeaderButton::dismiss };
+    bool collapsed = false, maximised = false;
 
     String title;
     Component& content;
@@ -1509,6 +1618,14 @@ public:
 
     PlaylistGrid& getGrid() { return *grid; }
 
+    /** Scrolls the arrangement so a beat is on screen, which is what following a chat
+        attachment back to the music amounts to. */
+    void showBeat (double beat)
+    {
+        viewport.setViewPosition (jmax (0, grid->xForBeatPublic (beat) - viewport.getWidth() / 3),
+                                  viewport.getViewPositionY());
+    }
+
 private:
     void notify() { if (changed != nullptr) changed(); }
 
@@ -1666,17 +1783,24 @@ public:
         mixer = std::make_unique<MixerPanel> (model, onChange);
         picker = std::make_unique<PatternPicker> (model, selection, onChange);
         playlist = std::make_unique<PlaylistPanel> (model, selection, onChange);
+        chat = std::make_unique<ChatPanel> (model, selection,
+                                            [this] (const Attachment& a) { revealAttachment (a); });
+        chat->onRefresh = [this] (int index) { refreshAttachment (index); };
 
-        Component* contents[numPanels] = { browser.get(), rack.get(), mixer.get(), picker.get(), playlist.get() };
+        Component* contents[numPanels] = { browser.get(), rack.get(), mixer.get(), picker.get(),
+                                           playlist.get(), chat.get() };
         for (int i = 0; i < numPanels; ++i)
         {
             panels[i] = std::make_unique<Panel> (panelName (i), *contents[i]);
+            panels[i]->onCollapse = [this, i] { toggleCollapsed (i); };
+            panels[i]->onMaximise = [this, i] { toggleMaximised (i); };
+            panels[i]->onClose    = [this, i] { setPanelVisible (i, false); };
             addAndMakeVisible (*panels[i]);
         }
 
         const auto stored = StringArray::fromTokens (layout[layoutIds::sizes].toString(), " ", "");
-        const double fallbacks[4] = { 190.0, 460.0, 290.0, 170.0 };
-        for (int i = 0; i < 4; ++i)
+        const double fallbacks[5] = { 190.0, 460.0, 290.0, 170.0, 300.0 };
+        for (int i = 0; i < 5; ++i)
         {
             const auto value = i < stored.size() ? stored[i].getDoubleValue() : 0.0;
             desired[i] = value > 1.0 ? value : fallbacks[i];
@@ -1688,10 +1812,12 @@ public:
 
         columnBars[0] = std::make_unique<StretchableLayoutResizerBar> (&columns, 1, true);
         columnBars[1] = std::make_unique<StretchableLayoutResizerBar> (&columns, 3, true);
+        columnBars[2] = std::make_unique<StretchableLayoutResizerBar> (&columns, 5, true);
         centreBar = std::make_unique<StretchableLayoutResizerBar> (&centre, 1, false);
         rightBar = std::make_unique<StretchableLayoutResizerBar> (&right, 1, false);
 
-        for (auto* bar : std::initializer_list<Component*> { columnBars[0].get(), columnBars[1].get() })
+        for (auto* bar : std::initializer_list<Component*> { columnBars[0].get(), columnBars[1].get(),
+                                                            columnBars[2].get() })
             addAndMakeVisible (*bar);
 
         addAndMakeVisible (centreHolder);
@@ -1732,6 +1858,56 @@ public:
     }
 
     void togglePanel (int index) { setPanelVisible (index, ! isPanelVisible (index)); }
+
+    //==========================================================================
+    // Panel window controls. All three are layout, not content: a panel that is put
+    // away keeps everything it was holding, which matters most for the chat panel -
+    // closing it must never be read as abandoning a conversation.
+
+    bool isPanelCollapsed (int index) const
+    {
+        const auto collapsedFlags = layout[layoutIds::collapsed].toString();
+        return index < collapsedFlags.length() && collapsedFlags[index] == '1';
+    }
+
+    void setPanelCollapsed (int index, bool shouldBeCollapsed)
+    {
+        rememberSizes();
+        auto collapsedFlags = layout[layoutIds::collapsed].toString().paddedRight ('0', numPanels);
+        layout.setProperty (layoutIds::collapsed,
+                            collapsedFlags.replaceSection (index, 1, shouldBeCollapsed ? "1" : "0"), nullptr);
+        // A collapsed panel cannot also be the one filling the surface.
+        if (shouldBeCollapsed && maximisedPanel() == index)
+            layout.setProperty (layoutIds::maximised, -1, nullptr);
+        resized();
+    }
+
+    void toggleCollapsed (int index) { setPanelCollapsed (index, ! isPanelCollapsed (index)); }
+
+    int maximisedPanel() const { return static_cast<int> (layout.getProperty (layoutIds::maximised, -1)); }
+
+    /** Fills the surface with one panel, or puts everything back. The split the person
+        chose is remembered first, so restoring returns to it rather than to a default. */
+    void setMaximisedPanel (int index)
+    {
+        if (maximisedPanel() < 0)
+            rememberSizes();
+
+        layout.setProperty (layoutIds::maximised, index, nullptr);
+
+        if (index >= 0)
+        {
+            setPanelVisible (index, true);
+            setPanelCollapsed (index, false);
+        }
+
+        resized();
+    }
+
+    void toggleMaximised (int index)
+    {
+        setMaximisedPanel (maximisedPanel() == index ? -1 : index);
+    }
 
     /** Moves keyboard focus to the next visible panel, so the whole surface is
         reachable without the mouse. */
@@ -1776,14 +1952,46 @@ public:
     {
         rememberSizes();
 
+        for (int i = 0; i < numPanels; ++i)
+        {
+            panels[i]->setCollapsed (isPanelCollapsed (i));
+            panels[i]->setMaximised (maximisedPanel() == i);
+        }
+
+        // One panel filling the surface is its own layout: everything else steps aside
+        // without losing the split it had, because rememberSizes ran before this.
+        if (const auto only = maximisedPanel(); only >= 0 && only < numPanels)
+        {
+            for (int i = 0; i < numPanels; ++i)
+                panels[i]->setVisible (i == only);
+
+            for (auto* bar : { columnBars[0].get(), columnBars[1].get(), centreBar.get(), rightBar.get() })
+                bar->setVisible (false);
+
+            centreHolder.setVisible (only == panelChannelRack || only == panelMixer);
+            rightHolder.setVisible (only == panelPatternPicker || only == panelPlaylist);
+
+            if (centreHolder.isVisible())      centreHolder.setBounds (getLocalBounds());
+            else if (rightHolder.isVisible())  rightHolder.setBounds (getLocalBounds());
+
+            panels[only]->setBounds (panels[only]->getParentComponent() == this
+                                       ? getLocalBounds()
+                                       : panels[only]->getParentComponent()->getLocalBounds());
+            return;
+        }
+
+        centreHolder.setVisible (true);
+        rightHolder.setVisible (true);
+
         // A hidden panel keeps its remembered size but takes no space, and its resizer
         // bar goes with it, so restoring puts the surface back where it was.
         applyVisibility (getWidth(), getHeight());
 
         auto r = getLocalBounds();
-        Component* columnComponents[5] = { panels[panelBrowser].get(), columnBars[0].get(),
-                                           &centreHolder, columnBars[1].get(), &rightHolder };
-        columns.layOutComponents (columnComponents, 5, r.getX(), r.getY(), r.getWidth(), r.getHeight(), false, true);
+        Component* columnComponents[7] = { panels[panelBrowser].get(), columnBars[0].get(),
+                                           &centreHolder, columnBars[1].get(), &rightHolder,
+                                           columnBars[2].get(), panels[panelChat].get() };
+        columns.layOutComponents (columnComponents, 7, r.getX(), r.getY(), r.getWidth(), r.getHeight(), false, true);
 
         Component* centreComponents[3] = { panels[panelChannelRack].get(), centreBar.get(), panels[panelMixer].get() };
         centre.layOutComponents (centreComponents, 3, 0, 0, centreHolder.getWidth(), centreHolder.getHeight(), true, true);
@@ -1841,6 +2049,112 @@ public:
 
     PlaylistGrid& playlistGrid() const { return playlist->getGrid(); }
 
+    //==========================================================================
+    // Attaching. One path for all three kinds, so a right-click, a shortcut and a
+    // check all produce exactly the same attachment. The chat panel is opened when
+    // something is attached, because an attachment nobody can see is not much use -
+    // but attaching never changes the music, and none of this touches the revision.
+
+    ChatPanel& chatPanel() const { return *chat; }
+
+    /** The bars a person has picked out in the arrangement. When clips are selected the
+        region is the span of those clips; otherwise it is the loop the transport is
+        showing, which is what "here" means when nothing is selected. */
+    bool attachRegion (int revision)
+    {
+        auto attachment = regionAttachment (revision);
+        if (attachment.endBeat <= attachment.startBeat)
+            return false;
+
+        openChat();
+        chat->attach (std::move (attachment));
+        return true;
+    }
+
+    /** The notes selected in the piano roll. */
+    bool attachNotes (int revision)
+    {
+        auto attachment = noteAttachment (revision);
+        if (attachment.noteIDs.isEmpty())
+            return false;
+
+        openChat();
+        chat->attach (std::move (attachment));
+        return true;
+    }
+
+    /** The mixer insert the person is pointing at. */
+    bool attachInsert (const String& insertID, int revision)
+    {
+        const auto wanted = insertID.isNotEmpty() ? insertID : selection.insert();
+        if (! model.insertFor (wanted).isValid())
+            return false;
+
+        selection.setInsert (wanted);
+        openChat();
+        chat->attach (Attachments (model).fromInsert (wanted, revision));
+        return true;
+    }
+
+    /** Takes the card's attachment again from wherever the person is looking now. Only
+        ever reached by pressing Update on the card. */
+    void refreshAttachment (int index)
+    {
+        const auto& held = chat->current();
+        if (! isPositiveAndBelow (index, static_cast<int> (held.size())))
+            return;
+
+        const auto revision = held[static_cast<size_t> (index)].takenAtRevision;
+
+        switch (held[static_cast<size_t> (index)].kind)
+        {
+            case Attachment::Kind::notes:
+                chat->refreshFromSelection (index, noteAttachment (revision));
+                break;
+            case Attachment::Kind::insert:
+                chat->refreshFromSelection (index, Attachments (model).fromInsert (selection.insert(), revision));
+                break;
+            case Attachment::Kind::region:
+            default:
+                chat->refreshFromSelection (index, regionAttachment (revision));
+                break;
+        }
+    }
+
+    /** Puts the panels on what an attachment refers to, so a card is a way back to the
+        music rather than just a label. */
+    void revealAttachment (const Attachment& a)
+    {
+        switch (a.kind)
+        {
+            case Attachment::Kind::notes:
+                if (a.patternID.isNotEmpty())      selection.setPattern (a.patternID);
+                if (a.noteChannelID.isNotEmpty())  selection.setChannel (a.noteChannelID);
+                break;
+
+            case Attachment::Kind::insert:
+                selection.setInsert (a.insertID);
+                break;
+
+            case Attachment::Kind::region:
+            default:
+                if (! a.laneIDs.isEmpty())
+                    selection.setLane (a.laneIDs[0]);
+                        playlist->showBeat (a.startBeat);
+                break;
+        }
+
+        refresh();
+    }
+
+    void openChat()
+    {
+        if (! isPanelVisible (panelChat))
+            setPanelVisible (panelChat, true);
+        if (isPanelCollapsed (panelChat))
+            setPanelCollapsed (panelChat, false);
+    }
+
     /** The editor owns the engine's controller mappings, so the menu asks it to learn. */
     void setMidiLearnHandlers (std::function<void (const String&, const String&, const String&)> learn,
                                std::function<void()> cancel)
@@ -1855,6 +2169,15 @@ public:
     String loadInstrumentPreset() const { return rack->loadNewestPresetOnSelected(); }
 
     /** The open note editor, so --screenshots can capture it too. */
+    /** The open note editor, when there is one. A question about notes needs the real
+        selection, not a copy of it made somewhere else. */
+    PianoRollEditor* pianoRollEditor() const
+    {
+        return pianoRollWindow != nullptr
+                 ? dynamic_cast<PianoRollEditor*> (pianoRollWindow->getContentComponent())
+                 : nullptr;
+    }
+
     Component* pianoRollContent() const
     {
         return pianoRollWindow != nullptr && pianoRollWindow->isVisible()
@@ -1884,11 +2207,69 @@ public:
         return false;
     }
 
+    Attachment regionAttachment (int revision) const
+    {
+        Attachments builder (model);
+        auto& grid = playlist->getGrid();
+
+        StringArray lanes;
+        double from = 0.0, to = 0.0;
+        bool any = false;
+
+        for (const auto& clipID : grid.selectedClips())
+        {
+            auto clip = model.instanceFor (clipID);
+            if (! clip.isValid())
+                continue;
+
+            lanes.addIfNotAlreadyThere (clip[ids::lane].toString());
+            const auto start = static_cast<double> (clip[ids::start]);
+            const auto end = start + static_cast<double> (clip[ids::length]);
+            from = any ? std::min (from, start) : start;
+            to = any ? std::max (to, end) : end;
+            any = true;
+        }
+
+        if (! any)
+        {
+            // Nothing picked out, so "here" is the range the transport is looping.
+            const auto loop = model.edit.getTransport().getLoopRange();
+            from = model.edit.tempoSequence.toBeats (loop.getStart()).inBeats();
+            to = model.edit.tempoSequence.toBeats (loop.getEnd()).inBeats();
+            if (selection.lane().isNotEmpty())
+                lanes.add (selection.lane());
+        }
+
+        return builder.fromRegion (lanes, from, to, revision);
+    }
+
+    Attachment noteAttachment (int revision) const
+    {
+        StringArray notes;
+
+        if (auto* editor = pianoRollEditor())
+            notes = editor->selectedNotes();
+
+        // With the note editor closed, or open with nothing picked out, the question is
+        // about this channel's whole part in this pattern. That is what a person means
+        // by "these notes" when they have not narrowed it down.
+        if (notes.isEmpty())
+            if (auto sequence = Model::findSequence (model.patternFor (selection.pattern()),
+                                                     selection.channel());
+                sequence.isValid())
+                for (auto note : sequence)
+                    if (note.hasType (ids::NOTE))
+                        notes.add (Model::uidOf (note));
+
+        return Attachments (model).fromNotes (selection.pattern(), selection.channel(), notes, revision);
+    }
+
     void store()
     {
         rememberSizes();
         layout.setProperty (layoutIds::sizes, String (desired[0]) + " " + String (desired[1]) + " "
-                                                  + String (desired[2]) + " " + String (desired[3]), nullptr);
+                                                  + String (desired[2]) + " " + String (desired[3]) + " "
+                                                  + String (desired[4]), nullptr);
     }
 
     Model& model;
@@ -1920,15 +2301,17 @@ private:
         split the user chose. */
     void rememberSizes()
     {
-        const bool shared[4] = { isPanelVisible (panelBrowser),
+        const bool shared[5] = { isPanelVisible (panelBrowser),
                                  isPanelVisible (panelPatternPicker) || isPanelVisible (panelPlaylist),
                                  isPanelVisible (panelChannelRack) && isPanelVisible (panelMixer),
-                                 isPanelVisible (panelPatternPicker) && isPanelVisible (panelPlaylist) };
-        const double current[4] = { static_cast<double> (columns.getItemCurrentAbsoluteSize (0)),
+                                 isPanelVisible (panelPatternPicker) && isPanelVisible (panelPlaylist),
+                                 isPanelVisible (panelChat) };
+        const double current[5] = { static_cast<double> (columns.getItemCurrentAbsoluteSize (0)),
                                     static_cast<double> (columns.getItemCurrentAbsoluteSize (4)),
                                     static_cast<double> (centre.getItemCurrentAbsoluteSize (2)),
-                                    static_cast<double> (right.getItemCurrentAbsoluteSize (0)) };
-        for (int i = 0; i < 4; ++i)
+                                    static_cast<double> (right.getItemCurrentAbsoluteSize (0)),
+                                    static_cast<double> (columns.getItemCurrentAbsoluteSize (6)) };
+        for (int i = 0; i < 5; ++i)
             if (shared[i] && current[i] > 1.0)
                 desired[i] = current[i];
     }
@@ -1936,6 +2319,7 @@ private:
     void applyVisibility (int width, int height)
     {
         const auto browserOn = isPanelVisible (panelBrowser);
+        const auto chatOn = isPanelVisible (panelChat);
         const auto rackOn = isPanelVisible (panelChannelRack);
         const auto mixerOn = isPanelVisible (panelMixer);
         const auto pickerOn = isPanelVisible (panelPatternPicker);
@@ -1946,19 +2330,31 @@ private:
         panels[panelMixer]->setVisible (mixerOn);
         panels[panelPatternPicker]->setVisible (pickerOn);
         panels[panelPlaylist]->setVisible (playlistOn);
+        panels[panelChat]->setVisible (chatOn);
 
         columnBars[0]->setVisible (browserOn);
         columnBars[1]->setVisible (pickerOn || playlistOn);
+        columnBars[2]->setVisible (chatOn);
         centreBar->setVisible (rackOn && mixerOn);
         rightBar->setVisible (pickerOn && playlistOn);
 
         const auto rightOn = pickerOn || playlistOn;
-        const auto browserWidth = browserOn ? desired[0] : 0.0;
+        const auto browserWidth = browserOn ? (isPanelCollapsed (panelBrowser)
+                                                 ? static_cast<double> (3 * (Panel::headerHeight - 4) + 18)
+                                                 : desired[0])
+                                            : 0.0;
         const auto rightWidth = rightOn ? desired[1] : 0.0;
-        const auto sideBars = (browserOn ? barSize : 0) + (rightOn ? barSize : 0);
+        const auto chatCollapsed = isPanelCollapsed (panelChat);
+        const auto chatWidth = chatOn ? (chatCollapsed ? narrowColumn() : desired[4]) : 0.0;
+        const auto sideBars = (browserOn ? barSize : 0) + (rightOn ? barSize : 0)
+                                + (chatOn ? barSize : 0);
 
-        if (browserOn) columns.setItemLayout (0, 140, 480, browserWidth);
-        else           columns.setItemLayout (0, 0, 0, 0);
+        const auto browserCollapsed = isPanelCollapsed (panelBrowser);
+        const auto narrow = static_cast<double> (3 * (Panel::headerHeight - 4) + 18);
+
+        if (browserOn && browserCollapsed) columns.setItemLayout (0, narrow, narrow, narrow);
+        else if (browserOn)                columns.setItemLayout (0, 140, 480, browserWidth);
+        else                               columns.setItemLayout (0, 0, 0, 0);
         setBar (columns, 1, browserOn);
 
         if (rightOn) columns.setItemLayout (4, 200, 900, rightWidth);
@@ -1967,13 +2363,20 @@ private:
 
         // A negative preferred size is a fraction of the whole area, which would starve
         // the fixed columns, so the stretchy item gets what is actually left over.
+        if (chatOn && chatCollapsed) columns.setItemLayout (6, chatWidth, chatWidth, chatWidth);
+        else if (chatOn)             columns.setItemLayout (6, 220, 620, chatWidth);
+        else                         columns.setItemLayout (6, 0, 0, 0);
+        setBar (columns, 5, chatOn);
+
         columns.setItemLayout (2, 260, 4000,
-                               std::max (260.0, width - browserWidth - rightWidth - sideBars));
+                               std::max (260.0, width - browserWidth - rightWidth - chatWidth - sideBars));
 
         // The Channel Rack grows with the window and the Mixer keeps a fixed height;
         // on the right it is the other way round, so the Playlist gets the space.
-        setStack (centre, rackOn, mixerOn, desired[2], false, height);
-        setStack (right, pickerOn, playlistOn, desired[3], true, height);
+        setStack (centre, rackOn, mixerOn, desired[2], false, height,
+                  isPanelCollapsed (panelChannelRack), isPanelCollapsed (panelMixer));
+        setStack (right, pickerOn, playlistOn, desired[3], true, height,
+                  isPanelCollapsed (panelPatternPicker), isPanelCollapsed (panelPlaylist));
     }
 
     static void setBar (StretchableLayoutManager& manager, int index, bool present)
@@ -1982,40 +2385,62 @@ private:
         manager.setItemLayout (index, size, size, size);
     }
 
-    static void setStack (StretchableLayoutManager& manager, bool firstOn, bool secondOn,
-                          double fixedSize, bool fixedIsFirst, int available)
+    void setStack (StretchableLayoutManager& manager, bool firstOn, bool secondOn,
+                          double fixedSize, bool fixedIsFirst, int available,
+                          bool firstCollapsed = false, bool secondCollapsed = false)
     {
         const auto fixIndex = fixedIsFirst ? 0 : 2;
         const bool bothOn = firstOn && secondOn;
-        const auto fixed = bothOn ? fixedSize : 0.0;
-        const auto stretchy = std::max (40.0, available - fixed - (bothOn ? barSize : 0));
+
+        // A collapsed panel is still in the layout, but only its header is: the person
+        // can see where it went and click the same button to bring it back.
+        const auto headerOnly = static_cast<double> (Panel::headerHeight + 4);
+        const auto firstSize = firstCollapsed ? headerOnly : 0.0;
+        const auto secondSize = secondCollapsed ? headerOnly : 0.0;
+
+        auto fixed = bothOn ? fixedSize : 0.0;
+        if (fixIndex == 0 && firstCollapsed)  fixed = headerOnly;
+        if (fixIndex == 2 && secondCollapsed) fixed = headerOnly;
+
+        const auto taken = (firstOn && firstCollapsed ? headerOnly : 0.0)
+                             + (secondOn && secondCollapsed ? headerOnly : 0.0);
+        const auto stretchy = std::max (40.0, available - std::max (fixed, taken)
+                                                - (bothOn ? barSize : 0));
 
         for (int item : { 0, 2 })
         {
             const auto on = item == 0 ? firstOn : secondOn;
+            const auto isCollapsed = item == 0 ? firstCollapsed : secondCollapsed;
+            const auto collapsedSize = item == 0 ? firstSize : secondSize;
+
             if (! on)
                 manager.setItemLayout (item, 0, 0, 0);
+            else if (isCollapsed)
+                manager.setItemLayout (item, collapsedSize, collapsedSize, collapsedSize);
             else if (item == fixIndex && bothOn)
                 manager.setItemLayout (item, 80, 3000, fixed);
             else
                 manager.setItemLayout (item, 40, 4000, stretchy);
         }
 
-        setBar (manager, 1, bothOn);
+        setBar (manager, 1, bothOn && ! (firstCollapsed && secondCollapsed));
     }
 
-    double desired[4] = { 190.0, 460.0, 290.0, 170.0 };
+    double desired[5] = { 190.0, 460.0, 290.0, 170.0, 300.0 };
+
+    static double narrowColumn() { return static_cast<double> (3 * (Panel::headerHeight - 4) + 18); }
 
     std::unique_ptr<Browser> browser;
     std::unique_ptr<ChannelRack> rack;
     std::unique_ptr<MixerPanel> mixer;
     std::unique_ptr<PatternPicker> picker;
     std::unique_ptr<PlaylistPanel> playlist;
+    std::unique_ptr<ChatPanel> chat;
     std::unique_ptr<Panel> panels[numPanels];
 
     std::unique_ptr<PianoRollWindow> pianoRollWindow;
     Component centreHolder, rightHolder;
     StretchableLayoutManager columns, centre, right;
-    std::unique_ptr<StretchableLayoutResizerBar> columnBars[2], centreBar, rightBar;
+    std::unique_ptr<StretchableLayoutResizerBar> columnBars[3], centreBar, rightBar;
 };
 }

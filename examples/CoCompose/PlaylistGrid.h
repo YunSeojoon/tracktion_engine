@@ -838,6 +838,9 @@ public:
 
     StringArray selectedClips() const { return selected; }
 
+    /** Where a beat sits across the grid, for anything outside that needs to scroll to it. */
+    int xForBeatPublic (double beat) const { return xForBeat (beat); }
+
 private:
     struct Start { String id; double start, length; int lane; };
     enum DragMode { none, move, resize, rubber, loop, curvePoint, curveShape };

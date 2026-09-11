@@ -630,6 +630,13 @@ private:
     TextButton quantise { "Quantise" }, duplicate { "Duplicate" }, deleteNotes { "Delete" };
     Label hint;
     StringArray selected;
+
+public:
+    /** Which notes are picked out right now, so a question can be asked about exactly
+        those and nothing else. */
+    StringArray selectedNotes() const { return selected; }
+
+private:
     String lastSignature;
     int previewing = -1;
 

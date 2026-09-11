@@ -16,6 +16,7 @@ namespace commands
 enum
 {
     playStop = 0x2000, songMode, save, saveCopy, collectSamples, exportMix, exportStems,
+    askAboutRegion, askAboutNotes, askAboutInsert,
     revealFolder, restoreBackup, quitApp, armChannel, recordToggle, countIn,
     undo, redo, addChannel, newPattern, placePattern, makeUnique, splitClip, duplicateClip,
     transposeUp, transposeDown,
@@ -213,6 +214,7 @@ public:
 
     void getAllCommands (Array<CommandID>& ids) override
     {
+        ids.addArray ({ commands::askAboutRegion, commands::askAboutNotes, commands::askAboutInsert });
         ids.addArray ({ commands::playStop, commands::songMode, commands::save, commands::saveCopy,
                         commands::collectSamples, commands::exportMix, commands::exportStems,
                         commands::revealFolder, commands::restoreBackup, commands::quitApp,
@@ -371,6 +373,18 @@ public:
                 break;
             case commands::scanPlugins:
                 info.setInfo ("Scan plugins...", "Find installed VST3 plugins", "Tools", 0);
+                break;
+            case commands::askAboutRegion:
+                info.setInfo ("Ask AI about the selection", "Attach the selected bars to the chat", "AI", 0);
+                info.addDefaultKeypress ('k', ModifierKeys::ctrlModifier);
+                break;
+            case commands::askAboutNotes:
+                info.setInfo ("Ask AI about the notes", "Attach the selected piano roll notes to the chat", "AI", 0);
+                info.addDefaultKeypress ('k', ModifierKeys::ctrlModifier | ModifierKeys::shiftModifier);
+                break;
+            case commands::askAboutInsert:
+                info.setInfo ("Ask AI about the insert", "Attach the selected mixer insert to the chat", "AI", 0);
+                info.addDefaultKeypress ('k', ModifierKeys::ctrlModifier | ModifierKeys::altModifier);
                 break;
             case commands::audioSettings:
                 info.setInfo ("Audio settings...", "Choose the output device", "Tools", 0);
@@ -559,6 +573,24 @@ public:
                 say (reason.isEmpty() ? "Loaded the latest instrument preset" : reason);
                 return true;
             }
+
+            case commands::askAboutRegion:
+                say (workspace.attachRegion (project.revision)
+                       ? "Attached the selected bars to the chat"
+                       : "Select some clips, or set a loop range, then ask again");
+                return true;
+
+            case commands::askAboutNotes:
+                say (workspace.attachNotes (project.revision)
+                       ? "Attached the selected notes to the chat"
+                       : "Select notes in the piano roll first");
+                return true;
+
+            case commands::askAboutInsert:
+                say (workspace.attachInsert ({}, project.revision)
+                       ? "Attached the mixer insert to the chat"
+                       : "Choose a mixer insert first");
+                return true;
 
             case commands::scanPlugins:
                 showPluginScanner();
@@ -873,6 +905,19 @@ private:
         return removed;
     }
 
+    /** What the chat is holding, beside the project. It is a readback like state.json:
+        written out so a tool can see it, never read back in, and never part of the
+        music - attaching something is not an edit. */
+    void writeChatInspector()
+    {
+        const auto contents = JSON::toString (workspace.chatPanel().inspectorState(), false);
+        if (contents == lastChatInspector)
+            return;
+
+        lastChatInspector = contents;
+        live::atomicWrite (project.source.getSiblingFile ("chat-inspector.json"), contents);
+    }
+
     /** Scans for plugins one file per tick, so the app stays alive and a check can
         watch it happen. A plugin that takes the app down leaves its name in the
         dead man's pedal file, which is how the next run skips it. */
@@ -1071,6 +1116,7 @@ private:
         collectRenderResult();
         continuePluginScan();
         continueMidiLearn();
+        writeChatInspector();
         updateTransportModeIfNeeded();
         project.writeBackupIfDue();
         project.writeStatus();
@@ -1292,6 +1338,61 @@ private:
                                                                 static_cast<double> (drag[2]));
         }
 
+        if (action.hasProperty ("attach"))
+        {
+            // "region" | "notes" | "insert:<id>"
+            const auto what = action["attach"].toString();
+            if (what == "region") return workspace.attachRegion (project.revision);
+            if (what == "notes")  return workspace.attachNotes (project.revision);
+            if (what.startsWith ("insert"))
+                return workspace.attachInsert (what.fromFirstOccurrenceOf (":", false, false),
+                                               project.revision);
+            return false;
+        }
+
+        if (action.hasProperty ("attachment"))
+        {
+            // [index, "go"|"update"|"remove"]
+            const auto request = action["attachment"];
+            if (! request.isArray() || request.size() != 2)
+                return false;
+
+            const auto index = static_cast<int> (request[0]);
+            const auto what = request[1].toString();
+            auto& panel = workspace.chatPanel();
+
+            if (what == "remove") { panel.remove (index); return true; }
+            if (what == "update") { workspace.refreshAttachment (index); return true; }
+            if (what == "go")
+            {
+                const auto& held = panel.current();
+                if (! isPositiveAndBelow (index, static_cast<int> (held.size())))
+                    return false;
+                workspace.revealAttachment (held[static_cast<size_t> (index)]);
+                return true;
+            }
+            return false;
+        }
+
+        if (action.hasProperty ("panel"))
+        {
+            // [panel index, "minimise"|"maximise"|"close"|"open"]
+            const auto panel = action["panel"];
+            if (! panel.isArray() || panel.size() != 2)
+                return false;
+
+            const auto index = static_cast<int> (panel[0]);
+            const auto what = panel[1].toString();
+
+            if (what == "minimise") workspace.toggleCollapsed (index);
+            else if (what == "maximise") workspace.toggleMaximised (index);
+            else if (what == "close") workspace.setPanelVisible (index, false);
+            else if (what == "open") workspace.setPanelVisible (index, true);
+            else return false;
+
+            return true;
+        }
+
         if (action.hasProperty ("midi_learn"))
         {
             const auto learn = action["midi_learn"];
@@ -1484,7 +1585,7 @@ private:
     std::unique_ptr<FileChooser> chooser;
     std::unique_ptr<PluginDirectoryScanner> scanner;
     int scanned = 0;
-    String lastTransportKey;
+    String lastTransportKey, lastChatInspector;
     live::CoComposeLookAndFeel look;
     uint32 messageAt = 0;
     int learningRow = -1;
