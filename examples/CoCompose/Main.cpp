@@ -23,6 +23,7 @@ enum
     undo, redo, addChannel, newPattern, placePattern, makeUnique, splitClip, duplicateClip,
     transposeUp, transposeDown,
     metronome, focusNextPanel, scanPlugins, audioSettings, savePreset, loadPreset, about,
+    returnToStart, followPlayhead, stopPlayback,
     togglePanelBase // + panel index
 };
 }
@@ -111,6 +112,27 @@ public:
         workspace.chatPanel().onCancel = [this] { cancelTheQuestion(); };
         workspace.chatPanel().onApply = [this] (const String& proposalID)
                                         { applySuggestedChange (proposalID); };
+
+        // Target menus reach the same commands the menu bar and the keyboard do, so
+        // the three can never mean different things.
+        workspace.setMenuCommandRunner ([this] (const String& name)
+        {
+            for (auto id : allCommands())
+            {
+                ApplicationCommandInfo info (id);
+                getCommandInfo (id, info);
+                if (info.shortName == name)
+                    return commandManager.invokeDirectly (id, false);
+            }
+            return false;
+        });
+
+        workspace.setAskAboutNotes ([this]
+        {
+            commandManager.invokeDirectly (commands::askAboutNotes, false);
+        });
+
+        workspace.setFollowPlayhead (isFollowingPlayhead());
         workspace.setMidiLearnHandlers ([this] (const String& source, const String& plugin, const String& parameter)
                                         { startMidiLearn (source, plugin, parameter); },
                                         [this] { cancelMidiLearn(); });
@@ -227,7 +249,9 @@ public:
     void getAllCommands (Array<CommandID>& ids) override
     {
         ids.addArray ({ commands::askAboutRegion, commands::askAboutNotes, commands::askAboutInsert });
-        ids.addArray ({ commands::playStop, commands::songMode, commands::save, commands::saveCopy,
+        ids.addArray ({ commands::playStop, commands::stopPlayback,
+                        commands::returnToStart, commands::followPlayhead,
+                        commands::songMode, commands::save, commands::saveCopy,
                         commands::collectSamples, commands::exportMix, commands::exportStems,
                         commands::revealFolder, commands::restoreBackup, commands::quitApp,
                         commands::armChannel, commands::recordToggle, commands::countIn,
@@ -258,6 +282,18 @@ public:
             case commands::playStop:
                 info.setInfo ("Play / Stop", "Start or stop the transport", "Transport", 0);
                 info.addDefaultKeypress (KeyPress::spaceKey, ModifierKeys::noModifiers);
+                break;
+            case commands::stopPlayback:
+                info.setInfo ("Stop", "Stop, or return to where playing began", "Transport", 0);
+                break;
+            case commands::returnToStart:
+                info.setInfo ("Back to start", "Move the playhead to the beginning", "Transport", 0);
+                info.addDefaultKeypress (KeyPress::homeKey, ModifierKeys::noModifiers);
+                break;
+            case commands::followPlayhead:
+                info.setInfo ("Follow playhead", "Scroll the arrangement to keep up with playback",
+                              "Transport", 0);
+                info.setTicked (isFollowingPlayhead());
                 break;
             case commands::songMode:
                 info.setInfo ("Song mode", "Loop the whole arrangement instead of the selected pattern", "Transport", 0);
@@ -422,15 +458,55 @@ public:
         switch (invocation.commandID)
         {
             case commands::playStop:
+                // Space in a text box is a space. Someone typing a question to the
+                // assistant, or renaming a channel, is not asking for the song to
+                // start, and a transport key that fires anyway makes the app feel like
+                // it is fighting you.
+                if (someoneIsTyping())
+                    return true;      // handled, by declining: a space in a box is a space
+
                 if (startPlayback || project.edit->getTransport().isRecording())
                 {
                     stopTransport();
                 }
                 else
                 {
+                    // Where playing began, so that pressing stop twice can come back
+                    // here - the second press means "take me back to where I started",
+                    // which is only answerable if somebody wrote it down.
+                    playbackStartedAt = project.edit->getTransport().getPosition();
                     startPlayback = true;
                     project.edit->getTransport().play (false);
                 }
+                return true;
+
+            case commands::stopPlayback:
+                // A Stop button pressed when already stopped has one thing left to
+                // mean, and it is what every DAW means by it: take me back to where I
+                // started playing. Play/Stop is a toggle and cannot say this, because
+                // pressing it while stopped means play.
+                if (project.edit->getTransport().isPlaying()
+                     || project.edit->getTransport().isRecording())
+                    stopTransport();
+                else
+                    project.edit->getTransport().setPosition (playbackStartedAt);
+                return true;
+
+            case commands::returnToStart:
+                if (someoneIsTyping())
+                    return true;
+
+                project.edit->getTransport().setPosition ({});
+                say ("Back to the start");
+                return true;
+
+            case commands::followPlayhead:
+                workspace.layout.setProperty (live::layoutIds::followPlayhead,
+                                              ! isFollowingPlayhead(), nullptr);
+                workspace.setFollowPlayhead (isFollowingPlayhead());
+                menuItemsChanged();
+                say (isFollowingPlayhead() ? "Following the playhead"
+                                           : "Not following the playhead");
                 return true;
 
             case commands::songMode:
@@ -635,6 +711,7 @@ private:
     Slider tempo;
     bool saveSnapshots;
     bool startPlayback;
+    te::TimePosition playbackStartedAt;
     int startupTicks = 0;
     int lastSnapshotRevision = -1;
     String lastControl, lastLabels, scriptError, lastScript;
@@ -682,9 +759,26 @@ private:
 
     /** Every way of stopping goes through here, so a take is kept whether the app,
         a shortcut or an outside tool ended the recording. */
+    /** Whether a text box has the keyboard. Transport keys stay out of the way when it
+        does: Space is a space, Delete deletes a letter, and Home goes to the start of
+        the line - the ordinary meanings, which a music app has no business overriding
+        while somebody is in the middle of a sentence. */
+    bool someoneIsTyping() const
+    {
+        auto* focused = Component::getCurrentlyFocusedComponent();
+        return dynamic_cast<TextEditor*> (focused) != nullptr
+                || dynamic_cast<Label*> (focused) != nullptr;
+    }
+
+    bool isFollowingPlayhead() const
+    {
+        return static_cast<bool> (workspace.layout.getProperty (live::layoutIds::followPlayhead, true));
+    }
+
     void stopTransport()
     {
         startPlayback = false;
+
 
         if (! project.edit->getTransport().isRecording())
         {
@@ -1050,6 +1144,36 @@ private:
                : "Applied. One Undo takes it back.");
     }
 
+    /** A question waiting on a bridge that has gone away waits forever otherwise.
+
+        Waiting is not free: the person's question has already left the box, the Ask
+        button is disabled, and nothing will ever arrive. So a dead heartbeat ends the
+        wait, says why, and puts their words back where they typed them - retyping a
+        question because a background process died is the sort of thing people do not
+        forgive. */
+    void noticeIfNothingIsListening()
+    {
+        if (! bridge->isWaiting() || bridge->isConnected())
+            return;
+
+        // A moment's grace: a bridge that is starting up has written nothing yet, and a
+        // question asked in that gap is not a question asked into the void.
+        if (bridge->waitingFor() < 6000)
+            return;
+
+        const auto lost = bridge->abandon();
+        for (const auto& message : conversation->messages())
+            if (message.requestID == lost && message.from == live::ChatMessage::From::person
+                 && workspace.chatPanel().draft().isEmpty())
+            {
+                workspace.chatPanel().setDraft (message.text);
+                break;
+            }
+
+        conversation->finishStreaming (lost, "(the bridge stopped; nothing was changed)");
+        say ("Nothing is listening any more. Your question is back in the box.");
+    }
+
     void cancelTheQuestion()
     {
         if (! bridge->isWaiting())
@@ -1147,6 +1271,7 @@ private:
 
             case live::ChatBridge::Update::What::nothing:
             default:
+                noticeIfNothingIsListening();
                 break;
         }
 
@@ -1222,6 +1347,7 @@ private:
                              + (bridge != nullptr && bridge->isConnected() ? "1" : "0") + ":"
                              + (conversation != nullptr ? conversation->id() : String()) + ":"
                              + workspace.chatPanel().offeredProposal() + ":"
+                             + (workspace.chatPanel().entryHasFocus() ? "1" : "0") + ":"
                              + String (workspace.suggestedNoteCount()) + ":"
                              + String (project.revision);
 
@@ -1240,6 +1366,14 @@ private:
             fields->setProperty ("waiting", bridge != nullptr && bridge->isWaiting());
             fields->setProperty ("conversation_id", conversation != nullptr ? conversation->id() : String());
             fields->setProperty ("suggested_notes_drawn", workspace.suggestedNoteCount());
+            // Which component has the keyboard, so a check about "while typing" can see
+            // whether it managed to put the keyboard where it meant to.
+            if (auto* focused = Component::getCurrentlyFocusedComponent())
+                fields->setProperty ("focused", focused->getName().isNotEmpty()
+                                                  ? focused->getName()
+                                                  : String (typeid (*focused).name()));
+            else
+                fields->setProperty ("focused", "nothing");
         }
 
         const auto contents = JSON::toString (packet, false);
@@ -1621,6 +1755,38 @@ private:
                                                          static_cast<double> (place[1]));
         }
 
+        if (action.hasProperty ("ruler"))
+        {
+            // ["click"|"drag"|"shift-drag"|"right-click", fromBeat, toBeat]
+            const auto gesture = action["ruler"];
+            if (! gesture.isArray() || gesture.size() < 2)
+                return false;
+
+            const auto from = static_cast<double> (gesture[1]);
+            const auto to = gesture.size() > 2 ? static_cast<double> (gesture[2]) : from;
+            const auto lane = gesture.size() > 3 ? static_cast<int> (gesture[3]) : -1;
+            return workspace.playlistGrid().pointerGesture (gesture[0].toString(), from, to, lane);
+        }
+
+        if (action.hasProperty ("grid_key"))
+        {
+            // The keys the arrangement handles itself, sent the way the keyboard sends
+            // them, so a check exercises keyPressed rather than what it calls.
+            const auto named = action["grid_key"].toString();
+            const auto key = named == "delete"    ? KeyPress (KeyPress::deleteKey)
+                           : named == "duplicate" ? KeyPress ('d', ModifierKeys::ctrlModifier, 0)
+                           : named == "unique"    ? KeyPress ('u', ModifierKeys::ctrlModifier, 0)
+                                                  : KeyPress();
+            return key.isValid() && workspace.playlistGrid().keyPressed (key);
+        }
+
+        if (action.hasProperty ("dismiss_menus"))
+        {
+            // A menu left open by a check would swallow whatever came next.
+            PopupMenu::dismissAllActiveMenus();
+            return true;
+        }
+
         if (action.hasProperty ("pick_clip"))
         {
             const auto pick = action["pick_clip"];
@@ -1708,6 +1874,14 @@ private:
             }
 
             if (what == "cancel") { cancelTheQuestion(); return true; }
+
+            if (what.startsWith ("draft:"))
+            {
+                workspace.chatPanel().setDraft (what.fromFirstOccurrenceOf (":", false, false).trim());
+                return true;
+            }
+
+            if (what == "focus") { return workspace.chatPanel().focusEntry(); }
 
             if (what.startsWith ("apply"))
             {

@@ -182,22 +182,53 @@ public:
 
     /** What came before, for a provider that has no memory of its own. Trimmed from the
         end, so the newest exchanges survive: they are the ones a follow-up refers to.
-        The whole conversation stays on disk whatever this returns. */
-    var recentForContext (int maxMessages = 12) const
+        The whole conversation stays on disk whatever this returns.
+
+        Each earlier question keeps what it was about. "Make that part less busy" is not
+        a question about nothing - it is a question about whatever was attached two
+        messages ago, and a history that dropped the attachment left the model reading
+        the words without the music. What is carried is the attachment as it was frozen
+        then, with the revision it was taken at, so a later turn can be told the target
+        has moved rather than quietly assuming it has not. */
+    var recentForContext (int maxMessages = 12, int maxTextLength = 2000) const
     {
         Array<var> out;
         const auto first = std::max (0, static_cast<int> (entries.size()) - maxMessages);
+        auto anythingTrimmed = false;
 
         for (int i = first; i < static_cast<int> (entries.size()); ++i)
         {
             const auto& message = entries[static_cast<size_t> (i)];
+
+            Array<var> attached;
+            for (const auto& a : message.attachments)
+                attached.add (object ({ { "id", a.id },
+                                        { "kind", Attachment::kindName (a.kind) },
+                                        { "taken_at_revision", a.takenAtRevision },
+                                        { "start_beat", a.startBeat },
+                                        { "end_beat", a.endBeat },
+                                        { "pattern", a.patternID },
+                                        { "channel", a.noteChannelID },
+                                        { "insert", a.insertID },
+                                        { "note_count", static_cast<int> (a.noteIDs.size()) } }));
+
+            // A condition a person laid down is usually at the end of what they wrote,
+            // which is exactly what silent truncation takes away. It is still cut when
+            // it has to be, but the cut is announced rather than hidden.
+            const auto tooLong = message.text.length() > maxTextLength;
+            anythingTrimmed = anythingTrimmed || tooLong;
+
             out.add (object ({ { "from", ChatMessage::fromName (message.from) },
-                               { "text", message.text },
-                               { "attachments", static_cast<int> (message.attachments.size()) } }));
+                               { "text", tooLong ? message.text.substring (0, maxTextLength)
+                                                 : message.text },
+                               { "text_was_cut", tooLong },
+                               { "at_revision", message.revision },
+                               { "attachments", attached } }));
         }
 
         return object ({ { "messages", out },
                          { "trimmed", first > 0 },
+                         { "any_text_cut", anythingTrimmed },
                          { "total", static_cast<int> (entries.size()) } });
     }
 

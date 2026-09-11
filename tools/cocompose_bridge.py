@@ -31,6 +31,7 @@ import os
 import re
 from pathlib import Path
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -96,6 +97,31 @@ Refer to things the way the person sees them: bar numbers, channel names, note p
 Be brief and concrete. If the attachment is empty or no longer in the song, say so."""
 
 
+def describe_clip(lines, clip, indent, context=False):
+    """A clip, and the notes in it.
+
+    Naming a clip and its length says nothing about the music: two clips both called
+    "Pattern 2" and both sixteen beats can be a bass line and a cluster chord. Being
+    asked what is wrong with a stretch of song and handed only the labels is being asked
+    to guess, and a guess dressed as a diagnosis is the worst thing this can produce.
+    """
+    lines.append("%sclip '%s' at beat %.3f for %.3f beats%s"
+                 % (indent, clip.get("pattern_name", ""), clip["start_beat"],
+                    clip["length_beats"], "   (context, not what was asked about)" if context else ""))
+
+    for part in clip.get("parts", []):
+        lines.append("%s  channel '%s' playing %s"
+                     % (indent, part.get("channel_name", ""), part.get("instrument", "")))
+        for note in part.get("notes", []):
+            lines.append("%s    pitch %d  beat %.3f  length %.3f  velocity %d"
+                         % (indent, note["pitch"], note["start_beat"],
+                            note["length_beats"], note["velocity"]))
+
+    if clip.get("notes_omitted"):
+        lines.append("%s  (%d more note(s) in this clip, not shown)"
+                     % (indent, clip["notes_omitted"]))
+
+
 def describe_attachments(attachments):
     """Turns the packet into something a model reads as music rather than as JSON."""
     if not attachments:
@@ -117,12 +143,16 @@ def describe_attachments(attachments):
             lines.append("    beats %.3f to %.3f (%s), tempo %.2f"
                          % (detail["start_beat"], detail["end_beat"],
                             detail.get("bars", ""), detail.get("tempo", 0.0)))
+
             for clip in detail.get("clips", []):
-                lines.append("    clip '%s' at beat %.3f for %.3f beats"
-                             % (clip.get("pattern_name", ""), clip["start_beat"], clip["length_beats"]))
-            if detail.get("context_clips"):
-                lines.append("    (context, not what was asked about: %d clip(s) either side)"
-                             % len(detail["context_clips"]))
+                describe_clip(lines, clip, "    ")
+
+            for clip in detail.get("context_clips", []):
+                describe_clip(lines, clip, "    ", context=True)
+
+            if detail.get("notes_left_out"):
+                lines.append("    NOTE: this region holds more notes than fit in one"
+                             " question. Ask about a shorter stretch to see the rest.")
 
         elif a["kind"] == "notes":
             lines.append("    pattern '%s', %d beats long, placed %d time(s)%s"
@@ -160,9 +190,22 @@ def describe_attachments(attachments):
                              % (effect.get("name", effect.get("type", "")),
                                 " (bypassed)" if effect.get("bypass") else "",
                                 effect.get("wet", 1.0), len(effect.get("parameters", []))))
-                for parameter in effect.get("parameters", [])[:12]:
+                shown = effect.get("parameters", [])[:12]
+                for parameter in shown:
                     lines.append("        %s = %.3f" % (parameter.get("name", parameter["id"]),
                                                         parameter["value"]))
+                rest = len(effect.get("parameters", [])) - len(shown)
+                if rest > 0:
+                    lines.append("        (%d more parameter(s) on this effect, not shown"
+                                 " - ask about this insert again to see them named)" % rest)
+            # A send is why something is audible in a place it was never put, so an
+            # account of an insert that leaves them out can be confidently wrong.
+            for send in detail.get("sends", []):
+                lines.append("    sends a copy to %s at %.2f dB"
+                             % (send.get("target", "?"), send.get("level_db", 0.0)))
+            if not detail.get("sends"):
+                lines.append("    no sends from this insert")
+
             lines.append("    " + detail.get("opaque_state", ""))
             for channel in detail.get("fed_by", []):
                 lines.append("    fed by channel '%s'" % channel.get("name", ""))
@@ -170,8 +213,32 @@ def describe_attachments(attachments):
     return "\n".join(lines)
 
 
+def describe_earlier_attachment(a, now_revision):
+    """One line for something an earlier question was about.
+
+    A follow-up like "make that part less busy" means the thing attached two messages
+    ago, and a history that mentioned only the words left the model guessing. What it
+    gets is what was frozen then - and, when the music has moved since, that it has:
+    the target is described as it was, never asserted to be that way still.
+    """
+    where = {"region": "bars around beats %.3f to %.3f" % (a.get("start_beat", 0.0),
+                                                           a.get("end_beat", 0.0)),
+             "notes": "%d note(s) of pattern %s on channel %s" % (a.get("note_count", 0),
+                                                                  a.get("pattern", "?"),
+                                                                  a.get("channel", "?")),
+             "insert": "mixer insert %s" % a.get("insert", "?")}.get(a.get("kind"), a.get("kind", "?"))
+
+    taken = a.get("taken_at_revision")
+    moved = ("" if taken is None or now_revision is None or taken == now_revision
+             else "  (read at revision %s; the project is now at %s, so it may have changed)"
+                  % (taken, now_revision))
+    return "    was about: " + where + moved
+
+
 def build_prompt(request):
-    history = request.get("history", {}).get("messages", [])
+    story = request.get("history", {}) or {}
+    history = story.get("messages", [])
+    now_revision = request.get("revision")
     parts = []
 
     if len(history) > 1:
@@ -179,7 +246,15 @@ def build_prompt(request):
         for message in history[:-1]:
             text = (message.get("text") or "").strip()
             if text:
-                parts.append("  %s: %s" % (message["from"], text[:600]))
+                parts.append("  %s: %s%s" % (message["from"], text,
+                                             " [...cut]" if message.get("text_was_cut") else ""))
+            for a in message.get("attachments") or []:
+                parts.append(describe_earlier_attachment(a, now_revision))
+
+        if story.get("trimmed"):
+            parts.append("  (older messages than these exist and are not shown)")
+        if story.get("any_text_cut"):
+            parts.append("  (a message above was cut; ask rather than assume what it said)")
         parts.append("")
 
     parts.append(describe_attachments(request.get("attachments", [])))
@@ -419,6 +494,76 @@ def make_provider(name, model, key_name, host="http://localhost:11434"):
     raise SystemExit("Unknown provider: " + name)
 
 
+HEARTBEAT_SECONDS = 2.0
+
+
+class Liveness:
+    """Says, continuously, that this bridge is still here.
+
+    Writing "ready" once at startup is a promise about the past. A bridge killed with
+    the window close button, or with the machine, never gets to take it back - the file
+    stays, the app believes it, and a question sent afterwards waits for something that
+    is not there any more.
+
+    So it is written again every couple of seconds, including while a provider call is
+    in flight, which is exactly when a bridge looks most like a dead one. The app treats
+    a heartbeat that has stopped as a bridge that has stopped.
+    """
+
+    def __init__(self, state_file, name):
+        self.state_file = state_file
+        self.name = name
+        self.instance = str(uuid.uuid4())
+        self.busy_with = None
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._beat, daemon=True)
+
+    def _write(self, ready=True):
+        atomic_write(self.state_file, {
+            "ready": ready,
+            "name": self.name,
+            "instance": self.instance,
+            "heartbeat_ms": int(time.time() * 1000),
+            "heartbeat_interval_ms": int(HEARTBEAT_SECONDS * 1000),
+            "busy_with": self.busy_with})
+
+    def _beat(self):
+        while not self.stop.wait(HEARTBEAT_SECONDS):
+            self._write()
+
+    def __enter__(self):
+        self._write()
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self.stop.set()
+        # A clean exit says so outright, so the app does not have to wait out a timeout
+        # to learn what it could have been told.
+        self._write(ready=False)
+        return False
+
+
+def already_dealt_with(reply_file, request_id):
+    """Whether this question has already been answered, and what to do if it was cut off.
+
+    The bridge's memory of what it has answered used to live in a set, which is to say
+    it lived until the process did. Restarting it in a folder with a question still
+    sitting there sent that question to the provider a second time - a second bill, a
+    second answer replacing the first, and with write tools a second edit.
+
+    The reply beside the request is the record, and it outlives the process. Returns
+    "done" when the question has a final answer, "interrupted" when an answer had begun
+    and never finished, and None when it is genuinely new.
+    """
+    reply = read(reply_file)
+    if reply.get("request_id") != request_id:
+        return None
+    if reply.get("status") in ("ok", "error"):
+        return "done"
+    return "interrupted"
+
+
 def serve(project, provider, once=False):
     folder = Path(project).parent
     folder.mkdir(parents=True, exist_ok=True)
@@ -428,15 +573,13 @@ def serve(project, provider, once=False):
     cancel_file = folder / "chat-cancel.json"
     state_file = folder / "chat-bridge.json"
 
-    # The app reads this to know whether anything is listening, so it can say "nothing is
-    # connected" instead of leaving a question waiting forever.
-    atomic_write(state_file, {"ready": True, "name": provider.name,
-                              "started_ms": int(time.time() * 1000)})
-    print("bridge ready:", provider.name)
-    print("watching", request_file)
-
     answered = set()
-    try:
+    alive = Liveness(state_file, provider.name)
+
+    with alive:
+        print("bridge ready:", provider.name)
+        print("watching", request_file)
+
         while True:
             request = read(request_file)
             request_id = request.get("request_id")
@@ -447,7 +590,34 @@ def serve(project, provider, once=False):
                 time.sleep(0.2)
                 continue
 
+            standing = already_dealt_with(reply_file, request_id)
+
+            if standing == "done":
+                # Answered by a previous run of this bridge. Left alone.
+                answered.add(request_id)
+                print("already answered:", request_id[:8])
+                if once:
+                    return
+                continue
+
+            if standing == "interrupted":
+                # An answer had started and the bridge went away mid-sentence. Whether
+                # the provider did the work - and charged for it - is unknowable from
+                # here, so it is not quietly asked again. The person is told, and asking
+                # again is their decision.
+                answered.add(request_id)
+                atomic_write(reply_file, {
+                    "request_id": request_id, "status": "error", "code": "IO_ERROR",
+                    "message": "The bridge stopped while this answer was arriving. "
+                               "Nothing was changed. Ask again if you want to.",
+                    "retryable": True, "provider": provider.name})
+                print("interrupted earlier, not resent:", request_id[:8])
+                if once:
+                    return
+                continue
+
             answered.add(request_id)
+            alive.busy_with = request_id
             print("question:", (request.get("message") or "")[:70])
 
             def stream(so_far, _id=request_id):
@@ -495,10 +665,10 @@ def serve(project, provider, once=False):
                                           "retryable": True, "provider": provider.name})
                 print("failed:", error)
 
+            alive.busy_with = None
+
             if once:
                 return
-    finally:
-        atomic_write(state_file, {"ready": False, "name": provider.name})
 
 
 if __name__ == "__main__":

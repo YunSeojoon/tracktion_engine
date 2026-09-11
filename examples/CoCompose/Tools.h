@@ -218,6 +218,12 @@ private:
 
         Array<var> inRange, around;
 
+        // One budget for the whole answer. The region proper is described first and
+        // spends from it first, so when a song is dense it is the surrounding context
+        // that thins out rather than the thing that was asked about.
+        auto budget = maxNotes;
+        auto contextBudget = maxNotes / 4;
+
         for (auto clip : model.instances())
         {
             const auto start = static_cast<double> (clip[ids::start]);
@@ -226,9 +232,9 @@ private:
             if (! lanes.isEmpty() && ! lanes.contains (clip[ids::lane].toString()))
                 continue;
 
-            if (end > from && start < to)             inRange.add (describeClip (clip));
+            if (end > from && start < to)             inRange.add (describeClip (clip, budget));
             else if (end > from - padding && start < to + padding)
-                                                       around.add (describeClip (clip));
+                                                       around.add (describeClip (clip, contextBudget));
         }
 
         return object ({ { "start_beat", from }, { "end_beat", to },
@@ -237,6 +243,8 @@ private:
                          { "tempo", model.edit.tempoSequence.getBpmAt (
                                         model.edit.tempoSequence.toTime (
                                             te::BeatPosition::fromBeats (from))) },
+                         { "notes_budget", maxNotes },
+                         { "notes_left_out", budget <= 0 },
                          { "clips", inRange },
                          { "context_beats", padding },
                          { "context_clips", around } });
@@ -732,15 +740,70 @@ private:
         return object ({ { "notes", notes }, { "parameters", parameters } });
     }
 
-    var describeClip (ValueTree clip) const
+    /** A clip, and what is actually played in it.
+
+        A name and a length do not tell anyone anything about the music: two clips both
+        called "Pattern 2", both sixteen beats, can be a bass line and a cluster chord.
+        Asking what is wrong with a stretch of a song and being handed only the labels
+        is being asked to guess, so the notes come too.
+
+        `budget` is how many notes the whole region may still spend, shared across its
+        clips so that a region with twenty clips does not return twenty thousand notes.
+        Whatever does not fit is counted rather than silently dropped - a caller that
+        can see something was left out can ask for it. */
+    var describeClip (ValueTree clip, int& budget) const
     {
         auto pattern = model.patternFor (clip[ids::pattern].toString());
+
+        Array<var> parts;
+        auto omitted = 0;
+
+        if (pattern.isValid())
+            for (auto sequence : pattern)
+            {
+                if (! sequence.hasType (ids::SEQUENCE))
+                    continue;
+
+                const auto owner = sequence[ids::channel].toString();
+                auto channel = model.channelFor (owner);
+
+                Array<var> notes;
+                for (auto note : sequence)
+                {
+                    if (! note.hasType (ids::NOTE))
+                        continue;
+
+                    if (budget <= 0)
+                    {
+                        ++omitted;
+                        continue;
+                    }
+
+                    --budget;
+                    notes.add (object ({ { "id", Model::uidOf (note) },
+                                         { "pitch", static_cast<int> (note[ids::pitch]) },
+                                         { "start_beat", static_cast<double> (note[ids::start]) },
+                                         { "length_beats", static_cast<double> (note[ids::length]) },
+                                         { "velocity", static_cast<int> (note[ids::velocity]) } }));
+                }
+
+                if (notes.isEmpty() && omitted == 0)
+                    continue;
+
+                parts.add (object ({ { "channel", owner },
+                                     { "channel_name", channel.isValid() ? channel[ids::name].toString() : String() },
+                                     { "instrument", channel.isValid() ? channel[ids::instrument].toString() : String() },
+                                     { "notes", notes } }));
+            }
+
         return object ({ { "id", Model::uidOf (clip) },
                          { "lane", clip[ids::lane].toString() },
                          { "pattern", clip[ids::pattern].toString() },
                          { "pattern_name", pattern.isValid() ? pattern[ids::name].toString() : String() },
                          { "start_beat", static_cast<double> (clip[ids::start]) },
-                         { "length_beats", static_cast<double> (clip[ids::length]) } });
+                         { "length_beats", static_cast<double> (clip[ids::length]) },
+                         { "parts", parts },
+                         { "notes_omitted", omitted } });
     }
 
     double beat (const var& arguments, const char* field) const

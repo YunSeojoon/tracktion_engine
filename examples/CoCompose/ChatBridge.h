@@ -44,6 +44,7 @@ public:
     void ask (const Outgoing& outgoing)
     {
         pending = outgoing.requestID;
+        askedAtMillis = Time::getCurrentTime().toMilliseconds();
         lastSeenReply.clear();
         streamedSoFar.clear();
 
@@ -155,10 +156,46 @@ public:
         return stated.isObject() ? stated : var();
     }
 
+    /** Whether something is listening now, rather than whether something once said it
+        would. A bridge writes "ready" when it starts and clears it when it stops - but
+        a process that is killed never gets to clear anything, and the file it leaves
+        behind is a promise from a program that no longer exists. So it also writes the
+        time, every couple of seconds, and a heartbeat that has stopped is a bridge that
+        has stopped. A bridge too old to say how often it beats is given a default
+        rather than being called dead for not knowing the question. */
     bool isConnected() const
     {
         auto stated = connection();
-        return stated.isObject() && static_cast<bool> (stated["ready"]);
+        if (! stated.isObject() || ! static_cast<bool> (stated["ready"]))
+            return false;
+
+        const auto beat = static_cast<int64> (stated.getProperty ("heartbeat_ms", 0));
+        if (beat <= 0)
+            return true;
+
+        const auto interval = std::max (1000, static_cast<int> (
+                                  stated.getProperty ("heartbeat_interval_ms", 2000)));
+
+        // Several missed beats, not one: a machine under load skips one without the
+        // bridge having gone anywhere, and calling it dead for that would be worse than
+        // waiting another second.
+        return Time::getCurrentTime().toMilliseconds() - beat < interval * 5;
+    }
+
+    /** How long a question has been outstanding, in milliseconds; zero when none is. */
+    int64 waitingFor() const
+    {
+        return pending.isEmpty() ? 0
+                                 : Time::getCurrentTime().toMilliseconds() - askedAtMillis;
+    }
+
+    /** Gives up on the question in flight, without telling the bridge anything: used
+        when there is no bridge left to tell. Returns what was being waited on. */
+    String abandon()
+    {
+        const auto lost = pending;
+        pending.clear();
+        return lost;
     }
 
 private:
@@ -166,6 +203,7 @@ private:
     File replyFile() const   { return folder.getChildFile ("chat-reply.json"); }
 
     File folder;
+    int64 askedAtMillis = 0;
     String pending, lastSeenReply, streamedSoFar;
     StringArray cancelled;
 };
