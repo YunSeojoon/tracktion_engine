@@ -1424,6 +1424,7 @@ private:
                              + String (workspace.suggestedNoteCount()) + ":"
                              + workspace.noteEditorHeading() + ":"
                              + workspace.arrangementTool() + ":"
+                             + String (workspace.playlistGrid().laneHeight) + ":"
                              + String (project.revision);
 
         if (shape == lastInspectorShape)
@@ -1442,6 +1443,7 @@ private:
             fields->setProperty ("conversation_id", conversation != nullptr ? conversation->id() : String());
             fields->setProperty ("suggested_notes_drawn", workspace.suggestedNoteCount());
             fields->setProperty ("grid_tool", workspace.arrangementTool());
+            fields->setProperty ("lane_height", workspace.playlistGrid().laneHeight);
             fields->setProperty ("editor_open", workspace.isNoteEditorOpen());
             fields->setProperty ("editor_heading", workspace.noteEditorHeading());
             // Which component has the keyboard, so a check about "while typing" can see
@@ -1609,6 +1611,7 @@ private:
 
         lastControl = contents;
         String failure;
+        auto answered = false;
         try
         {
             live::require (request.isObject() && request["id"].isString(), "Invalid control request");
@@ -1629,11 +1632,28 @@ private:
 
                 workspace.refresh();
             }
-            else if (action == "quit") JUCEApplication::getInstance()->systemRequestedQuit();
+            else if (action == "quit")
+            {
+                // Answered before it is done, and deliberately. Everything else here
+                // can be acknowledged afterwards because there is an afterwards; asking
+                // the app to quit may not leave one, and a caller that is told nothing
+                // waits out its timeout and reports a hang that never happened.
+                acknowledge (request, failure);
+                answered = true;
+                JUCEApplication::getInstance()->systemRequestedQuit();
+                return;
+            }
             else live::require (false, "Unknown control action");
             project.writeStatus();
         }
         catch (const std::exception& e) { failure = e.what(); }
+
+        if (! answered)
+            acknowledge (request, failure);
+    }
+
+    void acknowledge (const var& request, const String& failure)
+    {
         live::atomicWrite (project.source.getSiblingFile ("control-status.json"), JSON::toString (live::object ({
             { "id", request["id"] }, { "session_id", project.sessionID }, { "revision", project.revision },
             { "error", failure }, { "status", failure.isEmpty() ? "applied" : "rejected" } }), false));
@@ -1844,6 +1864,12 @@ private:
             const auto to = gesture.size() > 2 ? static_cast<double> (gesture[2]) : from;
             const auto lane = gesture.size() > 3 ? static_cast<int> (gesture[3]) : -1;
             return workspace.playlistGrid().pointerGesture (gesture[0].toString(), from, to, lane);
+        }
+
+        if (action.hasProperty ("lane_height"))
+        {
+            workspace.playlistGrid().setLaneHeight (static_cast<int> (action["lane_height"]));
+            return true;
         }
 
         if (action.hasProperty ("grid_tool"))

@@ -26,7 +26,26 @@ public:
 
     ~PlaylistGrid() override { stopTimer(); }
 
-    static constexpr int laneWidth = 96, rulerHeight = 22, laneHeight = 30, curveHeight = 46;
+    static constexpr int laneWidth = 96, rulerHeight = 22, curveHeight = 46;
+
+    /** How tall a playlist lane is drawn. Adjustable because an arrangement with three
+        lanes and one with thirty want different answers, and neither should have to be
+        scrolled through at the other's size. Kept per view rather than in the project:
+        it is how somebody is looking at the music, not part of it. */
+    static constexpr int minLaneHeight = 16, maxLaneHeight = 96;
+
+    int laneHeight = 30;
+
+    void setLaneHeight (int height)
+    {
+        const auto wanted = jlimit (minLaneHeight, maxLaneHeight, height);
+        if (wanted == laneHeight)
+            return;
+
+        laneHeight = wanted;
+        resized();
+        repaint();
+    }
 
     double beatWidth() const { return zoom; }
     /** What the left button does on empty space, the same pair as the note editor.
@@ -288,6 +307,15 @@ public:
     {
         snapSuspended = e.mods.isAltDown();
 
+        // Dragging to somewhere off screen has to be possible, or a clip can never be
+        // moved further than one windowful and a selection can never be drawn past the
+        // edge. The viewport follows the pointer when it gets close to a border, at a
+        // speed that is bearable rather than a lurch.
+        if (dragMode != none && dragMode != pan)
+            if (auto* view = findParentComponentOfClass<Viewport>())
+                view->autoScroll (e.x - view->getViewPositionX(),
+                                  e.y - view->getViewPositionY(), 24, 12);
+
         if (dragMode == curveShape)
         {
             bendSegment (e.getPosition());
@@ -456,6 +484,15 @@ public:
         view is running away from you. */
     void mouseWheelMove (const MouseEvent& e, const MouseWheelDetails& wheel) override
     {
+        // Over the lane names, ctrl-wheel changes how tall the lanes are rather than how
+        // wide a beat is. The pointer is on the thing being resized, which is the rule
+        // the rest of the wheel contract follows too.
+        if (e.mods.isCtrlDown() && e.x < laneWidth)
+        {
+            setLaneHeight (laneHeight + (wheel.deltaY > 0 ? 2 : -2));
+            return;
+        }
+
         if (! e.mods.isCtrlDown())
         {
             if (e.mods.isShiftDown())

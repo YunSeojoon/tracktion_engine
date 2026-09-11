@@ -488,6 +488,40 @@ def check_no_two_commands_answer_to_one_key(exe, folder, report):
         session.close()
 
 
+def check_lanes_can_be_made_taller_and_shorter(exe, folder, report):
+    """D3: lane height. An arrangement with three lanes and one with thirty want
+    different answers, and neither should have to be scrolled through at the other's
+    size. It is how somebody is looking at the music, not part of the music."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open()
+    try:
+        prepare_song(session)
+        session.settled()
+        revision = read(folder / "sync-status.json")["revision"]
+        started = read(folder / "chat-inspector.json").get("lane_height")
+        report.expect("lanes have a height to begin with", isinstance(started, int) and started > 0,
+                      started)
+
+        session.run([{"lane_height": 60}])
+        time.sleep(0.5)
+        report.expect("lanes can be made taller",
+                      read(folder / "chat-inspector.json").get("lane_height") == 60,
+                      read(folder / "chat-inspector.json").get("lane_height"))
+
+        # Out of range is clamped rather than obeyed - a lane one pixel tall is not a
+        # view of anything, and neither is one taller than the window.
+        session.run([{"lane_height": 2}])
+        time.sleep(0.5)
+        clamped = read(folder / "chat-inspector.json").get("lane_height")
+        report.expect("and not made uselessly small", clamped >= 16, clamped)
+
+        report.expect("changing how it looks is not an edit",
+                      read(folder / "sync-status.json")["revision"] == revision,
+                      read(folder / "sync-status.json")["revision"])
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -521,6 +555,9 @@ def run(exe, output):
     print()
     print("Alt puts the grid away")
     check_alt_puts_the_grid_away(exe, output / "snap", report)
+    print()
+    print("lanes can change height")
+    check_lanes_can_be_made_taller_and_shorter(exe, output / "lanes", report)
     print()
     print("one key, one command")
     check_no_two_commands_answer_to_one_key(exe, output / "keys", report)
