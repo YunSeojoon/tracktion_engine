@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Attachment.h"
+#include "Conversation.h"
 
 namespace live
 {
@@ -40,10 +41,30 @@ public:
         addAndMakeVisible (inspect);
         addAndMakeVisible (clear);
 
+        transcript.setMultiLine (true, true);
+        transcript.setReadOnly (true);
+        transcript.setScrollbarsShown (true);
+        transcript.setCaretVisible (false);
+        transcript.setColour (TextEditor::backgroundColourId, theme::sunken);
+        transcript.setColour (TextEditor::outlineColourId, theme::edge);
+        addAndMakeVisible (transcript);
+
+        send.setButtonText ("Ask");
+        send.onClick = [this] { if (onSend) onSend(); };
+        stop.setButtonText ("Stop");
+        stop.onClick = [this] { if (onCancel) onCancel(); };
+        stop.setEnabled (false);
+        addAndMakeVisible (send);
+        addAndMakeVisible (stop);
+
         note.setJustificationType (Justification::topLeft);
         note.setFont (theme::small_());
         note.setColour (Label::textColourId, theme::textFaint);
         addAndMakeVisible (note);
+
+        connection.setFont (theme::small_());
+        connection.setColour (Label::textColourId, theme::textFaint);
+        addAndMakeVisible (connection);
 
         rebuild();
     }
@@ -83,6 +104,56 @@ public:
 
     String draft() const { return entry.getText(); }
     void setDraft (const String& text) { entry.setText (text, dontSendNotification); }
+
+    /** Everything a person types stays theirs. A failed send, a cancel, a reconnect -
+        none of them may empty this box, because retyping a question is the one thing a
+        person will not forgive. It is cleared once, when the question has actually been
+        asked. */
+    void clearDraft() { entry.clear(); }
+
+    void takeAttachments (std::vector<Attachment>& into)
+    {
+        into = attached;
+        attached.clear();
+        rebuild();
+    }
+
+    std::function<void()> onSend, onCancel;
+
+    /** Draws the conversation. Called whenever it changes, including while an answer is
+        still arriving, so the text grows as it comes in. */
+    void showConversation (const Conversation& conversation, bool waiting, const String& connectionNote)
+    {
+        String text;
+
+        for (const auto& message : conversation.messages())
+        {
+            text << (message.from == ChatMessage::From::person ? "you" : "ai") << "  ";
+
+            if (! message.attachments.empty())
+            {
+                StringArray names;
+                for (const auto& a : message.attachments)
+                    names.add (attachments.summary (a));
+                text << "[" << names.joinIntoString ("] [") << "]  ";
+            }
+
+            text << newLine << message.text << newLine;
+            if (message.streaming)
+                text << "..." << newLine;
+            text << newLine;
+        }
+
+        if (text != transcript.getText())
+        {
+            transcript.setText (text, dontSendNotification);
+            transcript.moveCaretToEnd();
+        }
+
+        send.setEnabled (! waiting);
+        stop.setEnabled (waiting);
+        connection.setText (connectionNote, dontSendNotification);
+    }
 
     /** What an attachment would carry, in the form a person can read before it goes
         anywhere. The same description is what the context packet is built from. */
@@ -187,15 +258,23 @@ public:
     void resized() override
     {
         auto r = getLocalBounds();
-        auto bottom = r.removeFromBottom (96);
+        auto bottom = r.removeFromBottom (120);
 
         auto buttons = bottom.removeFromBottom (24);
-        inspect.setBounds (buttons.removeFromLeft (110).reduced (1));
-        clear.setBounds (buttons.removeFromLeft (60).reduced (1));
+        send.setBounds (buttons.removeFromLeft (56).reduced (1));
+        stop.setBounds (buttons.removeFromLeft (52).reduced (1));
+        inspect.setBounds (buttons.removeFromLeft (104).reduced (1));
+        clear.setBounds (buttons.removeFromLeft (56).reduced (1));
 
-        entry.setBounds (bottom.reduced (0, 2));
-        note.setBounds (r.removeFromBottom (16));
-        viewport.setBounds (r);
+        entry.setBounds (bottom.removeFromBottom (48).reduced (0, 2));
+        connection.setBounds (bottom.removeFromBottom (14));
+        note.setBounds (bottom.removeFromBottom (14));
+
+        // The attachments take a fixed share at the top; the conversation gets the rest,
+        // because that is what grows.
+        const auto cardRoom = jmin (r.getHeight() / 2, 8 + 52 * jmax (1, cardViews.size()));
+        viewport.setBounds (r.removeFromTop (cardRoom));
+        transcript.setBounds (r.reduced (0, 2));
         layOutCards();
     }
 
@@ -323,9 +402,9 @@ private:
     OwnedArray<Card> cardViews;
     Component cards;
     Viewport viewport;
-    TextEditor entry;
-    TextButton inspect, clear;
-    Label note;
+    TextEditor entry, transcript;
+    TextButton inspect, clear, send, stop;
+    Label note, connection;
 };
 
 } // namespace live

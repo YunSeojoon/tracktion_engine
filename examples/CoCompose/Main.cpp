@@ -4,6 +4,7 @@
 #include "../common/PluginWindow.h"
 #include "Theme.h"
 #include "Tools.h"
+#include "ChatBridge.h"
 #include "LiveProject.h"
 #include "Recording.h"
 #include "Workspace.h"
@@ -102,6 +103,12 @@ public:
         setSize (1420, 860);
         toolService = std::make_unique<live::ToolService> (*project.model, workspace.selection,
                                                            project.projectID(), project.sessionID);
+        conversation = std::make_unique<live::Conversation> (
+            project.source.getSiblingFile ("conversation.json"), project.projectID());
+        bridge = std::make_unique<live::ChatBridge> (project.source);
+
+        workspace.chatPanel().onSend = [this] { askTheAssistant(); };
+        workspace.chatPanel().onCancel = [this] { cancelTheQuestion(); };
         workspace.setMidiLearnHandlers ([this] (const String& source, const String& plugin, const String& parameter)
                                         { startMidiLearn (source, plugin, parameter); },
                                         [this] { cancelMidiLearn(); });
@@ -908,12 +915,177 @@ private:
         return removed;
     }
 
+    /** Sends what is typed, with whatever is attached, into the conversation this
+        project already has. The music is not touched: asking a question is not an edit,
+        so nothing here goes near the revision or the undo history. */
+    void askTheAssistant()
+    {
+        if (bridge->isWaiting())
+            return;
+
+        const auto typed = workspace.chatPanel().draft().trim();
+        if (typed.isEmpty())
+        {
+            say ("Type a question first");
+            return;
+        }
+
+        if (! bridge->isConnected())
+        {
+            // Better to say nothing is listening than to leave a question waiting for an
+            // answer that is not coming. The typed text stays exactly where it is.
+            say ("No AI bridge is running. Start one with tools/cocompose_bridge.py");
+            return;
+        }
+
+        live::ChatMessage question;
+        question.from = live::ChatMessage::From::person;
+        question.text = typed;
+        question.revision = project.revision;
+        question.requestID = Uuid().toString();
+        workspace.chatPanel().takeAttachments (question.attachments);
+
+        const auto context = contextFor (question.attachments);
+        conversation->add (question);
+
+        live::ChatMessage answer;
+        answer.from = live::ChatMessage::From::assistant;
+        answer.requestID = question.requestID;
+        answer.revision = project.revision;
+        answer.streaming = true;
+        conversation->add (answer);
+
+        live::ChatBridge::Outgoing outgoing;
+        outgoing.requestID = question.requestID;
+        outgoing.projectID = project.projectID();
+        outgoing.conversationID = conversation->id();
+        outgoing.message = typed;
+        outgoing.attachments = context;
+        outgoing.history = conversation->recentForContext();
+        outgoing.revision = project.revision;
+
+        bridge->ask (outgoing);
+        workspace.chatPanel().clearDraft();
+        say ("Asked. The project keeps playing while you wait.");
+    }
+
+    void cancelTheQuestion()
+    {
+        if (! bridge->isWaiting())
+            return;
+
+        const auto requestID = bridge->waitingOn();
+        bridge->cancel();
+        conversation->finishStreaming (requestID);
+        say ("Stopped waiting. Nothing was changed.");
+    }
+
+    /** Reads out what each attachment refers to, through the same tool service a script
+        would use. One place decides what an attachment means, so what the assistant is
+        told and what a script would see cannot disagree. */
+    var contextFor (const std::vector<live::Attachment>& attached)
+    {
+        Array<var> out;
+        live::Attachments describe (*project.model);
+
+        for (const auto& a : attached)
+        {
+            var detail;
+
+            switch (a.kind)
+            {
+                case live::Attachment::Kind::notes:
+                    detail = ask ("inspect_pattern", live::object ({ { "pattern", a.patternID },
+                                                                    { "channel", a.noteChannelID } }));
+                    break;
+
+                case live::Attachment::Kind::insert:
+                    detail = ask ("inspect_insert", live::object ({ { "insert", a.insertID } }));
+                    break;
+
+                case live::Attachment::Kind::region:
+                default:
+                    detail = ask ("inspect_region", live::object ({ { "start_beat", a.startBeat },
+                                                                   { "end_beat", a.endBeat } }));
+                    break;
+            }
+
+            out.add (live::object ({ { "id", a.id },
+                                     { "kind", live::Attachment::kindName (a.kind) },
+                                     { "summary", describe.summary (a) },
+                                     { "taken_at_revision", a.takenAtRevision },
+                                     { "still_there", describe.stillExists (a) },
+                                     { "notes_selected", static_cast<int> (a.noteIDs.size()) },
+                                     { "detail", detail } }));
+        }
+
+        return out;
+    }
+
+    var ask (const String& tool, const var& arguments)
+    {
+        return toolService->handle (live::object ({ { "tool", tool },
+                                                    { "arguments", arguments } }),
+                                    project.revision);
+    }
+
+    /** Picks up whatever the bridge has written since the last tick. */
+    void pollTheAssistant()
+    {
+        if (bridge == nullptr || conversation == nullptr)
+            return;
+
+        const auto update = bridge->poll();
+
+        switch (update.what)
+        {
+            case live::ChatBridge::Update::What::streaming:
+                conversation->appendToStreaming (update.requestID, update.text);
+                break;
+
+            case live::ChatBridge::Update::What::finished:
+                conversation->finishStreaming (update.requestID, update.text);
+                say ("The assistant answered.");
+                break;
+
+            case live::ChatBridge::Update::What::failed:
+                conversation->finishStreaming (update.requestID,
+                                               "(no answer: " + update.errorCode + " " + update.text + ")");
+                say ("The assistant could not answer: " + update.text);
+                break;
+
+            case live::ChatBridge::Update::What::nothing:
+            default:
+                break;
+        }
+
+        auto stated = bridge->connection();
+        const auto note = stated.isObject()
+                            ? (static_cast<bool> (stated["ready"])
+                                 ? "connected: " + stated["name"].toString()
+                                 : "bridge present but not ready")
+                            : String ("no bridge running");
+
+        workspace.chatPanel().showConversation (*conversation, bridge->isWaiting(), note);
+    }
+
     /** What the chat is holding, beside the project. It is a readback like state.json:
         written out so a tool can see it, never read back in, and never part of the
         music - attaching something is not an edit. */
     void writeChatInspector()
     {
-        const auto contents = JSON::toString (workspace.chatPanel().inspectorState(), false);
+        auto packet = workspace.chatPanel().inspectorState();
+        // What the app believes about the bridge, so a check can see the same thing the
+        // panel shows instead of guessing from a status line.
+        if (auto* fields = packet.getDynamicObject())
+        {
+            fields->setProperty ("bridge", bridge != nullptr ? bridge->connection() : var());
+            fields->setProperty ("bridge_connected", bridge != nullptr && bridge->isConnected());
+            fields->setProperty ("waiting", bridge != nullptr && bridge->isWaiting());
+            fields->setProperty ("conversation_id", conversation != nullptr ? conversation->id() : String());
+        }
+
+        const auto contents = JSON::toString (packet, false);
         if (contents == lastChatInspector)
             return;
 
@@ -1143,6 +1315,7 @@ private:
         continuePluginScan();
         continueMidiLearn();
         writeChatInspector();
+        pollTheAssistant();
         updateTransportModeIfNeeded();
         project.writeBackupIfDue();
         project.writeStatus();
@@ -1362,6 +1535,24 @@ private:
                     && workspace.playlistGrid().dragCurvePoint (static_cast<int> (drag[0]),
                                                                 static_cast<double> (drag[1]),
                                                                 static_cast<double> (drag[2]));
+        }
+
+        if (action.hasProperty ("chat"))
+        {
+            // "ask: <text>" types and sends, "cancel" stops waiting, "new" branches the
+            // conversation. The same calls the buttons make.
+            const auto what = action["chat"].toString();
+
+            if (what.startsWith ("ask:"))
+            {
+                workspace.chatPanel().setDraft (what.fromFirstOccurrenceOf (":", false, false).trim());
+                askTheAssistant();
+                return true;
+            }
+
+            if (what == "cancel") { cancelTheQuestion(); return true; }
+            if (what == "new")    { conversation->beginNew(); return true; }
+            return false;
         }
 
         if (action.hasProperty ("tool"))
@@ -1625,6 +1816,8 @@ private:
     String lastTransportKey, lastChatInspector, lastToolRequest;
     /** Built once, so a request_id answered earlier is still known later in the run. */
     std::unique_ptr<live::ToolService> toolService;
+    std::unique_ptr<live::Conversation> conversation;
+    std::unique_ptr<live::ChatBridge> bridge;
 
     live::CoComposeLookAndFeel look;
     uint32 messageAt = 0;
