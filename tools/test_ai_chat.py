@@ -735,6 +735,26 @@ def check_a_written_answer_can_carry_a_change(report):
 
     report.expect('nothing to read is not a change', parse_change(None)[1] is None)
 
+    # A model that opens the block, writes a complete object and forgets the closing
+    # fence is the common case, not an edge one - a real local model did exactly that
+    # the first time it was asked. The object is what has to be complete.
+    unclosed = ('I would move them up.\n\n```cocompose-change\n'
+                '{"description": "up", "keeps": {"rhythm": true},\n'
+                ' "notes": [{"what": "change", "id": "n1", "pitch": 62}]}')
+    text, change = parse_change(unclosed)
+    report.expect('a block with no closing fence is still read',
+                  change is not None and change['notes'][0]['id'] == 'n1')
+    report.expect('and the prose before it survives intact',
+                  text == 'I would move them up.', repr(text))
+
+    brace = ('x\n```cocompose-change\n{"description": "a } brace",'
+             ' "notes": [{"what": "change", "id": "n1", "pitch": 62}]}\n```')
+    report.expect('a brace inside a string does not end the block early',
+                  parse_change(brace)[1] is not None)
+
+    report.expect('an object that stops halfway is not a change',
+                  parse_change('x\n```cocompose-change\n{"notes": [{"what"')[1] is None)
+
 
 def check_a_mixer_proposal_uses_the_ids_it_was_given(exe, folder, report):
     """A2, the insert half: a proposal about a mixer insert has to work with the ids the

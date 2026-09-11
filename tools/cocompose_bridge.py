@@ -142,8 +142,11 @@ def describe_attachments(attachments):
                                     note["length_beats"], note["velocity"], note["id"],
                                     "  <- may be changed" if note["id"] in allowed else ""))
                 if allowed:
-                    lines.append("    only the notes marked above may appear in a change;"
-                                 " the rest are context")
+                    shown = [n["id"] for n in part.get("notes", []) if n["id"] in allowed]
+                    lines.append("    CHANGEABLE NOTE IDS - a change may name these and"
+                                 " nothing else: " + ", ".join(shown))
+                    lines.append("    every other note above is context. Naming one gets"
+                                 " the whole change refused and the person sees nothing.")
 
         elif a["kind"] == "insert":
             lines.append("    insert %s '%s', gain %.2f dB, pan %.2f, out to %s"
@@ -220,7 +223,38 @@ def suggested_change(request):
     return None
 
 
-CHANGE_BLOCK = re.compile(r"```cocompose-change\s*(\{.*?\})\s*```", re.DOTALL)
+CHANGE_OPENS = re.compile(r"```[ \t]*cocompose-change[ \t]*\r?\n", re.IGNORECASE)
+
+
+def first_object(text):
+    """Reads one JSON object off the front of `text`, returning it and what follows.
+
+    Braces are counted rather than fences, and a string is skipped over so that a brace
+    inside one does not end the object early. Counting braces is what makes a block that
+    was never closed still readable - see parse_change.
+    """
+    depth = 0
+    inside_string = False
+    escaped = False
+
+    for i, character in enumerate(text):
+        if inside_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                inside_string = False
+        elif character == '"':
+            inside_string = True
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return text[:i + 1], text[i + 1:]
+
+    return None, text
 
 
 def parse_change(text):
@@ -232,22 +266,35 @@ def parse_change(text):
     makes and the current revision, exactly as it checks the echo bridge's. Nothing
     here decides whether a change is allowed; it only decides whether one was asked for.
 
-    Anything malformed is treated as no change at all. A half-understood edit to
-    someone's music is worse than an answer with no button on it.
+    The closing fence is not required. Models open the block, write a complete object,
+    and run out of breath before the last three backticks; insisting on them would throw
+    away a perfectly good change over punctuation. What has to be complete is the object.
+
+    Anything malformed is still no change at all. A half-understood edit to someone's
+    music is worse than an answer with no button on it.
     """
-    found = CHANGE_BLOCK.search(text or "")
-    if not found:
+    opened = CHANGE_OPENS.search(text or "")
+    if not opened:
+        return text, None
+
+    body = text[opened.end():].lstrip()
+    raw, rest = first_object(body)
+    if raw is None:
         return text, None
 
     try:
-        change = json.loads(found.group(1))
+        change = json.loads(raw)
     except ValueError:
         return text, None
 
     if not isinstance(change, dict) or not (change.get("notes") or change.get("parameters")):
         return text, None
 
-    return (text[:found.start()] + text[found.end():]).strip(), change
+    rest = rest.lstrip()
+    if rest.startswith("```"):
+        rest = rest[3:]
+
+    return (text[:opened.start()] + rest).strip(), change
 
 
 class Echo:
@@ -297,9 +344,70 @@ class OpenAIChat:
         return text
 
 
-def make_provider(name, model, key_name):
+class Ollama:
+    """A model running on this machine, over Ollama's HTTP API.
+
+    Same contract as the hosted provider and the same prompt; the differences are that
+    there is no key to hold and nothing leaves the machine. That last part is why it is
+    here. A person can have the whole thing working - attach, ask, read, propose, apply -
+    and decide afterwards whether they want their music sent to anybody at all.
+
+    It streams, because a local model on ordinary hardware is slow enough that watching
+    the answer appear is the difference between working and hung.
+    """
+
+    def __init__(self, model, host):
+        self.model = model
+        self.host = host.rstrip("/")
+        self.name = "ollama " + model
+
+    def answer(self, request, on_text):
+        body = json.dumps({
+            "model": self.model,
+            "stream": True,
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT},
+                         {"role": "user", "content": build_prompt(request)}],
+            # A suggested change is a fenced block of JSON, and a model left to be
+            # inventive gets the brackets wrong. This is not about taste.
+            "options": {"temperature": 0.2}}).encode("utf-8")
+
+        call = urllib.request.Request(self.host + "/api/chat", data=body,
+                                      headers={"Content-Type": "application/json"},
+                                      method="POST")
+
+        whole = ""
+        with urllib.request.urlopen(call, timeout=900) as response:
+            for line in response:
+                line = line.strip()
+                if not line:
+                    continue
+
+                # One JSON object per line. Anything unreadable is a line that has not
+                # finished arriving, not a failure; the next read brings the rest.
+                try:
+                    piece = json.loads(line.decode("utf-8"))
+                except ValueError:
+                    continue
+
+                if piece.get("error"):
+                    raise RuntimeError(piece["error"])
+
+                whole += piece.get("message", {}).get("content", "")
+                on_text(whole)
+
+                if piece.get("done"):
+                    break
+
+        return whole
+
+
+def make_provider(name, model, key_name, host="http://localhost:11434"):
     if name == "echo":
         return Echo()
+
+    # No key: the model is on this machine. Asking for one would be theatre.
+    if name == "ollama":
+        return Ollama(model or "llama3.1:8b", host)
 
     key = os.environ.get(key_name, "")
     if not key:
@@ -397,11 +505,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--project", type=Path, required=True)
-    parser.add_argument("--provider", default="echo", choices=["echo", "openai"])
+    parser.add_argument("--provider", default="echo", choices=["echo", "openai", "ollama"])
     parser.add_argument("--model", default=None)
     parser.add_argument("--key-name", default="OPENAI_API_KEY",
                         help="environment variable holding the key; never read from the project")
+    parser.add_argument("--host", default="http://localhost:11434",
+                        help="where ollama is listening")
     parser.add_argument("--once", action="store_true", help="answer one question and stop")
     args = parser.parse_args()
 
-    serve(args.project, make_provider(args.provider, args.model, args.key_name), once=args.once)
+    serve(args.project, make_provider(args.provider, args.model, args.key_name, args.host),
+          once=args.once)
