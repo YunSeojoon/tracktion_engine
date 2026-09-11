@@ -535,6 +535,93 @@ def check_proposals_stay_inside_the_selection(exe, folder, report):
         s.close()
 
 
+def check_a_person_can_use_it(exe, folder, report):
+    """A2 as a person meets it: ask with notes attached, see what the answer would
+    change, press Apply once, and take it back with one Undo.
+
+    The tool service is checked directly elsewhere. This is the other half - that the
+    same thing is reachable from the panel, which is what makes it a usable version
+    rather than an API."""
+    folder.mkdir(parents=True, exist_ok=True)
+    s = Session(exe, folder).open()
+    project = folder / "project.json"
+    bridge = None
+
+    try:
+        prepare_song(s)
+        bridge = start_bridge(folder)
+        wait_for(lambda: read(folder / "chat-inspector.json").get("bridge_connected"), timeout=30)
+
+        s.run([{"select_channel": 0}, {"attach": "notes"}])
+        time.sleep(0.5)
+
+        # Whichever pattern the attachment named is the one to watch. Reading the first
+        # pattern in the project instead would be watching the wrong music.
+        attached = read(folder / "chat-inspector.json")["attachments"][-1]
+        pattern_id, channel_id = attached["pattern"], attached["channel"]
+
+        before = tool(project, "inspect_pattern", {"pattern": pattern_id, "channel": channel_id})
+        original = {n["id"]: n for n in before["result"]["parts"][0]["notes"]}
+        s.run([{"chat": "ask: move these up a tone but keep the rhythm"}])
+        talk = settled_answer(folder)
+
+        answer = talk["messages"][-1]
+        report.expect("the answer came with a change worked out",
+                      bool(answer.get("proposal_id")), answer.get("proposal_problem", ""))
+        report.expect("the change was checked and kept, not applied",
+                      answer["proposal"]["applied"] is False)
+        report.expect("having a change waiting is not an edit",
+                      read(folder / "sync-status.json")["revision"]
+                      == talk["messages"][-2]["revision"],
+                      read(folder / "sync-status.json")["revision"])
+        report.expect("it says what each note would become",
+                      answer["proposal_diff"]["notes"][0]["pitch"]["now"]
+                      == answer["proposal_diff"]["notes"][0]["pitch"]["was"] + 2)
+
+        # The person presses Apply.
+        s.run([{"chat": "apply"}])
+        time.sleep(1.2)
+        after = tool(project, "inspect_pattern", {"pattern": pattern_id, "channel": channel_id})
+        changed = {n["id"]: n for n in after["result"]["parts"][0]["notes"]}
+
+        touched = [note["id"] for note in answer["proposal_diff"]["notes"]]
+        report.expect("the notes it named moved up a tone",
+                      all(changed[i]["pitch"] == original[i]["pitch"] + 2 for i in touched))
+        report.expect("the rhythm it promised to keep was kept",
+                      all(changed[i]["start_beat"] == original[i]["start_beat"]
+                          and changed[i]["length_beats"] == original[i]["length_beats"]
+                          for i in touched))
+        report.expect("no other note moved",
+                      all(changed[i]["pitch"] == original[i]["pitch"]
+                          for i in original if i not in touched))
+
+        report.expect("the panel stops offering a change once it is applied",
+                      not read(folder / "conversation.json")["messages"][-1]["proposal"]["applied"]
+                      is False)
+
+        # Pressing it again must not apply it twice.
+        pitches = {i: changed[i]["pitch"] for i in touched}
+        s.run([{"chat": "apply:" + answer["proposal_id"]}])
+        time.sleep(1.0)
+        again = tool(project, "inspect_pattern", {"pattern": pattern_id, "channel": channel_id})
+        twice = {n["id"]: n for n in again["result"]["parts"][0]["notes"]}
+        report.expect("pressing Apply again changes nothing more",
+                      all(twice[i]["pitch"] == pitches[i] for i in touched))
+
+        # One Undo takes all of it back.
+        from cocompose import control
+        control(project, "undo")
+        time.sleep(1.0)
+        undone = tool(project, "inspect_pattern", {"pattern": pattern_id, "channel": channel_id})
+        back = {n["id"]: n for n in undone["result"]["parts"][0]["notes"]}
+        report.expect("one Undo takes the whole change back",
+                      all(back[i]["pitch"] == original[i]["pitch"] for i in original))
+    finally:
+        if bridge is not None:
+            bridge.terminate()
+        s.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -556,6 +643,9 @@ def run(exe, output):
     print()
     print('proposals stay inside the selection')
     check_proposals_stay_inside_the_selection(exe, output / 'proposals', report)
+    print()
+    print('a person can use it')
+    check_a_person_can_use_it(exe, output / 'person', report)
 
     print()
     print('FAILURES:', report.failures if report.failures else 'none')

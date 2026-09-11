@@ -40,6 +40,13 @@ struct ChatMessage
     bool streaming = false;
     String requestID;
 
+    /** An answer may come with a change worked out but not made. The id is the app's
+        own, handed out when the proposal was checked and kept; the summary is what the
+        person reads before deciding. Nothing here has touched the music. */
+    String proposalID;
+    var proposalSummary, proposalDiff;
+    String proposalProblem;   // why a suggested change could not even be worked out
+
     static String fromName (From f)
     {
         switch (f)
@@ -109,6 +116,36 @@ public:
             if (message.streaming && message.requestID == requestID)
             {
                 message.text += more;
+                save();
+                return;
+            }
+    }
+
+    /** Attaches a worked-out change to the answer it came with. */
+    void attachProposal (const String& requestID, const String& proposalID,
+                         const var& summary, const var& diff, const String& problem)
+    {
+        for (auto& message : entries)
+            if (message.requestID == requestID && message.from == ChatMessage::From::assistant)
+            {
+                message.proposalID = proposalID;
+                message.proposalSummary = summary;
+                message.proposalDiff = diff;
+                message.proposalProblem = problem;
+                save();
+                return;
+            }
+    }
+
+    /** Once applied, a proposal is history: it must not offer to be applied again, and
+        reopening the project must not bring the button back. */
+    void markProposalApplied (const String& proposalID)
+    {
+        for (auto& message : entries)
+            if (message.proposalID == proposalID)
+            {
+                if (auto* fields = message.proposalSummary.getDynamicObject())
+                    fields->setProperty ("applied", true);
                 save();
                 return;
             }
@@ -199,6 +236,10 @@ private:
                                { "revision", message.revision },
                                { "streaming", message.streaming },
                                { "request_id", message.requestID },
+                               { "proposal_id", message.proposalID },
+                               { "proposal", message.proposalSummary },
+                               { "proposal_diff", message.proposalDiff },
+                               { "proposal_problem", message.proposalProblem },
                                { "attachments", attached } }));
         }
 
@@ -244,6 +285,10 @@ private:
                 message.atMillis = static_cast<int64> (entry["at_ms"]);
                 message.revision = static_cast<int> (entry["revision"]);
                 message.requestID = entry["request_id"].toString();
+                message.proposalID = entry["proposal_id"].toString();
+                message.proposalSummary = entry["proposal"];
+                message.proposalDiff = entry["proposal_diff"];
+                message.proposalProblem = entry["proposal_problem"].toString();
                 // An answer that was still arriving when the app closed is not still
                 // arriving now. It is kept, marked finished, rather than left pending
                 // for something that will never write to it again.

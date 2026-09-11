@@ -86,6 +86,11 @@ public:
         String text;        // the new part while streaming, the whole thing when finished
         String errorCode;   // only when failed
         bool retryable = false;
+
+        /** A change the answer suggests, if it suggested one. It has been checked by
+            nobody at this point - it is exactly what the bridge sent - and the app puts
+            it through the same checks a script's would face before keeping it. */
+        var change;
     };
 
     /** Called on the message thread, often. Reads whatever the bridge has written and
@@ -136,7 +141,7 @@ public:
         {
             const auto done = pending;
             pending.clear();
-            return { Update::What::finished, done, whole };
+            return { Update::What::finished, done, whole, {}, false, reply["change"] };
         }
 
         return {};

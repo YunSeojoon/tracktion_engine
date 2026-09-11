@@ -49,6 +49,18 @@ public:
         transcript.setColour (TextEditor::outlineColourId, theme::edge);
         addAndMakeVisible (transcript);
 
+        change.setMultiLine (true, true);
+        change.setReadOnly (true);
+        change.setCaretVisible (false);
+        change.setColour (TextEditor::backgroundColourId, theme::panelHeader);
+        change.setColour (TextEditor::outlineColourId, theme::accentDim);
+        addAndMakeVisible (change);
+
+        apply.setButtonText ("Apply change");
+        apply.onClick = [this] { if (onApply && offered.isNotEmpty()) onApply (offered); };
+        apply.setVisible (false);
+        addAndMakeVisible (apply);
+
         send.setButtonText ("Ask");
         send.onClick = [this] { if (onSend) onSend(); };
         stop.setButtonText ("Stop");
@@ -119,6 +131,11 @@ public:
     }
 
     std::function<void()> onSend, onCancel;
+    std::function<void (const String&)> onApply;
+
+    /** The proposal currently being offered, if any. Empty once it has been applied, so
+        the same change cannot be applied twice by pressing the button again. */
+    String offeredProposal() const { return offered; }
 
     /** Draws the conversation. Called whenever it changes, including while an answer is
         still arriving, so the text grows as it comes in. */
@@ -153,6 +170,49 @@ public:
         send.setEnabled (! waiting);
         stop.setEnabled (waiting);
         connection.setText (connectionNote, dontSendNotification);
+
+        // A change worked out but not made. Shown as what each note was and would
+        // become, so a person decides from the numbers rather than from a promise.
+        offered.clear();
+        String changeText;
+
+        for (const auto& message : conversation.messages())
+        {
+            if (message.proposalProblem.isNotEmpty())
+                changeText = "A change was suggested but could not be used: " + message.proposalProblem;
+
+            if (message.proposalID.isEmpty() || ! message.proposalSummary.isObject())
+                continue;
+
+            const auto done = static_cast<bool> (message.proposalSummary["applied"]);
+            changeText = message.proposalSummary["description"].toString();
+            if (changeText.isEmpty())
+                changeText = "A suggested change";
+
+            changeText << "  (" << message.proposalSummary["notes_changed"].toString() << " changed, "
+                       << message.proposalSummary["notes_added"].toString() << " added, "
+                       << message.proposalSummary["notes_removed"].toString() << " removed)";
+
+            if (auto* notes = message.proposalDiff["notes"].getArray())
+                for (int i = 0; i < jmin (6, notes->size()); ++i)
+                {
+                    const auto& edited = (*notes)[i];
+                    changeText << newLine << "   " << edited["what"].toString();
+                    for (const auto* field : { "pitch", "start_beat", "length_beats", "velocity" })
+                        if (edited[field].isObject())
+                            changeText << "  " << field << " " << edited[field]["was"].toString()
+                                       << " -> " << edited[field]["now"].toString();
+                }
+
+            if (done)
+                changeText << newLine << "   applied";
+            else
+                offered = message.proposalID;
+        }
+
+        change.setText (changeText, dontSendNotification);
+        apply.setVisible (offered.isNotEmpty());
+        apply.setEnabled (offered.isNotEmpty() && ! waiting);
     }
 
     /** What an attachment would carry, in the form a person can read before it goes
@@ -267,6 +327,9 @@ public:
         clear.setBounds (buttons.removeFromLeft (56).reduced (1));
 
         entry.setBounds (bottom.removeFromBottom (48).reduced (0, 2));
+        if (apply.isVisible())
+            apply.setBounds (r.removeFromBottom (24).removeFromLeft (120).reduced (1));
+        change.setBounds (r.removeFromBottom (jmin (96, r.getHeight() / 3)).reduced (0, 2));
         connection.setBounds (bottom.removeFromBottom (14));
         note.setBounds (bottom.removeFromBottom (14));
 
@@ -402,8 +465,9 @@ private:
     OwnedArray<Card> cardViews;
     Component cards;
     Viewport viewport;
-    TextEditor entry, transcript;
-    TextButton inspect, clear, send, stop;
+    TextEditor entry, transcript, change;
+    TextButton inspect, clear, send, stop, apply;
+    String offered;
     Label note, connection;
 };
 

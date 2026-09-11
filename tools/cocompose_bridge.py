@@ -152,6 +152,39 @@ def build_prompt(request):
     return "\n".join(parts)
 
 
+def suggested_change(request):
+    """A change the app can check and offer, worked out without a model.
+
+    Its only job is to exercise the path a real answer takes: the app puts whatever a
+    bridge sends through the same scope and keeps checks either way, so a suggestion
+    from here is treated exactly as suspiciously as one from a model.
+
+    It moves the attached notes up a tone and leaves the rhythm alone - a change that is
+    obviously not musical judgement, which is the point.
+    """
+    for attachment in request.get("attachments", []):
+        if attachment.get("kind") != "notes":
+            continue
+
+        detail = (attachment.get("detail") or {}).get("result")
+        if not detail:
+            continue
+
+        for part in detail.get("parts", []):
+            notes = part.get("notes", [])[:4]
+            if not notes:
+                continue
+
+            return {
+                "description": "Move the attached notes up a tone",
+                "keeps": {"rhythm": True, "velocity": True},
+                "notes": [{"what": "change", "id": note["id"],
+                           "pitch": min(127, note["pitch"] + 2)} for note in notes],
+            }
+
+    return None
+
+
 class Echo:
     """No network. Says what it was given, and says that it is not a model."""
 
@@ -252,8 +285,18 @@ def serve(project, provider, once=False):
 
             try:
                 text = provider.answer(request, stream)
-                atomic_write(reply_file, {"request_id": request_id, "status": "ok",
-                                          "text": text, "provider": provider.name})
+                reply = {"request_id": request_id, "status": "ok",
+                         "text": text, "provider": provider.name}
+
+                # Only the echo bridge invents a change. A real provider's suggestions
+                # will come from what it actually said, once that is parsed; until then
+                # it is better to send nothing than to make one up on its behalf.
+                if isinstance(provider, Echo):
+                    change = suggested_change(request)
+                    if change:
+                        reply["change"] = change
+
+                atomic_write(reply_file, reply)
                 print("answered", len(text), "characters")
             except KeyboardInterrupt:
                 atomic_write(reply_file, {"request_id": request_id, "status": "error",

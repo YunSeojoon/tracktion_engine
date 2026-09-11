@@ -109,6 +109,8 @@ public:
 
         workspace.chatPanel().onSend = [this] { askTheAssistant(); };
         workspace.chatPanel().onCancel = [this] { cancelTheQuestion(); };
+        workspace.chatPanel().onApply = [this] (const String& proposalID)
+                                        { applySuggestedChange (proposalID); };
         workspace.setMidiLearnHandlers ([this] (const String& source, const String& plugin, const String& parameter)
                                         { startMidiLearn (source, plugin, parameter); },
                                         [this] { cancelMidiLearn(); });
@@ -969,6 +971,79 @@ private:
         say ("Asked. The project keeps playing while you wait.");
     }
 
+    /** A reply may come with a change worked out. It is put through exactly the same
+        checks a script's would be - scope, what was to be kept, and whether the music
+        has moved - and kept, unapplied, for the person to look at. Nothing is changed
+        here: a suggestion that passes every check is still only a suggestion until
+        someone presses Apply. */
+    void considerSuggestedChange (const String& requestID, const var& suggested)
+    {
+        if (! suggested.isObject())
+            return;
+
+        // Where it may act comes from what was attached to the question, not from the
+        // reply, so a suggestion cannot widen its own reach by asking to.
+        auto scoped = suggested.clone();
+        auto* fields = scoped.getDynamicObject();
+        if (fields == nullptr)
+            return;
+
+        for (const auto& message : conversation->messages())
+        {
+            if (message.requestID != requestID || message.from != live::ChatMessage::From::person)
+                continue;
+
+            for (const auto& attachment : message.attachments)
+            {
+                if (attachment.kind != live::Attachment::Kind::notes)
+                    continue;
+
+                fields->setProperty ("pattern", attachment.patternID);
+                fields->setProperty ("channel", attachment.noteChannelID);
+
+                Array<var> allowed;
+                for (const auto& noteID : attachment.noteIDs)
+                    allowed.add (noteID);
+                fields->setProperty ("allowed_notes", allowed);
+                break;
+            }
+            break;
+        }
+
+        fields->setProperty ("base_revision", project.revision);
+
+        const auto answer = ask ("create_proposal", scoped);
+
+        if (answer["status"].toString() == "ok")
+            conversation->attachProposal (requestID,
+                                          answer["result"]["proposal"]["id"].toString(),
+                                          answer["result"]["proposal"],
+                                          answer["result"]["diff"], {});
+        else
+            conversation->attachProposal (requestID, {}, var(), var(),
+                                          answer["error"]["code"].toString() + ": "
+                                            + answer["error"]["message"].toString());
+    }
+
+    /** The person pressed Apply. Everything is checked again before anything moves, and
+        it goes in as one undo. */
+    void applySuggestedChange (const String& proposalID)
+    {
+        const auto answer = ask ("apply_proposal", live::object ({ { "proposal", proposalID } }));
+
+        if (answer["status"].toString() != "ok")
+        {
+            say ("Could not apply it: " + answer["error"]["message"].toString());
+            return;
+        }
+
+        conversation->markProposalApplied (proposalID);
+        workspace.refresh();
+        say (static_cast<bool> (answer["result"]["already_applied"])
+               ? "That change was already applied."
+               : "Applied. One Undo takes it back.");
+    }
+
     void cancelTheQuestion()
     {
         if (! bridge->isWaiting())
@@ -1045,6 +1120,7 @@ private:
 
             case live::ChatBridge::Update::What::finished:
                 conversation->finishStreaming (update.requestID, update.text);
+                considerSuggestedChange (update.requestID, update.change);
                 say ("The assistant answered.");
                 break;
 
@@ -1089,9 +1165,14 @@ private:
     void writeChatInspector()
     {
         // Same reasoning: the packet is only built when what it describes has moved.
+        // Everything the packet reports has to be in here, or the packet stops being
+        // rewritten when that thing changes. The bridge connecting is the easy one to
+        // forget, because nothing else about the app moves when it happens.
         const auto shape = String (workspace.chatPanel().current().size()) + ":"
                              + workspace.chatPanel().draft() + ":"
                              + (bridge != nullptr && bridge->isWaiting() ? "1" : "0") + ":"
+                             + (bridge != nullptr && bridge->isConnected() ? "1" : "0") + ":"
+                             + (conversation != nullptr ? conversation->id() : String()) + ":"
                              + String (project.revision);
 
         if (shape == lastInspectorShape)
@@ -1576,6 +1657,19 @@ private:
             }
 
             if (what == "cancel") { cancelTheQuestion(); return true; }
+
+            if (what.startsWith ("apply"))
+            {
+                // "apply" takes whatever proposal is offered now; "apply:<id>" names one.
+                const auto named = what.fromFirstOccurrenceOf (":", false, false).trim();
+                const auto proposalID = named.isNotEmpty() ? named
+                                                           : workspace.chatPanel().offeredProposal();
+                if (proposalID.isEmpty())
+                    return false;
+
+                applySuggestedChange (proposalID);
+                return true;
+            }
             if (what == "new")    { conversation->beginNew(); return true; }
             return false;
         }
