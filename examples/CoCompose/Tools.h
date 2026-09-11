@@ -115,6 +115,14 @@ public:
 
     /** What this build can actually do. Read tools only, and said so plainly: a caller
         must not have to discover by trying. */
+    /** A proposal that has been made and checked, for something that needs to read it
+        rather than apply it - previewing, for instance. Null when there is no such
+        proposal, which a caller has to handle: proposals do not outlive the session. */
+    Proposal* proposalFor (const String& id)
+    {
+        return proposals.contains (id) ? &proposals.getReference (id) : nullptr;
+    }
+
     var capabilities() const
     {
         Array<var> readTools;

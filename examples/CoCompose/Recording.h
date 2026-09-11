@@ -266,6 +266,24 @@ public:
         return true;
     }
 
+    /** Renders a stretch of the song with something changed that is not in the song.
+
+        Used for A/B: the same range, the same mix path, the same settings, rendered
+        once as it is and once as it would be. The only difference between the two
+        files is meant to be the change, which is why both go through here rather than
+        one of them through a different path. */
+    bool startPreview (const File& destination, te::TimeRange range, int revision,
+                       std::function<void (ValueTree&)> adjust)
+    {
+        if (! begin (range, revision, std::move (adjust)))
+            return false;
+
+        target = destination.hasFileExtension ("wav") ? destination : destination.withFileExtension ("wav");
+        stems = false;
+        startThread();
+        return true;
+    }
+
     bool startStems (const File& folder, te::TimeRange range, int revision)
     {
         if (! begin (range, revision))
@@ -301,7 +319,15 @@ public:
     /** Takes a copy of the project as it is right now. The render runs from that copy
         in an Edit of its own, so an edit made while it is running changes the next
         render rather than corrupting this one. */
-    bool begin (te::TimeRange range, int revision)
+    /** `adjust`, when given, is handed the copied project before the render opens it,
+        so a render can be of music that is not in the song.
+
+        That is what a preview is: the proposal applied to a copy, rendered, and the
+        copy thrown away. Nothing reaches the live project - not the notes, not a
+        plugin's state, not the undo history - because the live project is never the
+        thing being changed. */
+    bool begin (te::TimeRange range, int revision,
+                std::function<void (ValueTree&)> adjust = {})
     {
         if (isBusy() || range.getLength().inSeconds() <= 0.0)
             return false;
@@ -316,7 +342,13 @@ public:
 
         // The copy is opened here, on the message thread, because that is where an Edit
         // is built and taken down. The worker only runs the render over it.
-        renderEdit = te::loadEditFromState (model.edit.engine, model.edit.state.createCopy(),
+        auto copied = model.edit.state.createCopy();
+
+        if (adjust != nullptr)
+            if (auto ours = copied.getChildWithName (ids::COCOMPOSE); ours.isValid())
+                adjust (ours);
+
+        renderEdit = te::loadEditFromState (model.edit.engine, copied,
                                             te::Edit::EditRole::forRendering);
         if (renderEdit == nullptr)
             return false;

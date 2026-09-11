@@ -104,6 +104,70 @@ struct Proposal
 
     bool applied = false;
 
+    /** Applies the note changes to a detached copy of the project tree.
+
+        This is for previewing: the copy is rendered and thrown away, so there is no
+        undo manager, no engine and no live model involved - and nothing here can reach
+        the song, because the tree it is handed is not the song's.
+
+        Parameter changes are not applied. They live in the plugins rather than in the
+        tree, and setting them on a copy means opening its plugins, which a preview
+        does not do. A caller is told, rather than being given a preview that quietly
+        left half the proposal out. */
+    bool applyNotesTo (ValueTree coCompose) const
+    {
+        auto patterns = coCompose.getChildWithName (ids::PATTERNS);
+        if (! patterns.isValid())
+            return false;
+
+        ValueTree sequence;
+
+        for (auto pattern : patterns)
+            if (Model::uidOf (pattern) == patternID)
+                for (auto part : pattern)
+                    if (part.hasType (ids::SEQUENCE) && part[ids::channel].toString() == channelID)
+                        sequence = part;
+
+        if (! sequence.isValid())
+            return false;
+
+        for (const auto& change : notes)
+        {
+            if (change.what == NoteChange::What::add)
+            {
+                ValueTree note (ids::NOTE);
+                note.setProperty (ids::uid, Uuid().toString(), nullptr);
+                note.setProperty (ids::pitch, change.pitch.value_or (60), nullptr);
+                note.setProperty (ids::start, change.startBeat.value_or (0.0), nullptr);
+                note.setProperty (ids::length, change.lengthBeats.value_or (1.0), nullptr);
+                note.setProperty (ids::velocity, change.velocity.value_or (100), nullptr);
+                sequence.appendChild (note, nullptr);
+                continue;
+            }
+
+            for (int i = sequence.getNumChildren(); --i >= 0;)
+            {
+                auto note = sequence.getChild (i);
+                if (Model::uidOf (note) != change.noteID)
+                    continue;
+
+                if (change.what == NoteChange::What::remove)
+                {
+                    sequence.removeChild (i, nullptr);
+                    break;
+                }
+
+                if (change.pitch)       note.setProperty (ids::pitch, *change.pitch, nullptr);
+                if (change.startBeat)   note.setProperty (ids::start, *change.startBeat, nullptr);
+                if (change.lengthBeats) note.setProperty (ids::length, *change.lengthBeats, nullptr);
+                if (change.velocity)    note.setProperty (ids::velocity, *change.velocity, nullptr);
+                break;
+            }
+        }
+
+        return true;
+    }
+
     var summary() const
     {
         int changed = 0, added = 0, removed = 0;

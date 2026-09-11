@@ -761,7 +761,20 @@ private:
     File scriptFile;
     var script;
     int scriptStep = 0, scriptRound = 0;
+    /** Where a preview is in its two renders, if one is running. */
+    struct Preview
+    {
+        enum class Stage { idle, renderingBefore, renderingAfter };
+        Stage stage = Stage::idle;
+        String proposalID;
+        double fromBeat = 0.0, toBeat = 0.0;
+        int revision = 0;
+        File before, after;
+        String problem;
+    };
+
     bool renderWasBusy = false;
+    Preview preview;
 
     bool isSongMode() const
     {
@@ -1719,12 +1732,158 @@ private:
         }
     }
 
+    /** Starts an A/B: this stretch as it is, and as the proposal would make it.
+
+        Both renders are of a copy, over the same range, through the same mix path, so
+        the only difference between the two files is the change itself. Nothing here
+        touches the song: the proposal is still unapplied when this finishes, and the
+        revision has not moved. */
+    bool startPreview (const String& proposalID, double fromBeat, double toBeat)
+    {
+        if (preview.stage != Preview::Stage::idle || exporter.isBusy())
+            return false;
+
+        auto* proposal = toolService->proposalFor (proposalID);
+        if (proposal == nullptr || toBeat <= fromBeat)
+            return false;
+
+        preview = {};
+        preview.proposalID = proposalID;
+        preview.fromBeat = fromBeat;
+        preview.toBeat = toBeat;
+        preview.revision = project.revision;
+        preview.before = project.source.getSiblingFile ("preview-before.wav");
+        preview.after = project.source.getSiblingFile ("preview-after.wav");
+
+        if (! proposal->parameters.empty())
+            preview.problem = "This proposal also changes mixer parameters, which a preview "
+                              "does not include; what you hear is the note changes only.";
+
+        auto& timeline = project.edit->tempoSequence;
+        const te::TimeRange range { timeline.toTime (te::BeatPosition::fromBeats (fromBeat)),
+                                    timeline.toTime (te::BeatPosition::fromBeats (toBeat)) };
+
+        if (! exporter.startPreview (preview.before, range, project.revision, {}))
+        {
+            preview = {};
+            return false;
+        }
+
+        preview.stage = Preview::Stage::renderingBefore;
+        writePreviewStatus (true);
+        return true;
+    }
+
+    /** The audio's own fingerprint, so two previews can be told apart by what is in
+        them rather than by when they were made - and so a stale one, left from before
+        an edit, is visibly not the file a fresh render would produce.
+
+        MD5 rather than a stronger digest on purpose: this distinguishes files, it does
+        not seal them. Nobody is being kept out; the release artefacts, which are a
+        different problem, use SHA-256. */
+    static String fingerprintOf (const File& file)
+    {
+        if (! file.existsAsFile())
+            return {};
+
+        FileInputStream in (file);
+        if (! in.openedOk())
+            return {};
+
+        // FNV-1a over the bytes. Six lines and no new module, which is the right size
+        // for the job: it has to tell two renders apart, not withstand anybody.
+        uint64 hash = 14695981039346656037ULL;
+        HeapBlock<char> buffer (32768);
+
+        while (! in.isExhausted())
+        {
+            const auto read = in.read (buffer, 32768);
+            for (int i = 0; i < read; ++i)
+            {
+                hash ^= static_cast<uint8> (buffer[i]);
+                hash *= 1099511628211ULL;
+            }
+        }
+
+        return String::toHexString (static_cast<int64> (hash));
+    }
+
+    void writePreviewStatus (bool running)
+    {
+        const auto describe = [this] (const File& file)
+        {
+            return live::object ({ { "path", file.getFullPathName() },
+                                   { "exists", file.existsAsFile() },
+                                   { "fingerprint", fingerprintOf (file) },
+                                   { "bytes", file.existsAsFile() ? file.getSize() : 0 } });
+        };
+
+        live::atomicWrite (project.source.getSiblingFile ("preview-status.json"),
+                           JSON::toString (live::object ({
+                               { "running", running },
+                               { "proposal", preview.proposalID },
+                               { "source_revision", preview.revision },
+                               { "start_beat", preview.fromBeat },
+                               { "end_beat", preview.toBeat },
+                               { "sample_rate", project.edit->engine.getDeviceManager().getSampleRate() },
+                               { "heard", false },
+                               { "note", "Rendering a comparison is not listening to it. "
+                                         "Whether these sound right is not something this "
+                                         "app or a model can report." },
+                               { "limits", preview.problem },
+                               { "before", describe (preview.before) },
+                               { "after", describe (preview.after) } }), false));
+    }
+
     /** A render runs on its own thread; this picks up the result and reports it,
         also to a file so an external tool can wait for it. */
     void collectRenderResult()
     {
         if (auto result = exporter.takeResult())
         {
+            if (preview.stage != Preview::Stage::idle)
+            {
+                if (! result->complete)
+                {
+                    // A preview that failed leaves whatever it had; the old files are
+                    // not deleted to make room for nothing.
+                    preview.problem = result->message;
+                    preview.stage = Preview::Stage::idle;
+                    writePreviewStatus (false);
+                    say ("The preview could not be rendered: " + result->message);
+                    return;
+                }
+
+                if (preview.stage == Preview::Stage::renderingBefore)
+                {
+                    auto* proposal = toolService->proposalFor (preview.proposalID);
+                    auto& timeline = project.edit->tempoSequence;
+                    const te::TimeRange range { timeline.toTime (te::BeatPosition::fromBeats (preview.fromBeat)),
+                                                timeline.toTime (te::BeatPosition::fromBeats (preview.toBeat)) };
+
+                    const auto started = proposal != nullptr
+                        && exporter.startPreview (preview.after, range, preview.revision,
+                                                  [proposal] (ValueTree& copy) { proposal->applyNotesTo (copy); });
+
+                    if (! started)
+                    {
+                        preview.problem = "The second half of the comparison could not be rendered";
+                        preview.stage = Preview::Stage::idle;
+                        writePreviewStatus (false);
+                        return;
+                    }
+
+                    preview.stage = Preview::Stage::renderingAfter;
+                    writePreviewStatus (true);
+                    return;
+                }
+
+                preview.stage = Preview::Stage::idle;
+                writePreviewStatus (false);
+                say ("A and B are rendered. Listening to them is still your part.");
+                return;
+            }
+
             say (result->message);
             Array<var> files;
             for (const auto& file : result->files)
@@ -1864,6 +2023,15 @@ private:
             const auto to = gesture.size() > 2 ? static_cast<double> (gesture[2]) : from;
             const auto lane = gesture.size() > 3 ? static_cast<int> (gesture[3]) : -1;
             return workspace.playlistGrid().pointerGesture (gesture[0].toString(), from, to, lane);
+        }
+
+        if (action.hasProperty ("preview"))
+        {
+            // [proposal id, fromBeat, toBeat]
+            const auto what = action["preview"];
+            return what.isArray() && what.size() == 3
+                    && startPreview (what[0].toString(), static_cast<double> (what[1]),
+                                     static_cast<double> (what[2]));
         }
 
         if (action.hasProperty ("open_effect"))

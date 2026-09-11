@@ -32,6 +32,25 @@ def equivalent(a, b):
     return a == b
 
 
+def copy_when_readable(source, destination, attempts=20):
+    """Copies a file the app is also writing.
+
+    The app replaces its screenshot by renaming a finished one over the old, which is
+    right - nobody ever reads half an image - but on Windows the destination is briefly
+    unopenable while that happens, and a copy that lands in that moment fails with a
+    permission error. The file is not locked against us in any meaningful sense; it is
+    being swapped. Waiting a few milliseconds is the whole answer.
+    """
+    for attempt in range(attempts):
+        try:
+            shutil.copyfile(source, destination)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.1)
+
+
 def only_pattern(state):
     return state["patterns"][0]
 
@@ -148,7 +167,7 @@ def run(exe, folder):
         assert len(engine_clips(first)) == 1, "Playlist placement produced no engine clip"
         assert len(engine_clips(first)[0]["notes"]) == 32
         wait_for(lambda: (folder / "ui.png").exists())
-        shutil.copyfile(folder / "ui.png", folder / "before.png")
+        copy_when_readable(folder / "ui.png", folder / "before.png")
         checks.append("Windows startup and real Tracktion playback")
 
         channel_id = first["channels"][0]["id"]
@@ -168,8 +187,14 @@ def run(exe, folder):
         assert changed["channels"][0]["parameters"][0]["plugin_id"] == first["channels"][0]["parameters"][0]["plugin_id"]
         before_hash = hashlib.sha256((folder / "before.png").read_bytes()).digest()
         wait_for(lambda: "Live sync verified" in read(folder / "ui-state.json")["labels"])
-        wait_for(lambda: hashlib.sha256((folder / "ui.png").read_bytes()).digest() != before_hash)
-        shutil.copyfile(folder / "ui.png", folder / "after.png")
+        def picture_changed():
+            try:
+                return hashlib.sha256((folder / "ui.png").read_bytes()).digest() != before_hash
+            except PermissionError:
+                return False        # mid-swap; look again
+
+        wait_for(picture_changed)
+        copy_when_readable(folder / "ui.png", folder / "after.png")
         checks.append("Tempo, channel name, pitch and velocity update without replacing Edit; UI changes")
 
         invalid = live_state()

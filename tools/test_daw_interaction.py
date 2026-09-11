@@ -19,7 +19,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from cocompose import read, tool, wait_for
+from cocompose import apply_change, read, tool, wait_for
 from test_plugin_compatibility import Session, prepare_song
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -522,6 +522,52 @@ def check_lanes_can_be_made_taller_and_shorter(exe, folder, report):
         session.close()
 
 
+def check_an_effect_can_be_opened_from_the_chain(exe, folder, report):
+    """D4: double-clicking a name in the mixer strip's effect chain opens that plugin.
+
+    The chain was a label - correct and unreachable - so the only way to open an effect
+    was to find it again in a menu. This drives the same call the double-click makes."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+    try:
+        prepare_song(session)
+        state = session.settled()
+        insert_id = state["mixer"]["inserts"][0]["id"]
+
+        def add_reverb(live):
+            insert = next(i for i in live["mixer"]["inserts"] if i["id"] == insert_id)
+            insert.setdefault("effects", []).append(
+                {"id": "fx-verb", "type": "reverb", "bypass": False, "wet": 0.5, "parameters": []})
+
+        apply_change(project, add_reverb)
+        wait_for(lambda: any(e["id"] == "fx-verb" for e in
+                             tool(project, "inspect_insert", {"insert": insert_id})
+                                 ["result"]["effects"]), timeout=20)
+
+        revision = read(folder / "sync-status.json")["revision"]
+        session.run([{"open_effect": [insert_id, 0]}])
+        time.sleep(1.0)
+
+        report.expect("opening an effect from the chain is not an edit",
+                      read(folder / "sync-status.json")["revision"] == revision,
+                      read(folder / "sync-status.json")["revision"])
+
+        # An index past the end is refused rather than opening whatever is nearby. The
+        # script runner reports a refused action as a failed one, so that is the signal.
+        refused = False
+        try:
+            session.run([{"open_effect": [insert_id, 9]}], timeout=20)
+        except TimeoutError:
+            refused = True
+
+        report.expect("a chain position that does not exist opens nothing", refused)
+
+        session.run([{"close_plugins": True}])
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -558,6 +604,9 @@ def run(exe, output):
     print()
     print("lanes can change height")
     check_lanes_can_be_made_taller_and_shorter(exe, output / "lanes", report)
+    print()
+    print("an effect opens from the chain")
+    check_an_effect_can_be_opened_from_the_chain(exe, output / "chain", report)
     print()
     print("one key, one command")
     check_no_two_commands_answer_to_one_key(exe, output / "keys", report)
