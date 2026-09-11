@@ -402,6 +402,10 @@ private:
             for (const auto& id : *arguments["allowed_notes"].getArray())
                 proposal.allowedNotes.add (id.toString());
 
+        if (arguments["allowed_inserts"].isArray())
+            for (const auto& id : *arguments["allowed_inserts"].getArray())
+                proposal.allowedInserts.add (id.toString());
+
         auto sequence = Model::findSequence (model.patternFor (proposal.patternID), proposal.channelID);
 
         if (arguments["notes"].isArray() && ! arguments["notes"].getArray()->isEmpty())
@@ -515,11 +519,17 @@ private:
             if (change.velocity)    note.setProperty (ids::velocity, *change.velocity, &undo);
         }
 
+        // A parameter's playback value does not live in the tree, so setting it would
+        // fall outside the transaction the notes went into and the one Undo the person
+        // is promised would leave it behind. It goes in as an action instead.
         for (const auto& change : proposal.parameters)
-            if (auto* parameter = model.automatableParameter (change.ownerID, change.pluginID,
-                                                              change.parameterID))
-                parameter->setParameter (parameter->valueRange.convertFrom0to1 (
-                                             static_cast<float> (change.value)), sendNotification);
+            if (auto* plugin = model.pluginFor (change.ownerID, change.pluginID))
+                if (auto parameter = plugin->getAutomatableParameterByID (change.parameterID))
+                    undo.perform (new ParameterAction (model.edit, plugin->itemID.toString(),
+                                                       parameter->paramID,
+                                                       parameter->getCurrentExplicitValue(),
+                                                       parameter->valueRange.convertFrom0to1 (
+                                                           static_cast<float> (change.value))));
 
         model.renderIfNeeded();
         proposal.applied = true;
@@ -606,7 +616,11 @@ private:
         change.pluginID = entry["plugin"].toString();
         change.parameterID = entry["parameter"].toString();
 
-        if (! proposal.allowedInserts.isEmpty() && ! proposal.allowedInserts.contains (change.ownerID))
+        // Nothing attached means nothing may be touched. Notes are held in by the
+        // pattern and channel the attachment named, which a parameter change has no
+        // equivalent of - so an empty list here has to mean "none", not "any", or a
+        // question about some notes could come back proposing to move a fader.
+        if (! proposal.allowedInserts.contains (change.ownerID))
             throw ToolError (tools::errors::outOfScope, "That insert was not part of what was attached");
 
         auto* parameter = model.automatableParameter (change.ownerID, change.pluginID, change.parameterID);

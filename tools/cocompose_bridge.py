@@ -28,6 +28,7 @@ Run it beside a project while the app is open:
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import time
@@ -63,9 +64,33 @@ You cannot hear anything. No audio has been sent to you, so never say how someth
 sounds - say what the structure, the notes, the levels or the routing are, and say when
 a question can only be settled by listening.
 
-You cannot change the project. If they ask for a change, describe precisely what you
-would change - which notes, which parameters, what values - and say that applying it is
-not available yet. Do not pretend to have made a change.
+You cannot change the project yourself, but you may propose a change, and the person
+decides. Never say you have made one - you have not, until they press Apply.
+
+To propose, say what you would do in your own words as usual, and then put one fenced
+block at the very end, exactly like this and nothing after it:
+
+```cocompose-change
+{"description": "Move the melody up a tone",
+ "keeps": {"rhythm": true, "velocity": true},
+ "notes": [{"what": "change", "id": "<the id given with the note>", "pitch": 62}]}
+```
+
+Rules for that block, all of them enforced by the app - a block that breaks one is
+refused and the person sees nothing:
+
+- Only notes that were attached. Every id must be one printed with the attachment.
+- "what" is "change", "add" or "remove". For "change", give only the fields you are
+  changing: "pitch" (0-127), "velocity" (1-127), "start_beat", "length_beats".
+- "keeps" is what you promise not to disturb: "rhythm", "velocity", "pitch". The app
+  measures the result and refuses the whole thing if a promise was broken, so promise
+  only what you mean.
+- To change a mixer parameter instead, use "parameters": [{"owner": "<insert id>",
+  "plugin": "<effect id>", "parameter": "<parameter id>", "value": 0.0-1.0}], all three
+  ids copied from the attached insert, and the value normalised from 0 to 1. Only an
+  insert that was attached may be touched.
+- Omit the block entirely if they asked a question rather than for a change, or if you
+  are unsure. No block is a fine answer; a guessed one is not.
 
 Refer to things the way the person sees them: bar numbers, channel names, note pitches.
 Be brief and concrete. If the attachment is empty or no longer in the song, say so."""
@@ -108,9 +133,11 @@ def describe_attachments(attachments):
                 lines.append("    channel '%s' playing %s"
                              % (part.get("channel_name", ""), part.get("instrument", "")))
                 for note in part.get("notes", []):
-                    lines.append("      pitch %d  beat %.3f  length %.3f  velocity %d"
+                    # The id is here because a proposal has to name the note it moves,
+                    # and the app only accepts ids it handed out.
+                    lines.append("      pitch %d  beat %.3f  length %.3f  velocity %d  id %s"
                                  % (note["pitch"], note["start_beat"],
-                                    note["length_beats"], note["velocity"]))
+                                    note["length_beats"], note["velocity"], note["id"]))
 
         elif a["kind"] == "insert":
             lines.append("    insert %s '%s', gain %.2f dB, pan %.2f, out to %s"
@@ -183,6 +210,36 @@ def suggested_change(request):
             }
 
     return None
+
+
+CHANGE_BLOCK = re.compile(r"```cocompose-change\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def parse_change(text):
+    """Pulls a proposed change out of an answer, and says what is left to read.
+
+    A model writes prose and, if it wants to change something, one fenced block. The
+    block is lifted out so the person reads the sentence rather than the JSON, and
+    passed on untouched - the app checks it against the attachment, the promises it
+    makes and the current revision, exactly as it checks the echo bridge's. Nothing
+    here decides whether a change is allowed; it only decides whether one was asked for.
+
+    Anything malformed is treated as no change at all. A half-understood edit to
+    someone's music is worse than an answer with no button on it.
+    """
+    found = CHANGE_BLOCK.search(text or "")
+    if not found:
+        return text, None
+
+    try:
+        change = json.loads(found.group(1))
+    except ValueError:
+        return text, None
+
+    if not isinstance(change, dict) or not (change.get("notes") or change.get("parameters")):
+        return text, None
+
+    return (text[:found.start()] + text[found.end():]).strip(), change
 
 
 class Echo:
@@ -285,16 +342,19 @@ def serve(project, provider, once=False):
 
             try:
                 text = provider.answer(request, stream)
-                reply = {"request_id": request_id, "status": "ok",
-                         "text": text, "provider": provider.name}
 
-                # Only the echo bridge invents a change. A real provider's suggestions
-                # will come from what it actually said, once that is parsed; until then
-                # it is better to send nothing than to make one up on its behalf.
+                # The echo bridge has no model to ask, so it works one out mechanically;
+                # a real provider's comes from what it actually wrote. Either way the
+                # app is the one that decides whether it is allowed.
                 if isinstance(provider, Echo):
                     change = suggested_change(request)
-                    if change:
-                        reply["change"] = change
+                else:
+                    text, change = parse_change(text)
+
+                reply = {"request_id": request_id, "status": "ok",
+                         "text": text, "provider": provider.name}
+                if change:
+                    reply["change"] = change
 
                 atomic_write(reply_file, reply)
                 print("answered", len(text), "characters")

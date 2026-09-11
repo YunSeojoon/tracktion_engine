@@ -5,32 +5,6 @@
 
 namespace live
 {
-// Restoring a ValueTree property alone does not restore a parameter's explicit
-// playback value. Undo must call the same parameter API as the original edit.
-class ParameterAction final : public UndoableAction
-{
-public:
-    ParameterAction (te::Edit& e, const String& plugin, const String& parameter, float oldValue, float newValue)
-        : edit (e), pluginID (plugin), parameterID (parameter), before (oldValue), after (newValue) {}
-    bool perform() override { return set (after); }
-    bool undo() override { return set (before); }
-private:
-    te::Edit& edit;
-    String pluginID, parameterID;
-    float before, after;
-    bool set (float value)
-    {
-        for (auto* plugin : te::getAllPlugins (edit, true))
-            if (plugin->itemID.toString() == pluginID)
-                if (auto parameter = plugin->getAutomatableParameterByID (parameterID))
-                {
-                    parameter->setParameter (value, sendNotification);
-                    return true;
-                }
-        return false;
-    }
-};
-
 /** Converts a schema 1 document — flat tracks holding their own clips — into the
     pattern model. Each track becomes a channel with its own playlist lane, and each
     clip becomes a pattern placed once, keeping every original id so external tools

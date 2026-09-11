@@ -118,6 +118,32 @@ public:
 };
 
 //==============================================================================
+// Restoring a ValueTree property alone does not restore a parameter's explicit
+// playback value. Undo must call the same parameter API as the original edit.
+class ParameterAction final : public UndoableAction
+{
+public:
+    ParameterAction (te::Edit& e, const String& plugin, const String& parameter, float oldValue, float newValue)
+        : edit (e), pluginID (plugin), parameterID (parameter), before (oldValue), after (newValue) {}
+    bool perform() override { return set (after); }
+    bool undo() override { return set (before); }
+private:
+    te::Edit& edit;
+    String pluginID, parameterID;
+    float before, after;
+    bool set (float value)
+    {
+        for (auto* plugin : te::getAllPlugins (edit, true))
+            if (plugin->itemID.toString() == pluginID)
+                if (auto parameter = plugin->getAutomatableParameterByID (parameterID))
+                {
+                    parameter->setParameter (value, sendNotification);
+                    return true;
+                }
+        return false;
+    }
+};
+
 class Model  : private ValueTree::Listener
 {
 public:
@@ -407,14 +433,26 @@ public:
         return trackFor (insertTrackID (ownerID));
     }
 
-    te::AutomatableParameter* automatableParameter (const String& ownerID, const String& pluginID,
-                                                    const String& parameterID) const
+    /** Either name works. An automation lane stores the engine's own id for the plugin;
+        the read tools only ever hand out the uid of the EFFECT it was built from, so a
+        caller that was told an id can use the id it was told. */
+    te::Plugin* pluginFor (const String& ownerID, const String& pluginID) const
     {
         if (auto* track = trackForAutomationSource (ownerID))
             for (auto* plugin : track->pluginList)
-                if (plugin->itemID.toString() == pluginID)
-                    if (auto found = plugin->getAutomatableParameterByID (parameterID))
-                        return found.get();
+                if (plugin->itemID.toString() == pluginID
+                     || (pluginID.isNotEmpty()
+                          && plugin->state[ids::pluginEffect].toString() == pluginID))
+                    return plugin;
+        return nullptr;
+    }
+
+    te::AutomatableParameter* automatableParameter (const String& ownerID, const String& pluginID,
+                                                    const String& parameterID) const
+    {
+        if (auto* plugin = pluginFor (ownerID, pluginID))
+            if (auto found = plugin->getAutomatableParameterByID (parameterID))
+                return found.get();
         return nullptr;
     }
 

@@ -993,20 +993,26 @@ private:
             if (message.requestID != requestID || message.from != live::ChatMessage::From::person)
                 continue;
 
+            Array<var> allowedNotes, allowedInserts;
+
             for (const auto& attachment : message.attachments)
             {
-                if (attachment.kind != live::Attachment::Kind::notes)
-                    continue;
+                if (attachment.kind == live::Attachment::Kind::notes)
+                {
+                    fields->setProperty ("pattern", attachment.patternID);
+                    fields->setProperty ("channel", attachment.noteChannelID);
 
-                fields->setProperty ("pattern", attachment.patternID);
-                fields->setProperty ("channel", attachment.noteChannelID);
-
-                Array<var> allowed;
-                for (const auto& noteID : attachment.noteIDs)
-                    allowed.add (noteID);
-                fields->setProperty ("allowed_notes", allowed);
-                break;
+                    for (const auto& noteID : attachment.noteIDs)
+                        allowedNotes.add (noteID);
+                }
+                else if (attachment.kind == live::Attachment::Kind::insert)
+                {
+                    allowedInserts.add (attachment.insertID);
+                }
             }
+
+            fields->setProperty ("allowed_notes", allowedNotes);
+            fields->setProperty ("allowed_inserts", allowedInserts);
             break;
         }
 

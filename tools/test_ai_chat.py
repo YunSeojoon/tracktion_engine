@@ -622,6 +622,148 @@ def check_a_person_can_use_it(exe, folder, report):
         s.close()
 
 
+def check_a_written_answer_can_carry_a_change(report):
+    """A real provider proposes by writing a block, so the reading of that block is the
+    whole connection between what a model says and what the app will offer.
+
+    It needs no app and no network: it is the one piece that decides whether an answer
+    turns into a button, and it must never turn prose into an edit by accident."""
+    from cocompose_bridge import parse_change
+
+    said = ('Those four notes sit low against the pad. Up a tone keeps the shape.\n\n'
+            '```cocompose-change\n'
+            '{"description": "Up a tone", "keeps": {"rhythm": true},\n'
+            ' "notes": [{"what": "change", "id": "n1", "pitch": 62}]}\n'
+            '```')
+    text, change = parse_change(said)
+    report.expect('a change written in the answer is read out of it',
+                  change is not None and change['notes'][0]['id'] == 'n1')
+    report.expect('the person reads the sentence, not the JSON',
+                  'cocompose-change' not in text and 'Up a tone keeps the shape.' in text)
+
+    text, change = parse_change('Those notes are fine as they are.')
+    report.expect('an answer with no block proposes nothing', change is None)
+    report.expect('an answer with no block is left alone',
+                  text == 'Those notes are fine as they are.')
+
+    broken = 'Sure.\n```cocompose-change\n{"notes": [{"what": "change",\n```'
+    text, change = parse_change(broken)
+    report.expect('a half-written block is not an edit', change is None)
+
+    empty = 'Sure.\n```cocompose-change\n{"description": "nothing"}\n```'
+    report.expect('a block that changes nothing is not a change',
+                  parse_change(empty)[1] is None)
+
+    report.expect('nothing to read is not a change', parse_change(None)[1] is None)
+
+
+def check_a_mixer_proposal_uses_the_ids_it_was_given(exe, folder, report):
+    """A2, the insert half: a proposal about a mixer insert has to work with the ids the
+    read tools handed out, and must not reach an insert nobody attached.
+
+    The notes half is held in by the pattern and channel an attachment names. A parameter
+    change has no equivalent, so the scope list is the only thing standing between a
+    question about four notes and an answer that moves a fader."""
+    folder.mkdir(parents=True, exist_ok=True)
+    s = Session(exe, folder).open()
+    project = folder / "project.json"
+
+    try:
+        prepare_song(s)
+        s.settled()
+
+        # An effect to aim at. Written the way a person would add one, through the project.
+        def add_reverb(state):
+            insert = state["mixer"]["inserts"][0]
+            insert.setdefault("effects", []).append(
+                {"id": "fx-verb", "type": "reverb", "bypass": False, "wet": 0.5,
+                 "parameters": []})
+            return insert["id"]
+
+        _, insert_id = apply_change(project, add_reverb)
+        wait_for(lambda: any(e["id"] == "fx-verb" for e in
+                             tool(project, "inspect_insert", {"insert": insert_id})
+                                 ["result"]["effects"]), timeout=20)
+
+        looked = tool(project, "inspect_insert", {"insert": insert_id})["result"]
+        effect = next(e for e in looked["effects"] if e["id"] == "fx-verb")
+        report.expect("the insert reports parameters to aim at",
+                      len(effect["parameters"]) > 0, len(effect["parameters"]))
+        if not effect["parameters"]:
+            return
+
+        parameter = effect["parameters"][0]
+        was = parameter["value"]
+        target = round(0.25 if was > 0.5 else 0.75, 3)
+        revision = read(folder / "sync-status.json")["revision"]
+
+        def propose(scope, value=target):
+            return tool(project, "create_proposal", {
+                "description": "AI: set " + parameter["name"],
+                "base_revision": read(folder / "sync-status.json")["revision"],
+                "allowed_inserts": scope,
+                "parameters": [{"owner": insert_id, "plugin": "fx-verb",
+                                "parameter": parameter["id"], "value": value}]})
+
+        # --- the ids a read tool gave out are the ids a write tool takes ---------------
+        made = propose([insert_id])
+        report.expect("the effect id from inspect_insert is one create_proposal accepts",
+                      made["status"] == "ok", made.get("error", {}).get("message", ""))
+
+        # --- and nothing has moved yet ------------------------------------------------
+        report.expect("working out a mixer change is not a mixer change",
+                      read(folder / "sync-status.json")["revision"] == revision)
+
+        # --- an id that names nothing resolves to nothing ----------------------------
+        # Accepting two spellings of a plugin id is only safe while the empty string is
+        # neither of them: every plugin without an effect uid reads as "" there.
+        nameless = tool(project, "create_proposal", {
+            "description": "AI: no such plugin",
+            "base_revision": read(folder / "sync-status.json")["revision"],
+            "allowed_inserts": [insert_id],
+            "parameters": [{"owner": insert_id, "plugin": "",
+                            "parameter": parameter["id"], "value": target}]})
+        report.expect("an empty plugin id matches no plugin",
+                      nameless["status"] == "error"
+                      and nameless["error"]["code"] == "NOT_FOUND",
+                      nameless.get("error", {}).get("code", nameless["status"]))
+
+        # --- an insert nobody attached is out of reach --------------------------------
+        elsewhere = propose([])
+        report.expect("with no insert attached, a parameter change is refused",
+                      elsewhere["status"] == "error"
+                      and elsewhere["error"]["code"] == "OUT_OF_SCOPE",
+                      elsewhere.get("error", {}).get("code", elsewhere["status"]))
+
+        other = propose(["insert:some-other-thing"])
+        report.expect("an insert outside what was attached is refused",
+                      other["status"] == "error" and other["error"]["code"] == "OUT_OF_SCOPE",
+                      other.get("error", {}).get("code", other["status"]))
+
+        # --- applying it moves the parameter, and one undo puts it back ---------------
+        applied = tool(project, "apply_proposal",
+                       {"proposal": made["result"]["proposal"]["id"]})
+        report.expect("a mixer proposal applies", applied["status"] == "ok",
+                      applied.get("error", {}).get("message", ""))
+
+        def value_now():
+            fresh = tool(project, "inspect_insert", {"insert": insert_id})["result"]
+            found = next(e for e in fresh["effects"] if e["id"] == "fx-verb")
+            return next(x for x in found["parameters"] if x["id"] == parameter["id"])["value"]
+
+        wait_for(lambda: abs(value_now() - target) < 0.01, timeout=20)
+        report.expect("the parameter is where the proposal said", abs(value_now() - target) < 0.01,
+                      value_now())
+
+        from cocompose import control
+        control(project, "undo")
+        wait_for(lambda: abs(value_now() - was) < 0.01, timeout=20)
+        report.expect("one undo puts the parameter back", abs(value_now() - was) < 0.01,
+                      value_now())
+    finally:
+        s.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -643,6 +785,12 @@ def run(exe, output):
     print()
     print('proposals stay inside the selection')
     check_proposals_stay_inside_the_selection(exe, output / 'proposals', report)
+    print()
+    print('a mixer proposal')
+    check_a_mixer_proposal_uses_the_ids_it_was_given(exe, output / 'mixer', report)
+    print()
+    print('an answer can carry a change')
+    check_a_written_answer_can_carry_a_change(report)
     print()
     print('a person can use it')
     check_a_person_can_use_it(exe, output / 'person', report)
