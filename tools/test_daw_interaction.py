@@ -245,6 +245,104 @@ def check_right_click_asks_instead_of_deleting(exe, folder, report):
         session.close()
 
 
+def check_double_click_opens_the_pattern(exe, folder, report):
+    """D2: double-clicking a clip opens what is in it.
+
+    It used to split the clip. Splitting is something a person does on purpose, and
+    there is a tool and a command for it; meanwhile there was no mouse gesture at all
+    for "let me see the notes in this", which is the thing people try first."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open()
+    try:
+        prepare_song(session)
+        state = session.settled()
+        clips_before = len(state["playlist"]["clips"])
+        start = state["playlist"]["clips"][0]["start"]
+        revision = read(folder / "sync-status.json")["revision"]
+
+        session.run([{"ruler": ["double-click", start + 1.0, start + 1.0, 0]}])
+        time.sleep(1.0)
+
+        report.expect("double-clicking a clip does not split it",
+                      len(session.settled()["playlist"]["clips"]) == clips_before,
+                      (clips_before, len(session.settled()["playlist"]["clips"])))
+        report.expect("and entering the editor is not an edit",
+                      read(folder / "sync-status.json")["revision"] == revision,
+                      read(folder / "sync-status.json")["revision"])
+        report.expect("the note editor is open",
+                      read(folder / "chat-inspector.json").get("editor_open") is True,
+                      read(folder / "chat-inspector.json").get("editor_open"))
+        report.expect("it says which pattern and channel it is showing",
+                      bool(read(folder / "chat-inspector.json").get("editor_heading")),
+                      read(folder / "chat-inspector.json").get("editor_heading"))
+    finally:
+        session.close()
+
+
+def check_the_editor_says_how_far_an_edit_reaches(exe, folder, report):
+    """D2: a pattern placed twice is edited in both places at once.
+
+    Someone who opened the editor by double-clicking one clip will think they are
+    editing that clip. They are not, and the window has to say so before they touch
+    anything rather than after."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open()
+    try:
+        prepare_song(session)
+        state = session.settled()
+        start = state["playlist"]["clips"][0]["start"]
+
+        session.run([{"ruler": ["double-click", start + 1.0, start + 1.0, 0]}])
+        time.sleep(1.0)
+        heading = read(folder / "chat-inspector.json").get("editor_heading") or ""
+        report.expect("one placement is described as one",
+                      "one place" in heading, heading)
+
+        # Place the same pattern again, somewhere else.
+        session.run([{"select_lane": 0}, {"place": [0, 64.0]}])
+        time.sleep(1.0)
+        heading = read(folder / "chat-inspector.json").get("editor_heading") or ""
+        report.expect("a second placement is announced before anything is edited",
+                      "2 places" in heading and "all of them" in heading, heading)
+    finally:
+        session.close()
+
+
+def check_select_does_not_draw(exe, folder, report):
+    """D2: clicking empty grid used to write a note and start a selection box at the
+    same time, so every attempt to drag out a selection left a note behind."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+    try:
+        prepare_song(session)
+        session.settled()
+
+        # Open the editor and find out what is in it.
+        session.run([{"select_channel": 0}, {"note": [72, 0.0, 1.0, 100]}])
+        time.sleep(0.8)
+        here = tool(project, "get_selection")["result"]
+
+        def note_count():
+            part = tool(project, "inspect_pattern",
+                        {"pattern": here["pattern"], "channel": here["channel"]})["result"]
+            return sum(len(p["notes"]) for p in part["parts"])
+
+        before = note_count()
+
+        session.run([{"piano_tool": "select"}, {"piano_click": [90, 4.0]}])
+        time.sleep(0.8)
+        report.expect("clicking empty grid with Select writes no note",
+                      note_count() == before, (before, note_count()))
+
+        session.run([{"piano_tool": "draw"}, {"piano_click": [90, 4.0]}])
+        time.sleep(0.8)
+        report.expect("clicking empty grid with Draw writes one",
+                      note_count() == before + 1, (before, note_count()))
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -263,6 +361,15 @@ def run(exe, output):
     print()
     print("right-click asks rather than destroys")
     check_right_click_asks_instead_of_deleting(exe, output / "menus", report)
+    print()
+    print("double-click opens what is in the clip")
+    check_double_click_opens_the_pattern(exe, output / "open", report)
+    print()
+    print("the editor says how far an edit reaches")
+    check_the_editor_says_how_far_an_edit_reaches(exe, output / "reach", report)
+    print()
+    print("Select selects, Draw draws")
+    check_select_does_not_draw(exe, output / "tools", report)
 
     print()
     if report.unchecked:

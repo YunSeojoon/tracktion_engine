@@ -23,7 +23,7 @@ enum
     undo, redo, addChannel, newPattern, placePattern, makeUnique, splitClip, duplicateClip,
     transposeUp, transposeDown,
     metronome, focusNextPanel, scanPlugins, audioSettings, savePreset, loadPreset, about,
-    returnToStart, followPlayhead, stopPlayback,
+    returnToStart, followPlayhead, stopPlayback, openPianoRoll,
     togglePanelBase // + panel index
 };
 }
@@ -258,7 +258,7 @@ public:
                         commands::undo, commands::redo,
                         commands::addChannel, commands::newPattern, commands::placePattern,
                         commands::makeUnique, commands::splitClip, commands::duplicateClip,
-                        commands::transposeUp, commands::transposeDown,
+                        commands::transposeUp, commands::transposeDown, commands::openPianoRoll,
                         commands::metronome, commands::focusNextPanel, commands::scanPlugins,
                         commands::audioSettings, commands::savePreset, commands::loadPreset,
                         commands::about });
@@ -285,6 +285,11 @@ public:
                 break;
             case commands::stopPlayback:
                 info.setInfo ("Stop", "Stop, or return to where playing began", "Transport", 0);
+                break;
+            case commands::openPianoRoll:
+                info.setInfo ("Piano roll", "Open the notes of the selected pattern", "Edit", 0);
+                info.addDefaultKeypress (KeyPress::returnKey, ModifierKeys::noModifiers);
+                info.setActive (project.model->patternFor (workspace.selection.pattern()).isValid());
                 break;
             case commands::returnToStart:
                 info.setInfo ("Back to start", "Move the playhead to the beginning", "Transport", 0);
@@ -478,6 +483,10 @@ public:
                     startPlayback = true;
                     project.edit->getTransport().play (false);
                 }
+                return true;
+
+            case commands::openPianoRoll:
+                workspace.showNoteEditor();
                 return true;
 
             case commands::stopPlayback:
@@ -1349,6 +1358,7 @@ private:
                              + workspace.chatPanel().offeredProposal() + ":"
                              + (workspace.chatPanel().entryHasFocus() ? "1" : "0") + ":"
                              + String (workspace.suggestedNoteCount()) + ":"
+                             + workspace.noteEditorHeading() + ":"
                              + String (project.revision);
 
         if (shape == lastInspectorShape)
@@ -1366,6 +1376,8 @@ private:
             fields->setProperty ("waiting", bridge != nullptr && bridge->isWaiting());
             fields->setProperty ("conversation_id", conversation != nullptr ? conversation->id() : String());
             fields->setProperty ("suggested_notes_drawn", workspace.suggestedNoteCount());
+            fields->setProperty ("editor_open", workspace.isNoteEditorOpen());
+            fields->setProperty ("editor_heading", workspace.noteEditorHeading());
             // Which component has the keyboard, so a check about "while typing" can see
             // whether it managed to put the keyboard where it meant to.
             if (auto* focused = Component::getCurrentlyFocusedComponent())
@@ -1766,6 +1778,17 @@ private:
             const auto to = gesture.size() > 2 ? static_cast<double> (gesture[2]) : from;
             const auto lane = gesture.size() > 3 ? static_cast<int> (gesture[3]) : -1;
             return workspace.playlistGrid().pointerGesture (gesture[0].toString(), from, to, lane);
+        }
+
+        if (action.hasProperty ("piano_tool"))
+            return workspace.setNoteTool (action["piano_tool"].toString());
+
+        if (action.hasProperty ("piano_click"))
+        {
+            const auto where = action["piano_click"];
+            return where.isArray() && where.size() == 2
+                    && workspace.clickNoteGrid (static_cast<int> (where[0]),
+                                                static_cast<double> (where[1]));
         }
 
         if (action.hasProperty ("grid_key"))

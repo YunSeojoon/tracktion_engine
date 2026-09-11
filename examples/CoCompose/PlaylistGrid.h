@@ -343,8 +343,36 @@ public:
         if (e.y < rulerHeight)
             return;
 
+        // It used to split. Splitting is a thing you do deliberately, with a tool or a
+        // command, and there is one of each; opening what you double-clicked is what
+        // double-clicking means everywhere else, and until now there was no mouse
+        // gesture at all for "let me see the notes in this".
+        //
+        // The first click of the pair has already selected the clip, which is exactly
+        // what opening it needs and is why entering this way leaves nothing behind.
         if (auto hit = clipAt (e.getPosition()); hit.isValid())
-            split (hit, beatAt (e.x));
+        {
+            selection.setLane (hit[ids::lane].toString());
+            selection.setPattern (hit[ids::pattern].toString());
+
+            if (runCommand)
+                runCommand ("Piano roll");
+        }
+    }
+
+    /** Enter opens whatever is picked out, the same editor the double-click opens. */
+    bool openSelection()
+    {
+        if (selected.isEmpty())
+            return false;
+
+        auto clip = model.instanceFor (selected[0]);
+        if (! clip.isValid())
+            return false;
+
+        selection.setLane (clip[ids::lane].toString());
+        selection.setPattern (clip[ids::pattern].toString());
+        return runCommand && runCommand ("Piano roll");
     }
 
     void mouseWheelMove (const MouseEvent& e, const MouseWheelDetails& wheel) override
@@ -363,6 +391,7 @@ public:
                 deleteSelection();
             return true;
         }
+        if (key == KeyPress::returnKey) { return openSelection(); }
         if (key == KeyPress ('d', ModifierKeys::ctrlModifier, 0)) { duplicateSelection(); return true; }
         if (key == KeyPress ('u', ModifierKeys::ctrlModifier, 0)) { makeSelectionUnique(); return true; }
         return false;
@@ -1071,6 +1100,17 @@ public:
             mouseDrag (event (up, true));
 
         mouseUp (event (up, what.endsWith ("drag")));
+
+        // A double-click is a click and then the second one, in that order, which is
+        // the order that matters: whatever the first click did has already happened by
+        // the time the second arrives.
+        if (what == "double-click")
+        {
+            mouseDown (event (down, false));
+            mouseDoubleClick (event (down, false));
+            mouseUp (event (down, false));
+        }
+
         return true;
     }
 

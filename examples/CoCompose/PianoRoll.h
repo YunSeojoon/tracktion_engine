@@ -31,9 +31,21 @@ public:
         zoom.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
         zoom.onValueChange = [this] { resized(); repaint(); };
 
+        tools.addItem ("Select", 1);
+        tools.addItem ("Draw", 2);
+        tools.setSelectedId (2, dontSendNotification);
+        tools.onChange = [this]
+        {
+            tool = tools.getSelectedId() == 1 ? select : draw;
+            describeWhatIsOpen();
+        };
+
         quantise.onClick = [this] { quantiseSelection(); };
         duplicate.onClick = [this] { duplicateSelection(); };
         deleteNotes.onClick = [this] { deleteSelection(); };
+
+        heading.setColour (Label::textColourId, theme::text);
+        heading.setFont (Font (FontOptions (12.0f, Font::bold)));
 
         hint.setColour (Label::textColourId, theme::textDim);
         hint.setFont (Font (FontOptions (11.0f)));
@@ -48,6 +60,8 @@ public:
 
         addAndMakeVisible (viewport);
         addAndMakeVisible (*lane);
+        addAndMakeVisible (heading);
+        addAndMakeVisible (tools);
         addAndMakeVisible (snap);
         addAndMakeVisible (zoom);
         addAndMakeVisible (quantise);
@@ -56,16 +70,23 @@ public:
         addAndMakeVisible (hint);
 
         setWantsKeyboardFocus (true);
-        setSize (1000, 560);
+        describeWhatIsOpen();
+        setSize (1000, 580);
         startTimer (200);
     }
 
     ~PianoRollEditor() override { stopTimer(); releasePreview(); }
 
+    /** A held preview note whose window loses the keyboard would sound forever: the
+        mouse-up that was going to stop it goes somewhere else now. */
+    void focusLost (FocusChangeType) override { releasePreview(); }
+
     void resized() override
     {
         auto r = getLocalBounds().reduced (8);
+        heading.setBounds (r.removeFromTop (18));
         auto bar = r.removeFromTop (28);
+        tools.setBounds (bar.removeFromLeft (90).reduced (2));
         snap.setBounds (bar.removeFromLeft (86).reduced (2));
         zoom.setBounds (bar.removeFromLeft (150).reduced (2));
         quantise.setBounds (bar.removeFromLeft (90).reduced (2));
@@ -197,6 +218,21 @@ private:
             layOutGrid();
             grid->repaint();
         }
+
+        // How far an edit here reaches depends on how many places the pattern is
+        // played, and that can change while the window is open - somebody drops another
+        // copy into the arrangement, or an outside edit does. The heading has to be
+        // true when it is read, not when the window was opened.
+        auto places = 0;
+        for (auto clip : model.instances())
+            if (clip[ids::pattern].toString() == pattern)
+                ++places;
+
+        if (places != lastPlacementCount)
+        {
+            lastPlacementCount = places;
+            describeWhatIsOpen();
+        }
     }
 
     //==========================================================================
@@ -293,6 +329,36 @@ private:
 
         model.renderIfNeeded();
         grid->repaint();
+    }
+
+    /** Says what this editor is looking at, and what editing it will reach.
+
+        A pattern can be placed in several parts of the song, and editing its notes is
+        heard in all of them. Someone who opened the editor by double-clicking one clip
+        will reasonably think they are editing that clip. They are not, unless it is the
+        only placement - so the window says so before they touch anything. */
+    void describeWhatIsOpen()
+    {
+        auto tree = patternTree();
+        auto owner = model.channelFor (channel);
+
+        auto places = 0;
+        for (auto clip : model.instances())
+            if (clip[ids::pattern].toString() == pattern)
+                ++places;
+
+        String text;
+        text << (tree.isValid() ? tree[ids::name].toString() : String ("(no pattern)"))
+             << "   -   " << (owner.isValid() ? owner[ids::name].toString() : String ("(no channel)"));
+
+        if (places > 1)
+            text << "   -   played in " << places << " places, and editing changes all of them";
+        else if (places == 1)
+            text << "   -   played in one place";
+        else
+            text << "   -   not placed in the song yet";
+
+        heading.setText (text, dontSendNotification);
     }
 
     void preview (int pitch)
@@ -410,11 +476,24 @@ private:
             {
                 if (! e.mods.isShiftDown())
                     owner.selected.clear();
-                dragMode = e.mods.isRightButtonDown() ? none : rubber;
+
+                if (e.mods.isRightButtonDown())
+                {
+                    dragMode = none;
+                    rubberBand = {};
+                    showEmptyMenu();
+                    repaint();
+                    return;
+                }
+
+                dragMode = rubber;
                 rubberStart = e.getPosition();
                 rubberBand = {};
 
-                if (! e.mods.isRightButtonDown() && ! e.mods.isAltDown())
+                // Draw writes notes; Select selects them. Having one gesture do both -
+                // clicking empty space wrote a note and also started a selection box -
+                // meant every attempt to drag out a selection left a note behind.
+                if (owner.tool == PianoRollEditor::draw && ! e.mods.isAltDown())
                     addNoteAt (e.getPosition());
 
                 repaint();
@@ -600,6 +679,38 @@ private:
             }
         }
 
+        /** The menu for empty grid: what a person can do here when they have not
+            pointed at a note. Kept small on purpose - a long menu of things that need
+            a selection, all greyed out, tells nobody anything. */
+        void showEmptyMenu()
+        {
+            PopupMenu menu;
+            menu.addItem (1, "Select tool", true, owner.tool == PianoRollEditor::select);
+            menu.addItem (2, "Draw tool", true, owner.tool == PianoRollEditor::draw);
+            menu.addSeparator();
+            menu.addItem (3, "Select everything", owner.sequence().getNumChildren() > 0);
+            menu.addSeparator();
+            menu.addItem (4, "Ask AI about this part");
+
+            menu.showMenuAsync (PopupMenu::Options(), [this] (int chosen)
+            {
+                switch (chosen)
+                {
+                    case 1: owner.setTool (PianoRollEditor::select); break;
+                    case 2: owner.setTool (PianoRollEditor::draw);   break;
+                    case 3:
+                        owner.selected.clearQuick();
+                        for (auto note : owner.sequence())
+                            owner.selected.add (Model::uidOf (note));
+                        break;
+                    case 4: if (owner.askAboutSelection) owner.askAboutSelection(); break;
+                    default: break;
+                }
+
+                repaint();
+            });
+        }
+
         /** What can be done to the notes that are picked out. Everything here acts on
             the whole selection and goes in as one transaction, so taking it back is one
             undo however many notes it touched. */
@@ -760,6 +871,8 @@ private:
     std::unique_ptr<Grid> grid;
     std::unique_ptr<VelocityLane> lane;
     bool scrolledToNotes = false;
+    Label heading;
+    ComboBox tools;
     ComboBox snap;
     Slider zoom;
     TextButton quantise { "Quantise" }, duplicate { "Duplicate" }, deleteNotes { "Delete" };
@@ -769,6 +882,43 @@ private:
 public:
     /** Which notes are picked out right now, so a question can be asked about exactly
         those and nothing else. */
+    /** What the left button does on empty space. Two tools, named on screen, because a
+        person needs to know which one they are holding before they click - and because
+        one gesture doing both jobs did neither of them properly. */
+    enum Tool { select, draw };
+    Tool tool = draw;
+
+    void setTool (Tool which)
+    {
+        tool = which;
+        tools.setSelectedId (which == select ? 1 : 2, dontSendNotification);
+        describeWhatIsOpen();
+    }
+
+    String heading_() const { return heading.getText(); }
+
+    /** Clicks the grid where a pitch and a beat meet, through the real handlers.
+        Same caveat as the arrangement's: this proves the gesture, not the window
+        manager. */
+    bool clickGrid (int pitch, double beat, bool rightButton = false)
+    {
+        if (grid == nullptr)
+            return false;
+
+        const auto mods = rightButton ? ModifierKeys (ModifierKeys::rightButtonModifier)
+                                      : ModifierKeys (ModifierKeys::leftButtonModifier);
+        const auto row = (highestNote - jlimit (lowestNote, highestNote, pitch)) * noteHeight;
+        const Point<float> where ((float) (keyboardWidth + roundToInt (beat * beatWidth())),
+                                  (float) (row + noteHeight / 2));
+
+        const MouseEvent e (Desktop::getInstance().getMainMouseSource(), where, mods,
+                            1.0f, 0.0f, 0.0f, 0.0f, 0.0f, grid.get(), grid.get(),
+                            Time::getCurrentTime(), where, Time::getCurrentTime(), 1, false);
+        grid->mouseDown (e);
+        grid->mouseUp (e);
+        return true;
+    }
+
     StringArray selectedNotes() const { return selected; }
 
     /** Asks the app to attach whatever is picked out here to the chat. Set by the app;
@@ -805,6 +955,7 @@ public:
 private:
     String lastSignature;
     int previewing = -1;
+    int lastPlacementCount = -1;
 
     friend class Grid;
 };

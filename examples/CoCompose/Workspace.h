@@ -1657,31 +1657,24 @@ private:
         if (! following)
             return;
 
-        // Anything that moved the view other than this timer was a person, and a person
-        // moving the view means they want to look at something else.
-        if (viewport.getViewPositionX() != lastScrolledTo)
-        {
-            if (! pausedByHand)
-            {
-                pausedByHand = true;
-                if (changed != nullptr)
-                    changed();
-            }
-            lastScrolledTo = viewport.getViewPositionX();
-        }
-
         auto& transport = model.edit.getTransport();
+
+        // Scrolling only means "leave me where I am" while something is playing. When
+        // nothing is, there is nothing to be dragged away from, and treating a view
+        // that moved for any other reason - a relayout, a window resize - as a person
+        // scrolling would announce a pause and unannounce it in the same tick, twelve
+        // times a second.
         if (! transport.isPlaying())
         {
-            // Stopped is a fresh start: whatever they were looking at, the next play is
-            // a new intention and following resumes with it.
-            if (pausedByHand)
-            {
-                pausedByHand = false;
-                if (changed != nullptr)
-                    changed();
-            }
+            lastScrolledTo = viewport.getViewPositionX();
+            setPaused (false);
             return;
+        }
+
+        if (viewport.getViewPositionX() != lastScrolledTo)
+        {
+            lastScrolledTo = viewport.getViewPositionX();
+            setPaused (true);
         }
 
         if (pausedByHand)
@@ -1703,6 +1696,18 @@ public:
 private:
     bool following = true, pausedByHand = false;
     int lastScrolledTo = 0;
+
+    /** Says so once, when it actually changes. Anything that tells the rest of the app
+        something happened has to be sure something did. */
+    void setPaused (bool nowPaused)
+    {
+        if (pausedByHand == nowPaused)
+            return;
+
+        pausedByHand = nowPaused;
+        if (changed != nullptr)
+            changed();
+    }
 
     void notify() { if (changed != nullptr) changed(); }
 
@@ -2090,10 +2095,28 @@ public:
 
     /** Opens the note editor for the selected channel in the selected pattern. Its
         window is owned here so it closes with the work surface. */
-    void openPianoRoll()
+    /** `followTheMusic` picks a channel the pattern actually plays when the selected
+        one has no part in it. That is right when opening a clip to look at it - a drum
+        clip should not present the bass's empty grid - and wrong when a note is about
+        to be written, because a channel with no part yet is exactly the channel whose
+        part is being created. Writing must not be redirected somewhere else. */
+    void openPianoRoll (bool followTheMusic = false)
     {
-        auto channel = model.channelFor (selection.channel());
         auto pattern = model.patternFor (selection.pattern());
+        auto channel = model.channelFor (selection.channel());
+
+        if (followTheMusic && pattern.isValid()
+             && (! channel.isValid()
+                  || ! Model::findSequence (pattern, selection.channel()).isValid()))
+            for (auto sequence : pattern)
+                if (sequence.hasType (ids::SEQUENCE))
+                    if (auto owner = model.channelFor (sequence[ids::channel].toString()); owner.isValid())
+                    {
+                        channel = owner;
+                        selection.setChannel (Model::uidOf (owner));
+                        break;
+                    }
+
         if (! channel.isValid() || ! pattern.isValid())
             return;
 
@@ -2385,6 +2408,36 @@ public:
 
     /** How many notes the editor is drawing as a suggestion. Zero when it is closed or
         has nothing to show, which is the same thing to anyone watching. */
+    /** Opens the note editor for whatever is selected. The button, the double-click,
+        Enter and the target menu all come through here, so they cannot drift apart. */
+    void showNoteEditor() { openPianoRoll (true); }
+
+    bool isNoteEditorOpen() const { return pianoRollEditor() != nullptr; }
+
+    String noteEditorHeading() const
+    {
+        if (auto* editor = pianoRollEditor())
+            return editor->heading_();
+        return {};
+    }
+
+    bool setNoteTool (const String& which)
+    {
+        if (auto* editor = pianoRollEditor())
+        {
+            editor->setTool (which == "select" ? PianoRollEditor::select : PianoRollEditor::draw);
+            return true;
+        }
+        return false;
+    }
+
+    bool clickNoteGrid (int pitch, double beat)
+    {
+        if (auto* editor = pianoRollEditor())
+            return editor->clickGrid (pitch, beat);
+        return false;
+    }
+
     int suggestedNoteCount() const
     {
         if (auto* editor = pianoRollEditor())
