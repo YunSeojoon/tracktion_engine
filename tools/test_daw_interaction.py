@@ -452,6 +452,42 @@ def check_erase_and_split_are_chosen_not_stumbled_into(exe, folder, report):
         session.close()
 
 
+def check_no_two_commands_answer_to_one_key(exe, folder, report):
+    """D4: the shortcut table, kept by the code rather than by a document.
+
+    Two commands on one key is not a matter of taste - one of them silently never runs,
+    and which one depends on registration order, so it will be the wrong one about half
+    the time. The app writes out its own commands and their keys, so the table cannot
+    drift from what is actually bound."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open()
+    try:
+        session.settled()
+        table = read(folder / "shortcuts.json")
+        commands = table.get("commands", [])
+        report.expect("the app writes down its own shortcuts", len(commands) > 10, len(commands))
+
+        taken = {}
+        clashes = []
+        for command in commands:
+            for key in command.get("keys", []):
+                if key in taken:
+                    clashes.append("%s and %s both answer to %s"
+                                   % (taken[key], command["name"], key))
+                taken[key] = command["name"]
+
+        report.expect("no two commands answer to the same key", not clashes, clashes)
+
+        # A shortcut nobody can discover is nearly as bad as none: the menu bar is where
+        # the key is printed next to the name, so anything bound should be in a menu.
+        report.expect("the commands that have keys are named",
+                      all(command["name"] for command in commands if command.get("keys")))
+
+        print("     shortcuts in use: " + ", ".join(sorted(taken)[:14]) + " ...")
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -485,6 +521,9 @@ def run(exe, output):
     print()
     print("Alt puts the grid away")
     check_alt_puts_the_grid_away(exe, output / "snap", report)
+    print()
+    print("one key, one command")
+    check_no_two_commands_answer_to_one_key(exe, output / "keys", report)
     print()
     print("Erase and Split are chosen, not stumbled into")
     check_erase_and_split_are_chosen_not_stumbled_into(exe, output / "destructive", report)

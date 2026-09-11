@@ -61,6 +61,7 @@ public:
         commandManager.setFirstCommandTarget (this);
         addKeyListener (commandManager.getKeyMappings());
         setWantsKeyboardFocus (true);
+        writeShortcutTable();
 
         menuBar.setModel (this);
         title.setText ("CoCompose", dontSendNotification);
@@ -1377,6 +1378,36 @@ private:
     /** What the chat is holding, beside the project. It is a readback like state.json:
         written out so a tool can see it, never read back in, and never part of the
         music - attaching something is not an edit. */
+    /** Every command, its category and its keys, written out once at startup.
+
+        The spec asks for one shortcut table that is kept, rather than a list in a
+        document that drifts from the code the week after it is written. This is that
+        table, generated from the commands themselves, so it cannot disagree with them -
+        and a check reads it to make sure no two commands answer to the same key. Two
+        commands on one key is not a style question: one of them silently never runs. */
+    void writeShortcutTable()
+    {
+        Array<var> rows;
+
+        for (auto id : allCommands())
+        {
+            ApplicationCommandInfo info (id);
+            getCommandInfo (id, info);
+
+            Array<var> keys;
+            for (const auto& press : info.defaultKeypresses)
+                keys.add (press.getTextDescription());
+
+            rows.add (live::object ({ { "name", info.shortName },
+                                      { "category", info.categoryName },
+                                      { "keys", keys } }));
+        }
+
+        live::atomicWrite (project.source.getSiblingFile ("shortcuts.json"),
+                           JSON::toString (live::object ({ { "schema", 1 },
+                                                           { "commands", rows } }), false));
+    }
+
     void writeChatInspector()
     {
         // Same reasoning: the packet is only built when what it describes has moved.
