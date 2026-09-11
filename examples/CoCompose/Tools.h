@@ -147,7 +147,9 @@ public:
                                  { "gain", "decibels" },
                                  { "pan", "-1 left to 1 right" } }) },
             { "audio", object ({ { "can_send_audio", false },
-                                 { "reason", "No connection is wired up yet" } }) },
+                                 { "reason", "This build sends no audio to anything: the "
+                                             "attachment is the music as structure, never a "
+                                             "recording of it" } }) },
             { "limits", object ({ { "max_notes_per_answer", maxNotes },
                                   { "max_region_beats", maxRegionBeats } }) } });
     }
@@ -408,6 +410,11 @@ private:
 
         auto sequence = Model::findSequence (model.patternFor (proposal.patternID), proposal.channelID);
 
+        proposal.placements = 0;
+        for (auto clip : model.instances())
+            if (clip[ids::pattern].toString() == proposal.patternID)
+                ++proposal.placements;
+
         if (arguments["notes"].isArray() && ! arguments["notes"].getArray()->isEmpty())
         {
             if (! sequence.isValid())
@@ -466,6 +473,11 @@ private:
                              true);
 
         auto sequence = Model::findSequence (model.patternFor (proposal.patternID), proposal.channelID);
+
+        proposal.placements = 0;
+        for (auto clip : model.instances())
+            if (clip[ids::pattern].toString() == proposal.patternID)
+                ++proposal.placements;
 
         if (! proposal.notes.empty() && ! sequence.isValid())
             throw ToolError (tools::errors::notFound, "The part this would change is gone");

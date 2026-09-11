@@ -116,14 +116,32 @@ public:
         return true;
     }
 
+    /** Shows a change that has been suggested but not made, as an outline where each
+        note would go. It is drawn beside the music rather than instead of it, so the
+        two are never confused, and nothing here can be selected, dragged or deleted:
+        there is nothing there to touch until somebody presses Apply.
+
+        A change about some other pattern or channel is not this editor's business and
+        is dropped rather than drawn somewhere it does not belong. */
+    void showSuggested (const String& patternID, const String& channelID, const var& diff)
+    {
+        suggestedChange = (patternID == pattern && channelID == channel) ? diff : var();
+        repaint();
+    }
+
+    const var& suggested() const { return suggestedChange; }
+
     static constexpr int keyboardWidth = 54;
     static constexpr int velocityLane = 70;
     static constexpr int lowestNote = 24, highestNote = 108;
 
 private:
     //==========================================================================
+    var suggestedChange;
+
     ValueTree patternTree() const { return model.patternFor (pattern); }
     ValueTree sequence() const { return Model::findSequence (patternTree(), channel); }
+
 
     double patternBeats() const
     {
@@ -365,6 +383,8 @@ private:
                 g.fillRoundedRectangle (area.toFloat().reduced (1.5f), 1.5f);
             }
 
+            paintSuggested (g, perBeat);
+
             if (! rubberBand.isEmpty())
             {
                 g.setColour (Colour (0x40ffd479));
@@ -509,6 +529,70 @@ private:
 
         static int rowY (int pitch) { return (highestNote - pitch) * noteHeight; }
         static int pitchAt (int y) { return jlimit (lowestNote, highestNote, highestNote - y / noteHeight); }
+
+        /** A suggested change, drawn as it would be rather than as it is. An outline,
+            never a filled note, because a filled note is something that exists. */
+        void paintSuggested (Graphics& g, double perBeat) const
+        {
+            auto* changes = owner.suggested()["notes"].getArray();
+            if (changes == nullptr)
+                return;
+
+            auto notes = owner.sequence();
+
+            for (const auto& entry : *changes)
+            {
+                const auto what = entry.getProperty ("what", "change").toString();
+                auto note = Model::withID (notes, ids::NOTE, entry["id"].toString());
+
+                // A field is either "it would become this", or unchanged and read from
+                // the note as it stands, or - for a note being added - given outright.
+                auto field = [&entry, &note] (const char* name, const Identifier& existing,
+                                              double fallback)
+                {
+                    if (entry[name].isObject())
+                        return static_cast<double> (entry[name]["now"]);
+                    if (entry.hasProperty (name))
+                        return static_cast<double> (entry[name]);
+                    return note.isValid() ? static_cast<double> (note[existing]) : fallback;
+                };
+
+                if (what == "remove")
+                {
+                    if (! note.isValid())
+                        continue;
+
+                    const auto area = noteArea (note).toFloat();
+                    g.setColour (theme::danger);
+                    g.drawLine (area.getX(), area.getCentreY(), area.getRight(), area.getCentreY(), 2.0f);
+                    continue;
+                }
+
+                const auto pitch = roundToInt (field ("pitch", ids::pitch, 60.0));
+                const auto start = field ("start_beat", ids::start, 0.0);
+                const auto length = field ("length_beats", ids::length, 1.0);
+
+                const Rectangle<int> area { keyboardWidth + roundToInt (start * perBeat),
+                                            rowY (jlimit (lowestNote, highestNote, pitch)),
+                                            std::max (4, roundToInt (length * perBeat)),
+                                            noteHeight - 1 };
+
+                g.setColour (theme::accent.withAlpha (0.18f));
+                g.fillRoundedRectangle (area.toFloat(), 2.0f);
+                g.setColour (theme::accent);
+                g.drawRoundedRectangle (area.toFloat().reduced (0.5f), 2.0f, 1.5f);
+
+                // A line from where it is to where it would be, so a moved note reads as
+                // one note moving rather than two notes.
+                if (what == "change" && note.isValid())
+                {
+                    const auto from = noteArea (note).toFloat();
+                    g.setColour (theme::accentDim);
+                    g.drawLine (from.getCentreX(), from.getCentreY(),
+                                area.toFloat().getCentreX(), area.toFloat().getCentreY(), 1.0f);
+                }
+            }
+        }
 
         Rectangle<int> noteArea (ValueTree note) const
         {

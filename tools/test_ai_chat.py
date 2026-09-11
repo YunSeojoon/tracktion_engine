@@ -78,6 +78,22 @@ def check_attachments_are_not_edits(exe, folder, report):
                read(folder / 'sync-status.json')['revision'] == before_revision,
                read(folder / 'sync-status.json')['revision'])
 
+        # --- attaching still works with a panel filling the window ---------------------
+        # Maximising hides the other panels, and a person who has just maximised the
+        # playlist to see the arrangement is exactly the person who then wants to ask
+        # about it. Attaching must not depend on the panel beside it being visible.
+        attached_before = len(read(folder / 'chat-inspector.json')['attachments'])
+        s.run([{"panel": [4, "maximise"]}, {"select_lane": 0}, {"pick_clip": [0, 0.0]},
+               {"attach": "region"}])
+        time.sleep(0.6)
+        report.expect('a selection can be attached while a panel is maximised',
+               len(read(folder / 'chat-inspector.json')['attachments']) == attached_before + 1,
+               len(read(folder / 'chat-inspector.json')['attachments']))
+        report.expect('attaching while maximised is still not an edit',
+               read(folder / 'sync-status.json')['revision'] == before_revision)
+        s.run([{"panel": [4, "maximise"]}])
+        time.sleep(0.4)
+
         # --- an attachment does not follow the selection --------------------------------
         # Move the selection somewhere else; the attachment must still name what it named.
         s.run([{"select_channel": 0}, {"attachment": [0, "go"]}])
@@ -394,6 +410,22 @@ def check_proposals_stay_inside_the_selection(exe, folder, report):
             base.update(extra)
             return base
 
+        # --- a shared pattern says how much of the song it changes -----------------
+        # The same pattern placed twice is one pattern. Editing its notes is heard in
+        # both places, so the proposal has to say so before anyone presses Apply.
+        s.run([{"select_pattern": 0}, {"select_lane": 0}, {"place": [0, 64.0]}])
+        time.sleep(0.6)
+        shared = call("create_proposal", scoped({
+            "base_revision": read(folder / "sync-status.json")["revision"],
+            "keeps": {"rhythm": True, "velocity": True},
+            "notes": [{"what": "change", "id": first_four[0], "pitch": 64}]}))
+        report.expect("a proposal says how many places the pattern is played",
+                      shared["status"] == "ok"
+                      and shared["result"]["proposal"]["placements"] == 2,
+                      shared.get("result", {}).get("proposal", {}).get("placements",
+                                                                      shared.get("error")))
+        revision = read(folder / "sync-status.json")["revision"]
+
         # --- a proposal is not a change ------------------------------------------
         made = call("create_proposal", scoped({
             "keeps": {"rhythm": True, "velocity": True},
@@ -552,6 +584,10 @@ def check_a_person_can_use_it(exe, folder, report):
         bridge = start_bridge(folder)
         wait_for(lambda: read(folder / "chat-inspector.json").get("bridge_connected"), timeout=30)
 
+        # With the note editor open, a suggested change has somewhere to be drawn.
+        s.run([{"select_channel": 0}, {"note": [84, 12.0, 1.0, 90]}])
+        time.sleep(0.6)
+
         s.run([{"select_channel": 0}, {"attach": "notes"}])
         time.sleep(0.5)
 
@@ -578,6 +614,22 @@ def check_a_person_can_use_it(exe, folder, report):
                       answer["proposal_diff"]["notes"][0]["pitch"]["now"]
                       == answer["proposal_diff"]["notes"][0]["pitch"]["was"] + 2)
 
+        # --- what is offered is drawn where the notes are, not only written down -----
+        # The inspector is written on its own tick, so give it one.
+        try:
+            wait_for(lambda: read(folder / "chat-inspector.json").get("offered_proposal"),
+                     timeout=10)
+        except TimeoutError:
+            pass
+        inspector = read(folder / "chat-inspector.json")
+        report.expect("the panel says which change it is offering",
+                      inspector.get("offered_proposal") == answer["proposal_id"],
+                      inspector.get("offered_proposal", ""))
+        report.expect("the note editor draws the change as a suggestion",
+                      inspector.get("suggested_notes_drawn", 0)
+                      == len(answer["proposal_diff"]["notes"]),
+                      inspector.get("suggested_notes_drawn", 0))
+
         # The person presses Apply.
         s.run([{"chat": "apply"}])
         time.sleep(1.2)
@@ -594,6 +646,14 @@ def check_a_person_can_use_it(exe, folder, report):
         report.expect("no other note moved",
                       all(changed[i]["pitch"] == original[i]["pitch"]
                           for i in original if i not in touched))
+
+        after_apply = read(folder / "chat-inspector.json")
+        report.expect("nothing is still being offered once it is applied",
+                      not after_apply.get("offered_proposal"),
+                      after_apply.get("offered_proposal", ""))
+        report.expect("and the suggestion stops being drawn",
+                      after_apply.get("suggested_notes_drawn", 0) == 0,
+                      after_apply.get("suggested_notes_drawn", 0))
 
         report.expect("the panel stops offering a change once it is applied",
                       not read(folder / "conversation.json")["messages"][-1]["proposal"]["applied"]

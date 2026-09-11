@@ -2243,6 +2243,25 @@ public:
         return builder.fromRegion (lanes, from, to, revision);
     }
 
+    /** Passes a suggested change to the note editor, so a person can see where the
+        notes would go rather than only read that they would move. Harmless when the
+        editor is closed or showing something else. */
+    void showSuggestedNotes (const String& patternID, const String& channelID, const var& diff)
+    {
+        if (auto* editor = pianoRollEditor())
+            editor->showSuggested (patternID, channelID, diff);
+    }
+
+    /** How many notes the editor is drawing as a suggestion. Zero when it is closed or
+        has nothing to show, which is the same thing to anyone watching. */
+    int suggestedNoteCount() const
+    {
+        if (auto* editor = pianoRollEditor())
+            if (auto* notes = editor->suggested()["notes"].getArray())
+                return notes->size();
+        return 0;
+    }
+
     Attachment noteAttachment (int revision) const
     {
         StringArray notes;

@@ -193,6 +193,16 @@ public:
                        << message.proposalSummary["notes_added"].toString() << " added, "
                        << message.proposalSummary["notes_removed"].toString() << " removed)";
 
+            // A note change edits the pattern, and a pattern can be played in more than
+            // one place. Saying so before Apply is the difference between a change the
+            // person meant and a change they hear three times.
+            const auto placements = static_cast<int> (message.proposalSummary["placements"]);
+            if (placements > 1 && static_cast<int> (message.proposalSummary["notes_changed"])
+                                   + static_cast<int> (message.proposalSummary["notes_added"])
+                                   + static_cast<int> (message.proposalSummary["notes_removed"]) > 0)
+                changeText << newLine << "   this pattern is played in " << placements
+                           << " places, and all of them change";
+
             if (auto* notes = message.proposalDiff["notes"].getArray())
                 for (int i = 0; i < jmin (6, notes->size()); ++i)
                 {
@@ -300,7 +310,9 @@ public:
             cardsOut.add (card);
         }
 
-        return object ({ { "attachments", cardsOut }, { "draft", entry.getText() } });
+        return object ({ { "attachments", cardsOut },
+                         { "draft", entry.getText() },
+                         { "offered_proposal", offered } });
     }
 
     String inspectorText() const

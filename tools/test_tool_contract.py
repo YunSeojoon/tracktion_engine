@@ -191,6 +191,90 @@ def run(exe, output):
             report.expect(name + ": the same answer either way",
                           comparable(inside) == comparable(outside),
                           json.dumps(comparable(inside))[:120])
+        print()
+        print("the recipes run, and stop when they are told no")
+        # The contract asks for the starting recipes to be exercised by the real
+        # validator rather than only written down, with a refusal branch each. A recipe
+        # is only a call order over these tools, so what is being checked here is that
+        # the order is right and that a refusal stops it - not that editing works, which
+        # is checked where editing lives.
+        import cocompose_recipes as recipes
+
+        looked = recipes.diagnose_region(project, start_beat=0.0, end_beat=16.0)
+        report.expect("diagnose-region reads without changing anything",
+                      looked["changed"] is False
+                      and read(folder / "sync-status.json")["revision"] == revision_before)
+        report.expect("diagnose-region does not claim to have heard it",
+                      looked["heard"] is False and bool(looked["why_not_heard"]))
+
+        channel_id = state["channels"][0]["id"]
+        part = tool(project, "inspect_pattern",
+                    {"pattern": pattern_id, "channel": channel_id})["result"]
+        notes = [n["id"] for p in part["parts"] for n in p["notes"]]
+        report.expect("there are notes for the recipes to work on", len(notes) >= 4, len(notes))
+
+        pitched = recipes.rewrite_melody(project, pattern=pattern_id, channel=channel_id,
+                                         notes=notes[:2], semitones=2)
+        report.expect("rewrite-melody proposes rather than edits",
+                      pitched["changed"] is False
+                      and pitched["proposal"]["applied"] is False
+                      and read(folder / "sync-status.json")["revision"] == revision_before)
+        report.expect("rewrite-melody promises the rhythm and the velocities",
+                      pitched["proposal"]["keeps"]["rhythm"] is True
+                      and pitched["proposal"]["keeps"]["velocity"] is True)
+
+        levelled = recipes.tidy_velocity(project, pattern=pattern_id, channel=channel_id,
+                                         notes=notes[:2], velocity=96)
+        report.expect("tidy-velocity keeps pitch and time instead",
+                      levelled["proposal"]["keeps"]["pitch"] is True
+                      and levelled["proposal"]["keeps"]["rhythm"] is True)
+
+        reviewed = recipes.review_insert(project, insert=insert_id)
+        report.expect("review-insert says which part it could not read",
+                      reviewed["changed"] is False and "opaque" in reviewed)
+
+        unavailable = recipes.move_clip(project)
+        report.expect("move-clip says it is not available rather than pretending",
+                      unavailable["status"] == "UNSUPPORTED" and unavailable["changed"] is False)
+
+        # --- and the three ways a recipe is told no ---------------------------------
+        def refused(call_it):
+            try:
+                call_it()
+            except recipes.Refused as no:
+                return no.code
+            return "not refused"
+
+        report.expect("a note outside the selection stops the recipe",
+                      refused(lambda: recipes.propose(project, {
+                          "description": "outside", "pattern": pattern_id,
+                          "channel": channel_id, "allowed_notes": [notes[0]],
+                          "keeps": {}, "notes": [{"what": "change", "id": notes[1],
+                                                  "pitch": 64}]}, False, "x"))
+                      == "OUT_OF_SCOPE")
+
+        report.expect("a broken promise stops the recipe",
+                      refused(lambda: recipes.propose(project, {
+                          "description": "breaks its word", "pattern": pattern_id,
+                          "channel": channel_id, "allowed_notes": notes[:2],
+                          "keeps": {"pitch": True},
+                          "notes": [{"what": "change", "id": notes[0], "pitch": 70}]},
+                          False, "x")) == "LOCKED")
+
+        stale = {"description": "out of date", "pattern": pattern_id,
+                 "channel": channel_id, "allowed_notes": notes[:2], "keeps": {},
+                 "notes": [{"what": "change", "id": notes[0], "pitch": 64}],
+                 "base_revision": revision_before - 1}
+        made = tool(project, "create_proposal", stale)
+        report.expect("music that has moved on stops the recipe",
+                      made["status"] == "error"
+                      and made["error"]["code"] == "STALE_REVISION",
+                      made.get("error", {}).get("code", made["status"]))
+
+        report.expect("none of those refusals changed the music",
+                      read(folder / "sync-status.json")["revision"] == revision_before,
+                      read(folder / "sync-status.json")["revision"])
+
     finally:
         session.close()
 

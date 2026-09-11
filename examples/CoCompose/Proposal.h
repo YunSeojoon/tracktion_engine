@@ -97,6 +97,11 @@ struct Proposal
     std::vector<NoteChange> notes;
     std::vector<ParameterChange> parameters;
 
+    /** How many places in the song this pattern is played. A note change edits the
+        pattern, so it is heard everywhere the pattern is placed - and the person has to
+        be told that before they press Apply, not after. */
+    int placements = 1;
+
     bool applied = false;
 
     var summary() const
@@ -118,6 +123,7 @@ struct Proposal
                          { "notes_added", added },
                          { "notes_removed", removed },
                          { "parameters_changed", static_cast<int> (parameters.size()) },
+                         { "placements", placements },
                          { "keeps", keeps.toJson() } });
     }
 };

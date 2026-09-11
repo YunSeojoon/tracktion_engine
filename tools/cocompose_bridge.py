@@ -132,12 +132,18 @@ def describe_attachments(attachments):
             for part in detail.get("parts", []):
                 lines.append("    channel '%s' playing %s"
                              % (part.get("channel_name", ""), part.get("instrument", "")))
+                allowed = set(a.get("notes_allowed") or [])
                 for note in part.get("notes", []):
                     # The id is here because a proposal has to name the note it moves,
-                    # and the app only accepts ids it handed out.
-                    lines.append("      pitch %d  beat %.3f  length %.3f  velocity %d  id %s"
+                    # and the app only accepts ids it handed out. The whole part is shown
+                    # for context; the mark says which of it may actually be changed.
+                    lines.append("      pitch %d  beat %.3f  length %.3f  velocity %d  id %s%s"
                                  % (note["pitch"], note["start_beat"],
-                                    note["length_beats"], note["velocity"], note["id"]))
+                                    note["length_beats"], note["velocity"], note["id"],
+                                    "  <- may be changed" if note["id"] in allowed else ""))
+                if allowed:
+                    lines.append("    only the notes marked above may appear in a change;"
+                                 " the rest are context")
 
         elif a["kind"] == "insert":
             lines.append("    insert %s '%s', gain %.2f dB, pan %.2f, out to %s"
@@ -197,8 +203,10 @@ def suggested_change(request):
         if not detail:
             continue
 
+        allowed = set(attachment.get("notes_allowed") or [])
+
         for part in detail.get("parts", []):
-            notes = part.get("notes", [])[:4]
+            notes = [n for n in part.get("notes", []) if not allowed or n["id"] in allowed][:4]
             if not notes:
                 continue
 

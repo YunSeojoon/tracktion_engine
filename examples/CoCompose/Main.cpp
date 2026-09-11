@@ -1072,6 +1072,9 @@ private:
         for (const auto& a : attached)
         {
             var detail;
+            Array<var> mayChange;
+            for (const auto& noteID : a.noteIDs)
+                mayChange.add (noteID);
 
             switch (a.kind)
             {
@@ -1097,6 +1100,12 @@ private:
                                      { "taken_at_revision", a.takenAtRevision },
                                      { "still_there", describe.stillExists (a) },
                                      { "notes_selected", static_cast<int> (a.noteIDs.size()) },
+                                     // Which notes may be named in a change, by id. The
+                                     // whole part is sent for context, but a proposal is
+                                     // refused outside this list - so whatever is asked
+                                     // has to be told where the line is, or it will write
+                                     // something that can only be thrown away.
+                                     { "notes_allowed", mayChange },
                                      { "detail", detail } }));
         }
 
@@ -1143,11 +1152,17 @@ private:
 
         // Redrawing the conversation means building it as text, so it is only done when
         // something about it could look different.
+        // Whatever the panel shows has to be in here, or it stops being redrawn when
+        // that thing changes. A proposal being applied is the one that bites: the text
+        // does not move, but the button has to go.
+        const auto& last = conversation->messages().empty() ? live::ChatMessage()
+                                                            : conversation->messages().back();
         const auto shape = String (conversation->messages().size()) + ":"
                              + (conversation->isWaiting() ? "1" : "0") + ":"
-                             + String (conversation->messages().empty()
-                                         ? 0 : conversation->messages().back().text.length()) + ":"
-                             + conversation->id();
+                             + String (last.text.length()) + ":"
+                             + conversation->id() + ":"
+                             + last.proposalID + ":"
+                             + (static_cast<bool> (last.proposalSummary["applied"]) ? "1" : "0");
 
         auto stated = bridge->connection();
         const auto note = stated.isObject()
@@ -1163,6 +1178,33 @@ private:
         lastConversationShape = shape;
         lastConnectionNote = note;
         workspace.chatPanel().showConversation (*conversation, bridge->isWaiting(), note);
+        showSuggestedNotesForOffer();
+    }
+
+    /** The note editor shows the change the chat is offering, and nothing once it has
+        been applied - an applied change is in the music, and drawing it twice would say
+        it is about to happen again. */
+    void showSuggestedNotesForOffer()
+    {
+        const auto offered = workspace.chatPanel().offeredProposal();
+
+        for (const auto& message : conversation->messages())
+            if (offered.isNotEmpty() && message.proposalID == offered)
+                for (const auto& request : conversation->messages())
+                    if (request.requestID == message.requestID
+                         && request.from == live::ChatMessage::From::person)
+                    {
+                        for (const auto& attachment : request.attachments)
+                            if (attachment.kind == live::Attachment::Kind::notes)
+                            {
+                                workspace.showSuggestedNotes (attachment.patternID,
+                                                              attachment.noteChannelID,
+                                                              message.proposalDiff);
+                                return;
+                            }
+                    }
+
+        workspace.showSuggestedNotes ({}, {}, var());
     }
 
     /** What the chat is holding, beside the project. It is a readback like state.json:
@@ -1179,6 +1221,8 @@ private:
                              + (bridge != nullptr && bridge->isWaiting() ? "1" : "0") + ":"
                              + (bridge != nullptr && bridge->isConnected() ? "1" : "0") + ":"
                              + (conversation != nullptr ? conversation->id() : String()) + ":"
+                             + workspace.chatPanel().offeredProposal() + ":"
+                             + String (workspace.suggestedNoteCount()) + ":"
                              + String (project.revision);
 
         if (shape == lastInspectorShape)
@@ -1195,6 +1239,7 @@ private:
             fields->setProperty ("bridge_connected", bridge != nullptr && bridge->isConnected());
             fields->setProperty ("waiting", bridge != nullptr && bridge->isWaiting());
             fields->setProperty ("conversation_id", conversation != nullptr ? conversation->id() : String());
+            fields->setProperty ("suggested_notes_drawn", workspace.suggestedNoteCount());
         }
 
         const auto contents = JSON::toString (packet, false);
