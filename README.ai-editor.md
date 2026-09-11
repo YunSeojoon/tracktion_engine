@@ -1,6 +1,6 @@
 # CoCompose — external AI music editor
 
-CoCompose is a Windows prototype for experienced DAW/VST users composing with an external AI. Edit project data from a script or agent; the open app updates the same Tracktion Edit and timeline in place. In-app chat is deferred.
+CoCompose is a Windows prototype for experienced DAW/VST users composing with an external AI. Edit project data from a script or agent; the open app updates the same Tracktion Edit and timeline in place. There is also a chat panel in the app: attach what you are looking at, ask about it, and apply a suggested change with one press. The model is reached by a separate bridge process, so the API key is never in the app.
 
 Fork: https://github.com/YunSeojoon/tracktion_engine
 
@@ -27,7 +27,7 @@ cmake --build build-cocompose --config Release --target CoCompose --parallel 4
 
 To build and package a portable ZIP after initializing submodules, run `./tools/build-windows.ps1` in PowerShell. It invokes CMake and CPack and writes `build-cocompose/dist/CoCompose-0.1.0-windows-x64.zip`. Pass `-Jobs 4` to select build parallelism.
 
-`.github/workflows/cocompose-windows.yml` builds on relevant `ai-editor` pushes, pull requests targeting that branch, and manual dispatch. It uploads the ZIP as `CoCompose-windows-x64`. A remote run has succeeded and its artifact was downloaded and tested.
+`.github/workflows/cocompose-windows.yml` runs on manual dispatch only — the automatic triggers were removed so that a push never spends CI minutes on its own. It uploads the ZIP as `CoCompose-windows-x64`. A remote run has succeeded and its artifact was downloaded and tested.
 
 `tools/test_portable_start.ps1 -Exe <extracted CoCompose.exe>` checks that an extracted build starts with only the stock Windows directories on PATH and restores the existing default project instead of reseeding the example.
 
@@ -85,6 +85,54 @@ writes appears only once a whole file exists, so a failed export never costs the
 good one. `render-status.json` reports the result, which revision it rendered, whether
 every file was written, and where they are.
 
+## Asking in the app
+
+The AI chat panel talks about the song you have open. `Ctrl+K` attaches the selected bars,
+`Ctrl+Shift+K` the notes selected in the piano roll, `Ctrl+Alt+K` the mixer insert. An
+attachment is frozen where it was taken: the selection moves on, the attachment does not,
+and only its `Update` button re-takes it. `What gets sent` shows exactly what an
+attachment carries before it goes anywhere.
+
+The app never talks to a provider. It writes the question beside the project and a
+separate bridge picks it up, so the key lives in the bridge's environment and is not in
+the app, the project, the conversation or a log:
+
+```powershell
+python tools/cocompose_bridge.py --project 'C:\absolute\song\project.json' --provider echo
+$env:OPENAI_API_KEY = '<key>'
+python tools/cocompose_bridge.py --project 'C:\absolute\song\project.json' --provider openai
+```
+
+`echo` is not a model. It answers without a network, says so in every reply, and exists to
+check the plumbing. The panel names whichever provider is listening, so an echo answer
+cannot be mistaken for a real one. The conversation belongs to the project rather than to
+the run, so closing the app, closing the panel or changing provider does not start it over.
+
+An answer may arrive with a change worked out. A model proposes by writing its answer as
+usual and putting one fenced ```cocompose-change block at the end — `description`, `keeps`
+and the notes it would touch, named by the ids the attachment printed. The bridge lifts
+that block out, so the panel shows the sentence rather than the JSON; a missing block, a
+malformed one, or one that changes nothing all mean no change rather than a guessed edit.
+The change itself is shown as what each note is and would become, and nothing moves until
+someone presses `Apply change`. What it may touch comes
+from what was attached, what the person said to keep is measured rather than trusted, and
+both are checked again at the moment it is applied — so a change worked out against music
+that has since moved is refused rather than applied. One Apply is one Undo, whatever it
+touched.
+
+Proposals cover notes and parameter values inside an attachment: pitch, start, length,
+velocity, adding and removing notes, and a plugin parameter's value. Anything outside the
+attachment is refused as `OUT_OF_SCOPE`, and moving clips, making patterns, adding effects
+and changing routing are not proposable. Notes are fenced in by the pattern and channel an
+attachment names; a parameter change has no equivalent, so an insert must actually be
+attached (`Ctrl+Alt+K`) before a proposal may touch it — an empty scope means no insert,
+not any insert. A parameter change goes into the same transaction as the notes, so one
+Apply is still one Undo even when it moved a fader as well. Whatever proposed it — the echo bridge's
+mechanical suggestion or a model's block — goes through the same scope, keeps and revision
+checks in the app. No real API call has been made from here, so what automated checks prove
+is the echo bridge and the block-parsing a real reply would pass through; whether a model
+actually writes the block as asked is for the user to confirm on a real connection.
+
 ## Working from outside
 
 `sync-status.json` reports what an applied request actually changed, read back from
@@ -135,12 +183,13 @@ It also supports transpose, clear-notes, place, make-unique, gain, parameter, st
 
 - [Windows 실행 및 외부 AI 협업 가이드](docs/windows-guide.ko.md)
 - [작업 단위와 검증 기록](docs/worklog.ko.md)
+- [AI 도구 계약 스키마](docs/ai-tool-contract.schema.json)
 - [배포 방식·코드 서명·업데이트 채널 결정](docs/release.ko.md)
 - [릴리스 후보](docs/release-candidate.ko.md)
 - [이 기계의 VST3 호환성 표](docs/compatibility-2026-09-10.ko.md)
 - [수용 검사 기록](docs/acceptance-2026-09-10.ko.md)
 - [변경 기록](docs/CHANGELOG.md)
 
-The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 28 real-app integration checks passed, the packaged ZIP installs, updates and uninstalls without touching the user's projects (docs/release.ko.md), and every VST3 on the development machine was checked against the real app (docs/compatibility-2026-09-10.ko.md). Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. CI runs only when someone asks it to (`gh workflow run cocompose-windows.yml --ref ai-editor`); a push does not trigger it. Details are in the work log. Third-party VST3 compatibility is recorded per plugin for the development machine; listening to the output is a person's judgement and is not claimed. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
+The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 28 real-app integration checks passed, the packaged ZIP installs, updates and uninstalls without touching the user's projects (docs/release.ko.md), and every VST3 on the development machine was checked against the real app (docs/compatibility-2026-09-10.ko.md). Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. `python tools/test_ai_chat.py` covers the chat — attachments, a conversation that survives a restart, and proposals being refused, applied and undone — and `python tools/test_tool_contract.py` checks the app's real answers against `docs/ai-tool-contract.schema.json` (it needs the `jsonschema` package). CI runs only when someone asks it to (`gh workflow run cocompose-windows.yml --ref ai-editor`); a push does not trigger it. Details are in the work log. Third-party VST3 compatibility is recorded per plugin for the development machine; listening to the output is a person's judgement and is not claimed. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
 
 Keep upstream license notices intact. Tracktion Engine and JUCE have separate licenses; see the upstream README and JUCE license files.
