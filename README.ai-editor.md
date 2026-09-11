@@ -114,7 +114,11 @@ and the notes it would touch, named by the ids the attachment printed. The bridg
 that block out, so the panel shows the sentence rather than the JSON; a missing block, a
 malformed one, or one that changes nothing all mean no change rather than a guessed edit.
 The change itself is shown as what each note is and would become, and nothing moves until
-someone presses `Apply change`. What it may touch comes
+someone presses `Apply change`. With the piano roll open it is also drawn where the notes
+are: an outline where each note would go, a line from a note to where it would move, a
+line through one that would go. A filled note exists, an outline does not, and nothing
+drawn can be clicked. Since a note change edits the pattern, the panel also says how many
+places that pattern is played in, because all of them change. What it may touch comes
 from what was attached, what the person said to keep is measured rather than trusted, and
 both are checked again at the moment it is applied — so a change worked out against music
 that has since moved is refused rather than applied. One Apply is one Undo, whatever it
@@ -176,6 +180,8 @@ python tools/cocompose.py --project 'C:\absolute\song\project.json' inspect
 python tools/cocompose.py --project 'C:\absolute\song\project.json' tempo 108
 python tools/cocompose.py --project 'C:\absolute\song\project.json' play
 ```
+
+`tools/cocompose_recipes.py` puts five of the usual call orders over those same tools in one place — `diagnose-region`, `rewrite-melody`, `tidy-velocity`, `review-insert`, and `move-clip`, which reports `UNSUPPORTED` because this build cannot propose that kind of change. A recipe knows nothing about notes and cannot get past a check the app makes; none of them applies itself, and `--apply` is one undo.
 
 It also supports transpose, clear-notes, place, make-unique, gain, parameter, stop, undo, redo and quit. `transpose` and `clear-notes` take a pattern id and therefore change every placement of that pattern. Transport/history commands use `control.json` and request-correlated `control-status.json` acknowledgements.
 
