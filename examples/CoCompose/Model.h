@@ -93,7 +93,7 @@ namespace layoutIds
     const Identifier visible ("visible"), sizes ("sizes"), selectedChannel ("selectedChannel"),
         selectedPattern ("selectedPattern"), selectedLane ("selectedLane"), patternMode ("patternMode"),
         collapsed ("collapsed"), maximised ("maximised"), selectedInsert ("selectedInsert"),
-        projectID ("projectId");
+        projectID ("projectId"), followPlayhead ("followPlayhead");
 }
 
 //==============================================================================

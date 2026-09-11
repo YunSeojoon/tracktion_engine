@@ -774,7 +774,16 @@ public:
             { "playing", edit->getTransport().isPlaying() },
             { "recording", edit->getTransport().isRecording() },
             { "position_seconds", edit->getTransport().getPosition().inSeconds() },
+            // In beats too: seconds are what the engine counts in, beats are what the
+            // ruler is marked in, and a check about the ruler should not have to do
+            // tempo arithmetic to find out where the playhead is.
+            { "position_beats", edit->tempoSequence.toBeats (
+                                    edit->getTransport().getPosition()).inBeats() },
             { "looping", static_cast<bool> (edit->getTransport().looping) },
+            { "loop_start_beat", edit->tempoSequence.toBeats (
+                                     edit->getTransport().getLoopRange().getStart()).inBeats() },
+            { "loop_end_beat", edit->tempoSequence.toBeats (
+                                   edit->getTransport().getLoopRange().getEnd()).inBeats() },
             { "undo", edit->getUndoManager().getUndoDescription() },
             { "undo_actions", edit->getUndoManager().getNumActionsInCurrentTransaction() },
             { "change", lastChange },

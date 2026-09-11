@@ -1506,7 +1506,8 @@ private:
 
 //==============================================================================
 /** The arrangement, with the lane list built into the grid itself. */
-class PlaylistPanel final : public Component
+class PlaylistPanel final : public Component,
+                           private Timer
 {
 public:
     PlaylistPanel (Model& m, Selection& s, std::function<void()> onChange)
@@ -1618,15 +1619,91 @@ public:
 
     PlaylistGrid& getGrid() { return *grid; }
 
+    /** Whether the view chases the playhead during playback.
+
+        Following is right until the moment it is not: a person who scrolls away to look
+        at the chorus while the verse plays does not want to be dragged back a second
+        later. So scrolling by hand pauses it, and it says so rather than appearing to
+        be broken. Playing again from somewhere resumes it. */
+    void setFollowPlayhead (bool shouldFollow)
+    {
+        following = shouldFollow;
+        pausedByHand = false;
+
+        if (following)
+            startTimerHz (12);
+        else
+            stopTimer();
+    }
+
+    bool isFollowPaused() const { return following && pausedByHand; }
+
     /** Scrolls the arrangement so a beat is on screen, which is what following a chat
         attachment back to the music amounts to. */
     void showBeat (double beat)
     {
-        viewport.setViewPosition (jmax (0, grid->xForBeatPublic (beat) - viewport.getWidth() / 3),
-                                  viewport.getViewPositionY());
+        scrollTo (jmax (0, grid->xForBeatPublic (beat) - viewport.getWidth() / 3));
     }
 
 private:
+    void scrollTo (int x)
+    {
+        viewport.setViewPosition (x, viewport.getViewPositionY());
+        lastScrolledTo = viewport.getViewPositionX();
+    }
+
+    void timerCallback() override
+    {
+        if (! following)
+            return;
+
+        // Anything that moved the view other than this timer was a person, and a person
+        // moving the view means they want to look at something else.
+        if (viewport.getViewPositionX() != lastScrolledTo)
+        {
+            if (! pausedByHand)
+            {
+                pausedByHand = true;
+                if (changed != nullptr)
+                    changed();
+            }
+            lastScrolledTo = viewport.getViewPositionX();
+        }
+
+        auto& transport = model.edit.getTransport();
+        if (! transport.isPlaying())
+        {
+            // Stopped is a fresh start: whatever they were looking at, the next play is
+            // a new intention and following resumes with it.
+            if (pausedByHand)
+            {
+                pausedByHand = false;
+                if (changed != nullptr)
+                    changed();
+            }
+            return;
+        }
+
+        if (pausedByHand)
+            return;
+
+        const auto beat = model.edit.tempoSequence.toBeats (transport.getPosition()).inBeats();
+        const auto x = grid->xForBeatPublic (beat);
+        const auto left = viewport.getViewPositionX();
+        const auto width = viewport.getWidth();
+
+        // Only when it has actually left the window, and then to a third in from the
+        // left rather than the middle, so the next few bars are the ones on screen.
+        if (x < left + width / 10 || x > left + width - width / 10)
+            scrollTo (jmax (0, x - width / 3));
+    }
+
+public:
+
+private:
+    bool following = true, pausedByHand = false;
+    int lastScrolledTo = 0;
+
     void notify() { if (changed != nullptr) changed(); }
 
     /** Offers the parameters worth automating: the selected channel's instrument and
@@ -2020,9 +2097,13 @@ public:
         if (! channel.isValid() || ! pattern.isValid())
             return;
 
+        // Every editor gets the callbacks, including one opened after they were set.
         pianoRollWindow = std::make_unique<PianoRollWindow> (
             pattern[ids::name].toString() + "  -  " + channel[ids::name].toString(),
             std::make_unique<PianoRollEditor> (model, selection.pattern(), selection.channel()));
+
+        if (auto* editor = pianoRollEditor())
+            editor->askAboutSelection = askNotes;
     }
 
     //==========================================================================
@@ -2048,6 +2129,30 @@ public:
     bool toggleStep (int channelIndex, int step) { return rack->toggleStep (channelIndex, step); }
 
     PlaylistGrid& playlistGrid() const { return playlist->getGrid(); }
+
+    /** Where target menus send the work. The commands already exist - the menus are a
+        second way to reach them, not a second implementation of them, which is the
+        whole reason a menu item and a keyboard shortcut cannot disagree. */
+    void setMenuCommandRunner (std::function<bool (const String&)> runner)
+    {
+        menuRunner = std::move (runner);
+        playlist->getGrid().runCommand = menuRunner;
+        if (auto* editor = pianoRollEditor())
+            editor->askAboutSelection = askNotes;
+    }
+
+    void setAskAboutNotes (std::function<void()> ask)
+    {
+        askNotes = std::move (ask);
+        if (auto* editor = pianoRollEditor())
+            editor->askAboutSelection = askNotes;
+    }
+
+    std::function<bool (const String&)> menuRunner;
+    std::function<void()> askNotes;
+
+    void setFollowPlayhead (bool shouldFollow) { playlist->setFollowPlayhead (shouldFollow); }
+    bool isFollowPaused() const { return playlist->isFollowPaused(); }
 
     //==========================================================================
     // Attaching. One path for all three kinds, so a right-click, a shortcut and a
@@ -2245,10 +2350,23 @@ public:
 
         if (! any)
         {
-            // Nothing picked out, so "here" is the range the transport is looping.
-            const auto loop = model.edit.getTransport().getLoopRange();
-            from = model.edit.tempoSequence.toBeats (loop.getStart()).inBeats();
-            to = model.edit.tempoSequence.toBeats (loop.getEnd()).inBeats();
+            // A stretch marked on the ruler is the clearest statement of "this part",
+            // so it is preferred over the loop - which is a playback setting that may
+            // have been sitting there since yesterday.
+            const auto marked = grid.timeSelection();
+
+            if (marked.getLength() > 0.0)
+            {
+                from = marked.getStart();
+                to = marked.getEnd();
+            }
+            else
+            {
+                const auto loop = model.edit.getTransport().getLoopRange();
+                from = model.edit.tempoSequence.toBeats (loop.getStart()).inBeats();
+                to = model.edit.tempoSequence.toBeats (loop.getEnd()).inBeats();
+            }
+
             if (selection.lane().isNotEmpty())
                 lanes.add (selection.lane());
         }

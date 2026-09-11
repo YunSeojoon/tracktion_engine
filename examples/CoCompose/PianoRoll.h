@@ -425,11 +425,17 @@ private:
 
             if (e.mods.isRightButtonDown())
             {
-                owner.undo().beginNewTransaction ("Delete note");
-                owner.sequence().removeChild (hit, &owner.undo());
-                owner.selected.removeString (noteID);
-                owner.model.renderIfNeeded();
-                repaint();
+                // It used to delete on the spot. Right-clicking a note is how a person
+                // asks what they can do with it, and answering by destroying it is the
+                // one answer they cannot undo before it happens.
+                if (! owner.selected.contains (noteID))
+                {
+                    owner.selected.clearQuick();
+                    owner.selected.add (noteID);
+                    repaint();
+                }
+
+                showNoteMenu (noteID);
                 return;
             }
 
@@ -594,6 +600,51 @@ private:
             }
         }
 
+        /** What can be done to the notes that are picked out. Everything here acts on
+            the whole selection and goes in as one transaction, so taking it back is one
+            undo however many notes it touched. */
+        void showNoteMenu (const String& noteID)
+        {
+            PopupMenu menu;
+            const auto many = owner.selected.size() > 1;
+            const auto what = many ? " " + String (owner.selected.size()) + " notes" : String();
+
+            menu.addItem (1, "Up a semitone" + what);
+            menu.addItem (2, "Down a semitone" + what);
+            menu.addItem (3, "Up an octave" + what);
+            menu.addItem (4, "Down an octave" + what);
+            menu.addSeparator();
+            menu.addItem (5, "Quantise to the grid" + what);
+            menu.addSeparator();
+            menu.addItem (6, "Ask AI about " + (many ? String ("these notes") : String ("this note")));
+            menu.addSeparator();
+            menu.addItem (7, "Delete" + what);
+
+            menu.showMenuAsync (PopupMenu::Options(), [this, noteID] (int chosen)
+            {
+                if (chosen == 0)
+                    return;
+
+                // The music may have moved while the menu sat open.
+                if (! Model::withID (owner.sequence(), ids::NOTE, noteID).isValid())
+                    return;
+
+                switch (chosen)
+                {
+                    case 1: owner.transposeSelection (1);   break;
+                    case 2: owner.transposeSelection (-1);  break;
+                    case 3: owner.transposeSelection (12);  break;
+                    case 4: owner.transposeSelection (-12); break;
+                    case 5: owner.quantiseSelection();      break;
+                    case 6: if (owner.askAboutSelection) owner.askAboutSelection(); break;
+                    case 7: owner.deleteSelection();        break;
+                    default: break;
+                }
+
+                repaint();
+            });
+        }
+
         Rectangle<int> noteArea (ValueTree note) const
         {
             const auto x = keyboardWidth + roundToInt (static_cast<double> (note[ids::start]) * owner.beatWidth());
@@ -719,6 +770,29 @@ public:
     /** Which notes are picked out right now, so a question can be asked about exactly
         those and nothing else. */
     StringArray selectedNotes() const { return selected; }
+
+    /** Asks the app to attach whatever is picked out here to the chat. Set by the app;
+        without it the menu item simply does nothing rather than lying about what it
+        would do. */
+    std::function<void()> askAboutSelection;
+
+    void transposeSelection (int semitones)
+    {
+        if (selected.isEmpty())
+            return;
+
+        undo().beginNewTransaction (semitones > 0 ? "Transpose up" : "Transpose down");
+
+        for (const auto& id : selected)
+            if (auto note = Model::withID (sequence(), ids::NOTE, id); note.isValid())
+                note.setProperty (ids::pitch,
+                                  jlimit (0, 127, static_cast<int> (note[ids::pitch]) + semitones),
+                                  &undo());
+
+        model.renderIfNeeded();
+        grid->repaint();
+    }
+
 
     /** Picks out notes by id, or clears the selection when given none. Selecting is not
         an edit: it changes what a question is about, never the music. */

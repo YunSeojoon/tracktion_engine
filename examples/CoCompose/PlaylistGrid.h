@@ -74,12 +74,14 @@ public:
         const auto beats = std::max (arrangementBeats() + 8.0, (getWidth() - laneWidth) / beatWidth());
 
         paintLoopRange (g, beats);
+        paintTimeSelection (g);
         paintGrid (g, beats);
         paintLanes (g);
         paintClips (g);
         paintCurves (g);
         paintRuler (g, beats);
         paintPlayhead (g);
+        paintScrub (g);
 
         if (! rubberBand.isEmpty())
         {
@@ -106,9 +108,45 @@ public:
 
         if (e.y < rulerHeight)
         {
-            loopAnchor = beatAt (e.x);
-            setLoopRange (loopAnchor, loopAnchor);
-            dragMode = loop;
+            // Clicking a ruler moves the playhead. That is what a ruler is for, and
+            // what it used to do here - set the loop to a zero-length range at the
+            // click - meant there was no way to say "play from here" with the mouse.
+            //
+            // Loop is still set from the ruler, but by dragging its handles, and a
+            // time range by holding shift: three different intentions, three different
+            // gestures, rather than one gesture doing the least useful of them.
+            if (e.mods.isRightButtonDown())
+                return;                                   // the menu belongs to D1
+
+            if (e.mods.isShiftDown())
+            {
+                // Marking a stretch of time and picking out clips are two ways of
+                // saying "this part", so doing one puts the other away. Otherwise
+                // whichever happened first silently wins, and a person who just
+                // dragged out a range would find a question attached to something
+                // they selected minutes ago.
+                selected.clearQuick();
+                timeAnchor = beatAt (e.x);
+                setTimeSelection (timeAnchor, timeAnchor);
+                dragMode = timeRange;
+                return;
+            }
+
+            if (const auto handle = loopHandleAt (e.x); handle != 0)
+            {
+                const auto range = loopBeats();
+                loopHandleEnd = handle;
+                loopAnchor = handle < 0 ? range.getEnd() : range.getStart();
+                dragMode = loopHandle;
+                return;
+            }
+
+            // Free position, deliberately: the grid is for editing, and a person
+            // pointing at a moment in the song means that moment.
+            scrubBeat = beatAt (e.x);
+            seekTo (scrubBeat);
+            dragMode = scrub;
+            repaint();
             return;
         }
 
@@ -122,6 +160,7 @@ public:
             if (e.mods.isRightButtonDown())
             {
                 dragMode = none;
+                showEmptyMenu (e.getPosition());
             }
             else if (e.mods.isAltDown())
             {
@@ -138,14 +177,27 @@ public:
         }
 
         const auto clipID = Model::uidOf (hit);
+        clearTimeSelection();   // the other way round: picking a clip puts the range away
 
         if (e.mods.isRightButtonDown())
         {
-            undo().beginNewTransaction ("Delete clip");
-            model.instances().removeChild (hit, &undo());
-            selected.removeString (clipID);
-            model.renderIfNeeded();
-            notify();
+            // It used to delete. A right-click that destroys something the moment it
+            // lands is the one gesture a person cannot take back before it happens,
+            // and every mis-aimed click cost them a clip. Now it asks.
+            //
+            // Right-clicking inside a selection keeps the selection, so a command hits
+            // everything picked out; right-clicking outside one moves to what was
+            // actually pointed at, because that is what the person meant.
+            if (! selected.contains (clipID))
+            {
+                selected.clearQuick();
+                selected.add (clipID);
+                selection.setLane (hit[ids::lane].toString());
+                selection.setPattern (hit[ids::pattern].toString());
+                repaint();
+            }
+
+            showClipMenu (clipID);
             return;
         }
 
@@ -184,6 +236,34 @@ public:
         if (dragMode == curvePoint)
         {
             movePoint (e.getPosition());
+            return;
+        }
+
+        if (dragMode == scrub)
+        {
+            // Shown, not seeked. Dragging across a ruler passes over every position
+            // between where you started and where you meant, and seeking to each of
+            // them in turn is how you get a stuck note and a stutter.
+            scrubBeat = std::max (0.0, beatAt (e.x));
+            repaint();
+            return;
+        }
+
+        if (dragMode == timeRange)
+        {
+            setTimeSelection (std::min (timeAnchor, beatAt (e.x)),
+                              std::max (timeAnchor, beatAt (e.x)));
+            repaint();
+            return;
+        }
+
+        if (dragMode == loopHandle)
+        {
+            // Only the end being held moves. Crossing the other one swaps which is
+            // which rather than producing a backwards or empty loop.
+            const auto moved = std::max (0.0, beatAt (e.x));
+            setLoopRange (std::min (loopAnchor, moved), std::max (loopAnchor, moved));
+            repaint();
             return;
         }
 
@@ -241,10 +321,21 @@ public:
 
     void mouseUp (const MouseEvent&) override
     {
+        // A drag across the ruler passes over every position between where it started
+        // and where it meant, so the seek happens once, here, rather than at each of
+        // them - which is how you get a stutter and a stuck note.
+        if (dragMode == scrub)
+            seekTo (scrubBeat);
+
+        const auto wasMarkingTime = dragMode == timeRange || dragMode == loopHandle;
+
         dragMode = none;
         starts.clearQuick();
         rubberBand = {};
         repaint();
+
+        if (wasMarkingTime && changed != nullptr)
+            changed();
     }
 
     void mouseDoubleClick (const MouseEvent& e) override
@@ -841,11 +932,149 @@ public:
     /** Where a beat sits across the grid, for anything outside that needs to scroll to it. */
     int xForBeatPublic (double beat) const { return xForBeat (beat); }
 
+    /** Runs a named application command, for menu items whose work already exists as
+        one. Set by the app; a menu item that has nowhere to go is not offered. */
+    std::function<bool (const String&)> runCommand;
+
 private:
     struct Start { String id; double start, length; int lane; };
-    enum DragMode { none, move, resize, rubber, loop, curvePoint, curveShape };
+    enum DragMode { none, move, resize, rubber, loop, curvePoint, curveShape,
+                    scrub, timeRange, loopHandle };
 
+    void showClipMenu (const String& clipID)
+    {
+        PopupMenu menu;
+        const auto many = selected.size() > 1;
+        const auto what = many ? " " + String (selected.size()) + " clips" : String();
+
+        menu.addItem (1, "Open in piano roll", ! many);
+        menu.addSeparator();
+        menu.addItem (2, "Duplicate" + what);
+        menu.addItem (3, "Make unique" + what);
+        menu.addItem (4, "Split at playhead" + what);
+        menu.addSeparator();
+        menu.addItem (5, "Ask AI about this");
+        menu.addSeparator();
+        menu.addItem (6, "Delete" + what);
+
+        // The menu is open for as long as a person leaves it open, and the song does
+        // not stand still: the clip can be deleted from a script, or by an answer
+        // arriving. So what it refers to is looked up again, not remembered.
+        menu.showMenuAsync (PopupMenu::Options(), [this, clipID] (int chosen)
+        {
+            if (chosen == 0)
+                return;
+
+            if (! model.instanceFor (clipID).isValid())
+                return;                     // gone while the menu was open
+
+            switch (chosen)
+            {
+                case 1: if (runCommand) runCommand ("Piano roll"); break;
+                case 2: if (runCommand) runCommand ("Duplicate clip"); break;
+                case 3: if (runCommand) runCommand ("Make placement unique"); break;
+                case 4: if (runCommand) runCommand ("Split clip"); break;
+                case 5: if (runCommand) runCommand ("Ask AI about the region"); break;
+                case 6: deleteSelectedClips(); break;
+                default: break;
+            }
+        });
+    }
+
+    void showEmptyMenu (Point<int> where)
+    {
+        const auto beat = beatAt (where.x);
+
+        PopupMenu menu;
+        menu.addItem (1, "Place the selected pattern here");
+        menu.addSeparator();
+        menu.addItem (2, "Set loop to the marked range", timeTo > timeFrom);
+        menu.addItem (3, "Clear the marked range", timeTo > timeFrom);
+        menu.addSeparator();
+        menu.addItem (4, "Ask AI about this part");
+
+        menu.showMenuAsync (PopupMenu::Options(), [this, where, beat] (int chosen)
+        {
+            switch (chosen)
+            {
+                case 1: place (where); break;
+                case 2: setLoopRange (timeFrom, timeTo); repaint(); break;
+                case 3: clearTimeSelection(); break;
+                case 4: if (runCommand) runCommand ("Ask AI about the region"); break;
+                default: break;
+            }
+
+            ignoreUnused (beat);
+        });
+    }
+
+    /** One transaction for however many clips were picked out, so taking it back is
+        one undo rather than one per clip. */
+    void deleteSelectedClips()
+    {
+        if (selected.isEmpty())
+            return;
+
+        undo().beginNewTransaction (selected.size() > 1 ? "Delete clips" : "Delete clip");
+
+        for (const auto& id : selected)
+            if (auto clip = model.instanceFor (id); clip.isValid())
+                model.instances().removeChild (clip, &undo());
+
+        selected.clearQuick();
+        model.renderIfNeeded();
+        notify();
+    }
+
+private:
     UndoManager& undo() const { return model.edit.getUndoManager(); }
+
+public:
+    /** The stretch of time picked out on the ruler, empty when none is. Used by the
+        chat attachment, so that "this part" means the part a person actually marked. */
+    Range<double> timeSelection() const { return { timeFrom, timeTo }; }
+    void clearTimeSelection() { timeFrom = timeTo = 0.0; repaint(); }
+
+    /** Drives the real mouse handlers, from a script, for checking.
+
+        Not a shortcut past them: these build MouseEvents and call mouseDown, mouseDrag
+        and mouseUp exactly as the window would, modifiers included. What it skips is
+        the operating system, which is the part that cannot be automated here - so a
+        check written against this proves the gesture logic, and says nothing about
+        whether Windows delivers the click. That part is for a person. */
+    bool pointerGesture (const String& what, double fromBeat, double toBeat, int laneIndex = -1)
+    {
+        const auto mods = what == "shift-drag" ? ModifierKeys (ModifierKeys::shiftModifier
+                                                                 | ModifierKeys::leftButtonModifier)
+                        : what.startsWith ("right") ? ModifierKeys (ModifierKeys::rightButtonModifier)
+                        : what.startsWith ("shift") ? ModifierKeys (ModifierKeys::shiftModifier
+                                                                      | ModifierKeys::leftButtonModifier)
+                                                : ModifierKeys (ModifierKeys::leftButtonModifier);
+
+        // A negative lane means the ruler; otherwise the middle of that lane's row.
+        const auto y = laneIndex < 0 ? rulerHeight / 2
+                                     : rulerHeight + laneIndex * laneHeight + laneHeight / 2;
+        const Point<float> down ((float) xForBeat (fromBeat), (float) y);
+        const Point<float> up ((float) xForBeat (toBeat), (float) y);
+
+        auto event = [this, &mods, &down] (Point<float> where, bool dragged)
+        {
+            return MouseEvent (Desktop::getInstance().getMainMouseSource(), where, mods,
+                               1.0f, 0.0f, 0.0f, 0.0f, 0.0f, this, this,
+                               Time::getCurrentTime(), down, Time::getCurrentTime(),
+                               1, dragged);
+        };
+
+        mouseDown (event (down, false));
+
+        if (what.endsWith ("drag") || std::abs (toBeat - fromBeat) > 1.0e-9)
+            mouseDrag (event (up, true));
+
+        mouseUp (event (up, what.endsWith ("drag")));
+        return true;
+    }
+
+private:
     void notify() { if (changed != nullptr) changed(); repaint(); }
 
     double snapped (double beat) const { return snap <= 0.0 ? beat : std::round (beat / snap) * snap; }
@@ -910,6 +1139,52 @@ private:
             if (auto instance = model.placementFor (clipID); instance.isValid())
                 starts.add ({ clipID, static_cast<double> (instance[ids::start]),
                               static_cast<double> (instance[ids::length]), laneIndexOf (instance) });
+    }
+
+    /** Moves the playhead. Not an edit: it touches the transport, never the music, so
+        it leaves the revision and the undo history exactly where they were. Playing
+        stays playing and stopped stays stopped - a person asking "what is here" is not
+        asking to start or stop. */
+    void seekTo (double beat)
+    {
+        auto& transport = model.edit.getTransport();
+        transport.setPosition (model.edit.tempoSequence.toTime (
+                                   te::BeatPosition::fromBeats (std::max (0.0, beat))));
+    }
+
+    Range<double> loopBeats() const
+    {
+        const auto range = model.edit.getTransport().getLoopRange();
+        auto& tempo = model.edit.tempoSequence;
+        return { tempo.toBeats (range.getStart()).inBeats(),
+                 tempo.toBeats (range.getEnd()).inBeats() };
+    }
+
+    /** -1 for the start handle, 1 for the end, 0 for neither. Within a few pixels, so
+        a person aiming at a handle gets the handle and a person aiming at the ruler
+        gets the ruler. */
+    int loopHandleAt (int x) const
+    {
+        if (! model.edit.getTransport().looping)
+            return 0;
+
+        const auto range = loopBeats();
+        if (range.getLength() <= 0.0)
+            return 0;
+
+        constexpr auto reach = 5;
+        if (std::abs (x - xForBeat (range.getStart())) <= reach) return -1;
+        if (std::abs (x - xForBeat (range.getEnd())) <= reach)   return 1;
+        return 0;
+    }
+
+    /** A stretch of time a person picked out, which is not the loop and not a set of
+        clips. Kept apart from both because it means a third thing: "this part of the
+        song", which is what a question to the assistant is usually about. */
+    void setTimeSelection (double fromBeat, double toBeat)
+    {
+        timeFrom = std::max (0.0, std::min (fromBeat, toBeat));
+        timeTo = std::max (0.0, std::max (fromBeat, toBeat));
     }
 
     void setLoopRange (double fromBeat, double toBeat)
@@ -1232,6 +1507,39 @@ private:
         }
     }
 
+    /** Three things live on this ruler and they must not look alike: the loop is amber
+        and filled, a time selection is the accent colour with edges, and the playhead
+        is a line. Someone who cannot tell them apart cannot tell what a command will
+        act on. */
+    void paintTimeSelection (Graphics& g)
+    {
+        if (timeTo <= timeFrom)
+            return;
+
+        const auto from = xForBeat (timeFrom);
+        const auto to = xForBeat (timeTo);
+
+        g.setColour (theme::accent.withAlpha (0.12f));
+        g.fillRect (from, rulerHeight, to - from, getHeight() - rulerHeight);
+        g.setColour (theme::accent);
+        g.fillRect (from, 0, 2, rulerHeight);
+        g.fillRect (to - 2, 0, 2, rulerHeight);
+        g.setColour (theme::accent.withAlpha (0.45f));
+        g.fillRect (from, rulerHeight - 3, to - from, 3);
+    }
+
+    /** Where the playhead would land, while a drag is deciding. Drawn rather than
+        seeked to, so dragging across the ruler does not drag the music with it. */
+    void paintScrub (Graphics& g)
+    {
+        if (dragMode != scrub)
+            return;
+
+        const auto x = xForBeat (scrubBeat);
+        g.setColour (theme::text.withAlpha (0.5f));
+        g.fillRect (x, 0, 1, getHeight());
+    }
+
     void paintLoopRange (Graphics& g, double)
     {
         const auto range = model.edit.getTransport().getLoopRange();
@@ -1287,6 +1595,8 @@ private:
     Point<int> bendAnchor;
     double bendStart = 0.0;
     Point<int> dragAnchor, rubberStart;
+    double timeAnchor = 0.0, timeFrom = 0.0, timeTo = 0.0, scrubBeat = 0.0;
+    int loopHandleEnd = 0;
     Rectangle<int> rubberBand;
     DropPreview dropPreview;
     AudioThumbnailCache thumbnailCache;

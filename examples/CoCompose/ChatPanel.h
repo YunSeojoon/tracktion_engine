@@ -114,6 +114,27 @@ public:
         }
     }
 
+    /** Puts the keyboard in the question box, which is what clicking it does. Worth
+        reaching from a script because "is the person typing" is the thing transport
+        keys have to ask before they fire. */
+    bool focusEntry()
+    {
+        // Ask the window manager for the keyboard first: JUCE only routes keys to a
+        // component whose window the OS considers active, so grabbing focus inside an
+        // inactive window quietly does nothing.
+        if (auto* top = getTopLevelComponent())
+        {
+            top->toFront (true);
+            if (auto* peer = top->getPeer())
+                peer->grabFocus();
+        }
+
+        entry.grabKeyboardFocus();
+        return true;
+    }
+
+    bool entryHasFocus() const { return entry.hasKeyboardFocus (true); }
+
     String draft() const { return entry.getText(); }
     void setDraft (const String& text) { entry.setText (text, dontSendNotification); }
 
@@ -312,6 +333,7 @@ public:
 
         return object ({ { "attachments", cardsOut },
                          { "draft", entry.getText() },
+                         { "typing", entry.hasKeyboardFocus (true) },
                          { "offered_proposal", offered } });
     }
 
