@@ -58,11 +58,13 @@ UI changes are published to `state.json` and the native session, and every panel
 
 Browser on the left, Channel Rack above the Mixer in the centre, Pattern picker above the Playlist on the right. Drag the bars between them to resize, and use the View menu (or `Alt+1`...`Alt+5`) to hide and restore a panel; `F6` moves keyboard focus to the next one. Panel sizes, visibility and the current selection are stored in the session, so a reopened project comes back to the same surface.
 
-`Space` starts and stops, `Ctrl+L` switches between Song and Pattern loops, `Ctrl+M` toggles the metronome, `Ctrl+T` adds a channel, `Ctrl+P` a pattern, `Ctrl+B` places the selected pattern, and `Ctrl+U` gives the selected placement its own copy.
+`Space` starts and stops, `Home` goes back to the beginning, `Ctrl+L` switches between Song and Pattern loops, `Ctrl+M` toggles the metronome, `Ctrl+T` adds a channel, `Ctrl+P` a pattern, `Ctrl+B` places the selected pattern, and `Ctrl+U` gives the selected placement its own copy. Stop is its own command rather than half of the Play/Stop toggle: pressing it while already stopped returns to where playing last began. Transport keys stand down while a text box has the keyboard, so a space typed into the chat box is a space.
 
-The Channel Rack carries a sixteenth-note step grid for the selected pattern: click or drag across it to write notes at the channel's step pitch, and the button beside the insert number sets that pitch and the step length. `Piano roll` opens the note editor for the selected channel and pattern — click to add, drag to move, drag a note's right edge to resize, Alt-drag for velocity, right-click to delete, drag the background to rubber-band select, and use `Ctrl+D` to duplicate, `Q` to quantise and `Delete` to remove. Clicking the keyboard previews through the channel's real instrument.
+The Channel Rack carries a sixteenth-note step grid for the selected pattern: click or drag across it to write notes at the channel's step pitch, and the button beside the insert number sets that pitch and the step length. `Piano roll` opens the note editor for the selected channel and pattern — click to add, drag to move, drag a note's right edge to resize, Alt-drag for velocity, drag the background to rubber-band select, and use `Ctrl+D` to duplicate, `Q` to quantise and `Delete` to remove. Right-clicking a note opens a menu — semitone and octave up and down, quantise, ask the AI about it, delete — rather than deleting it where it stands. Clicking the keyboard previews through the channel's real instrument.
 
-The Playlist is a bar grid with one row per lane. Drag a pattern from the picker onto a lane to place it, or click an empty spot to drop the selected pattern there. Drag a clip to move it between lanes and bars, drag its right edge to resize, Ctrl-drag to copy, right-click to delete, Alt-drag the background to rubber-band select, and double-click a clip to split it where you clicked. `Ctrl+E` splits at the playhead, `Ctrl+R` duplicates, `Ctrl+U` detaches, `Delete` removes. Drag along the ruler to set the loop range, and Ctrl-scroll to zoom.
+The Playlist is a bar grid with one row per lane. Drag a pattern from the picker onto a lane to place it, or click an empty spot to drop the selected pattern there. Drag a clip to move it between lanes and bars, drag its right edge to resize, Ctrl-drag to copy, Alt-drag the background to rubber-band select, and double-click a clip to split it where you clicked. `Ctrl+E` splits at the playhead, `Ctrl+R` duplicates, `Ctrl+U` detaches, `Delete` removes. Right-clicking a clip opens a menu — open in the piano roll, duplicate, make unique, split, ask the AI, delete — instead of deleting it outright; right-clicking inside a selection keeps the selection and one command covers all of it in one undo, and right-clicking outside one moves to what was pointed at. Menus exist for clips, notes and the empty grid; lane headers, insert slots, knobs and audio clips do not have one yet.
+
+The ruler does three things. Left-click seeks to where you clicked, at a free position rather than the editing grid, and dragging shows where the playhead would land and seeks once when you let go. Dragging a loop handle moves that end of the loop and nothing else. Shift-drag marks a stretch of time, which is neither the loop nor a set of clips but a third thing meaning "this part of the song" — it is drawn in its own colour, and it is what the chat attaches when nothing else is picked out. Marking a range and selecting clips clear each other. Seeking touches the transport only: it moves no revision and spends no undo. Ctrl-scroll zooms.
 
 Drop a WAV onto a lane — from the Browser or from Explorer — and it becomes an audio clip that moves, resizes, splits and fades like any other. The Browser lists the project's own objects and samples, the folders you add, favourites and recently previewed files, and can preview a sample or go looking for one a clip has lost. `File > Collect samples` copies every sample the project uses into a `samples` folder beside the session, so the folder can be moved whole.
 
@@ -87,11 +89,22 @@ every file was written, and where they are.
 
 ## Asking in the app
 
-The AI chat panel talks about the song you have open. `Ctrl+K` attaches the selected bars,
-`Ctrl+Shift+K` the notes selected in the piano roll, `Ctrl+Alt+K` the mixer insert. An
-attachment is frozen where it was taken: the selection moves on, the attachment does not,
-and only its `Update` button re-takes it. `What gets sent` shows exactly what an
-attachment carries before it goes anywhere.
+The AI chat panel talks about the song you have open. `Ctrl+K` attaches a stretch of the
+arrangement — the selected clips if there are any, otherwise the range marked on the ruler,
+otherwise the loop, which comes last because a loop may have been sitting there since
+yesterday. `Ctrl+Shift+K` attaches the notes selected in the piano roll, `Ctrl+Alt+K` the
+mixer insert. An attachment is frozen where it was taken: the selection moves on, the
+attachment does not, and only its `Update` button re-takes it. A region carries the notes
+played in it, not just clip names and lengths — two clips with the same name and length can
+be a bass line and a cluster chord — on a note budget the region proper spends before its
+surrounding context, with anything left out counted rather than dropped in silence. An
+insert carries its sends and says how many parameters it did not name. `What gets sent`
+shows exactly what an attachment carries before it goes anywhere.
+
+A follow-up question carries what the earlier ones were about: the kind, ids and beat range
+of each earlier attachment travel with the history, along with the revision they were read
+at, so "make that part less busy" has a referent and a target the music has moved past is
+described as it was rather than asserted to be that way still.
 
 The app never talks to a provider. It writes the question beside the project and a
 separate bridge picks it up, so the key lives in the bridge's environment and is not in
@@ -107,7 +120,14 @@ python tools/cocompose_bridge.py --project 'C:\absolute\song\project.json' --pro
 
 `echo` is not a model. It answers without a network, says so in every reply, and exists to
 check the plumbing. The panel names whichever provider is listening, so an echo answer
-cannot be mistaken for a real one. The connection is verified end to end against a model
+cannot be mistaken for a real one. The bridge writes a heartbeat every couple of seconds,
+including while a provider call is in flight, so a bridge that was killed rather than
+closed is seen as gone instead of believed: a question left waiting on one ends, says so,
+and comes back into the box with its text intact. A bridge restarted in a folder where a
+question is still sitting does not ask it again — the reply beside the request is the
+record and outlives the process — and an answer cut off mid-stream is reported rather than
+quietly retried, since whether the provider did the work and charged for it cannot be known
+from here. The connection is verified end to end against a model
 running on this machine through ollama — `llama3.1:8b`, twice, no failures — by
 `python tools/test_ai_connection.py --model llama3.1:8b`, which asserts nothing about the
 words and everything about what must hold whatever a model writes: that the answer is
@@ -208,6 +228,6 @@ It also supports transpose, clear-notes, place, make-unique, gain, parameter, st
 - [수용 검사 기록](docs/acceptance-2026-09-10.ko.md)
 - [변경 기록](docs/CHANGELOG.md)
 
-The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 28 real-app integration checks passed, the packaged ZIP installs, updates and uninstalls without touching the user's projects (docs/release.ko.md), and every VST3 on the development machine was checked against the real app (docs/compatibility-2026-09-10.ko.md). Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. `python tools/test_ai_chat.py` covers the chat — attachments, a conversation that survives a restart, and proposals being refused, applied and undone — and `python tools/test_tool_contract.py` checks the app's real answers against `docs/ai-tool-contract.schema.json` (it needs the `jsonschema` package). CI runs only when someone asks it to (`gh workflow run cocompose-windows.yml --ref ai-editor`); a push does not trigger it. Details are in the work log. Third-party VST3 compatibility is recorded per plugin for the development machine; listening to the output is a person's judgement and is not claimed. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
+The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 28 real-app integration checks passed, the packaged ZIP installs, updates and uninstalls without touching the user's projects (docs/release.ko.md), and every VST3 on the development machine was checked against the real app (docs/compatibility-2026-09-10.ko.md). Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. `python tools/test_ai_chat.py` covers the chat — attachments, a conversation that survives a restart, and proposals being refused, applied and undone — and `python tools/test_tool_contract.py` checks the app's real answers against `docs/ai-tool-contract.schema.json` (it needs the `jsonschema` package). `python tools/test_chat_reliability.py` covers the connection lying about itself — a restart that must not re-ask, an interrupted answer that must not be resent, a dead bridge that must not look alive, a question that must come back, an earlier attachment that must survive in the history, and two regions with identical labels that must read differently — and needs neither a key nor a network, three of the four using a provider spy and the fourth reading what the app writes. `python tools/test_daw_interaction.py` drives the real mouse handlers with real `MouseEvent`s for the ruler gestures, the stop-twice return and right-click opening a menu instead of deleting; one thing it cannot produce on this machine is a script-owned keyboard focus, so "space while typing does not start playback" is printed under `NOT CHECKED HERE` rather than counted as a pass — type in the chat box and press space to see it. CI runs only when someone asks it to (`gh workflow run cocompose-windows.yml --ref ai-editor`); a push does not trigger it. Details are in the work log. Third-party VST3 compatibility is recorded per plugin for the development machine; listening to the output is a person's judgement and is not claimed. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
 
 Keep upstream license notices intact. Tracktion Engine and JUCE have separate licenses; see the upstream README and JUCE license files.
