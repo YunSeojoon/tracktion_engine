@@ -412,6 +412,46 @@ def check_alt_puts_the_grid_away(exe, folder, report):
         session.close()
 
 
+def check_erase_and_split_are_chosen_not_stumbled_into(exe, folder, report):
+    """D3: the destructive gestures live behind tools you have to pick.
+
+    Right-click no longer deletes, and the plain left button never did. Erase and Split
+    act on the clip they are pointed at the moment they are clicked - which is safe
+    precisely because choosing them is a deliberate act, and the cursor changes so a
+    person can see which one they are holding."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open()
+    try:
+        prepare_song(session)
+        state = session.settled()
+        clips = len(state["playlist"]["clips"])
+        start = state["playlist"]["clips"][0]["start"]
+        report.expect("there is a clip to work on", clips > 0, clips)
+
+        session.run([{"grid_tool": "split"}, {"ruler": ["click", start + 2.0, start + 2.0, 0]}])
+        time.sleep(0.8)
+        after_split = len(session.settled()["playlist"]["clips"])
+        report.expect("the Split tool cuts what it is pointed at",
+                      after_split == clips + 1, (clips, after_split))
+
+        session.run([{"grid_tool": "erase"}, {"ruler": ["click", start + 2.5, start + 2.5, 0]}])
+        time.sleep(0.8)
+        after_erase = len(session.settled()["playlist"]["clips"])
+        report.expect("the Erase tool removes what it is pointed at",
+                      after_erase == after_split - 1, (after_split, after_erase))
+
+        session.run([{"grid_tool": "select"}, {"ruler": ["click", start + 0.5, start + 0.5, 0]}])
+        time.sleep(0.8)
+        report.expect("and Select goes back to touching nothing",
+                      len(session.settled()["playlist"]["clips"]) == after_erase,
+                      len(session.settled()["playlist"]["clips"]))
+        report.expect("the app agrees about which tool is held",
+                      read(folder / "chat-inspector.json").get("grid_tool") == "select",
+                      read(folder / "chat-inspector.json").get("grid_tool"))
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -445,6 +485,9 @@ def run(exe, output):
     print()
     print("Alt puts the grid away")
     check_alt_puts_the_grid_away(exe, output / "snap", report)
+    print()
+    print("Erase and Split are chosen, not stumbled into")
+    check_erase_and_split_are_chosen_not_stumbled_into(exe, output / "destructive", report)
 
     print()
     if report.unchecked:

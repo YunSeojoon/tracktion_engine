@@ -1599,13 +1599,15 @@ public:
 
         tools.addItem ("Select", 1);
         tools.addItem ("Draw", 2);
+        tools.addItem ("Erase", 3);
+        tools.addItem ("Split", 4);
         tools.setSelectedId (1, dontSendNotification);
         tools.onChange = [this]
         {
-            grid->setTool (tools.getSelectedId() == 2 ? PlaylistGrid::draw : PlaylistGrid::select);
+            grid->setTool (PlaylistGrid::toolNamed (tools.getText().toLowerCase()));
         };
 
-        grid->onToolChosen = [this] (bool drawing) { setTool (drawing); };
+        grid->onToolChosen = [this] (const String& name) { setTool (name); };
 
         addAndMakeVisible (viewport);
         for (auto* child : std::initializer_list<Component*> { &addLane, &removeLane, &muteLane,
@@ -1695,10 +1697,14 @@ public:
         previousZoom = 0.0;
     }
 
-    void setTool (bool drawing)
+    void setTool (const String& name)
     {
-        grid->setTool (drawing ? PlaylistGrid::draw : PlaylistGrid::select);
-        tools.setSelectedId (drawing ? 2 : 1, dontSendNotification);
+        const auto which = PlaylistGrid::toolNamed (name);
+        grid->setTool (which);
+        tools.setSelectedId (which == PlaylistGrid::draw   ? 2
+                           : which == PlaylistGrid::erase  ? 3
+                           : which == PlaylistGrid::split_ ? 4 : 1,
+                             dontSendNotification);
     }
 
     /** Whether the view chases the playhead during playback.
@@ -1963,7 +1969,10 @@ public:
         auto onChange = [this] { refresh(); };
 
         browser = std::make_unique<Browser> (model, selection, onChange);
-        rack = std::make_unique<ChannelRack> (model, selection, onChange, [this] { openPianoRoll(); });
+        // The Rack button goes through the same door as the double-click, Enter and the
+        // clip menu. It used to call openPianoRoll() directly, which meant it alone
+        // skipped the channel fallback - four ways in, one of them subtly different.
+        rack = std::make_unique<ChannelRack> (model, selection, onChange, [this] { showNoteEditor(); });
         mixer = std::make_unique<MixerPanel> (model, onChange);
         picker = std::make_unique<PatternPicker> (model, selection, onChange);
         playlist = std::make_unique<PlaylistPanel> (model, selection, onChange);
@@ -2529,13 +2538,13 @@ public:
 
     bool setArrangementTool (const String& which)
     {
-        playlist->setTool (which == "draw");
+        playlist->setTool (which);
         return true;
     }
 
     String arrangementTool() const
     {
-        return playlist->getGrid().getTool() == PlaylistGrid::draw ? "draw" : "select";
+        return PlaylistGrid::nameOfTool (playlist->getGrid().getTool());
     }
 
     bool setNoteTool (const String& which)

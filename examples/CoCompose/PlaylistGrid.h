@@ -35,9 +35,20 @@ public:
         placed a clip, so dragging out a selection left a clip behind, and the only way
         to select a region was to hold a modifier. Select is the default here, as it is
         in every arrangement view, and placing is a thing you choose to do. */
-    enum Tool { select, draw };
+    enum Tool { select, draw, erase, split_ };
 
-    void setTool (Tool which) { tool = which; repaint(); }
+    void setTool (Tool which)
+    {
+        tool = which;
+
+        // A tool that acts on a click has to be visible before the click. The cursor is
+        // the only thing a person is already looking at when they are about to press.
+        setMouseCursor (which == erase  ? MouseCursor::PointingHandCursor
+                      : which == split_ ? MouseCursor::IBeamCursor
+                      : which == draw   ? MouseCursor::CrosshairCursor
+                                        : MouseCursor::NormalCursor);
+        repaint();
+    }
     Tool getTool() const { return tool; }
 
     void setZoom (double pixelsPerBeat) { zoom = jlimit (1.5, 40.0, pixelsPerBeat); resized(); repaint(); }
@@ -121,6 +132,17 @@ public:
             return;
         }
 
+        if (e.mods.isMiddleButtonDown())
+        {
+            // Pan. A mouse with three buttons should not need a scrollbar hunt, and a
+            // mouse with two still has the bars.
+            panAnchor = e.getPosition();
+            if (auto* view = findParentComponentOfClass<Viewport>())
+                panStart = view->getViewPosition();
+            dragMode = pan;
+            return;
+        }
+
         if (e.y < rulerHeight)
         {
             // Clicking a ruler moves the playhead. That is what a ruler is for, and
@@ -194,6 +216,28 @@ public:
         const auto clipID = Model::uidOf (hit);
         clearTimeSelection();   // the other way round: picking a clip puts the range away
 
+        // Erase and Split act on what they are pointed at, immediately, which is the
+        // point of choosing them: a person holding Erase has already said what they
+        // mean by clicking. That is only safe because choosing them is deliberate -
+        // it is the same reason the plain left button no longer deletes anything.
+        if (! e.mods.isRightButtonDown() && (tool == erase || tool == split_))
+        {
+            if (tool == erase)
+            {
+                undo().beginNewTransaction ("Delete clip");
+                model.instances().removeChild (hit, &undo());
+                selected.removeString (clipID);
+                model.renderIfNeeded();
+            }
+            else
+            {
+                split (hit, beatAt (e.x));
+            }
+
+            notify();
+            return;
+        }
+
         if (e.mods.isRightButtonDown())
         {
             // It used to delete. A right-click that destroys something the moment it
@@ -253,6 +297,14 @@ public:
         if (dragMode == curvePoint)
         {
             movePoint (e.getPosition());
+            return;
+        }
+
+        if (dragMode == pan)
+        {
+            if (auto* view = findParentComponentOfClass<Viewport>())
+                view->setViewPosition (jmax (0, panStart.x - (e.x - panAnchor.x)),
+                                       jmax (0, panStart.y - (e.y - panAnchor.y)));
             return;
         }
 
@@ -1015,12 +1067,31 @@ public:
     /** Set by the panel that owns the toolbar, so choosing a tool from the menu moves
         the box on screen too. Without it the two would drift apart and the app would
         be holding a different tool from the one it says it is. */
-    std::function<void (bool)> onToolChosen;
+    std::function<void (const String&)> onToolChosen;
+
+    static Tool toolNamed (const String& name)
+    {
+        if (name == "draw")  return draw;
+        if (name == "erase") return erase;
+        if (name == "split") return split_;
+        return select;
+    }
+
+    static String nameOfTool (Tool which)
+    {
+        switch (which)
+        {
+            case draw:   return "draw";
+            case erase:  return "erase";
+            case split_: return "split";
+            default:     return "select";
+        }
+    }
 
 private:
     struct Start { String id; double start, length; int lane; };
     enum DragMode { none, move, resize, rubber, loop, curvePoint, curveShape,
-                    scrub, timeRange, loopHandle };
+                    scrub, timeRange, loopHandle, pan };
 
     void showClipMenu (const String& clipID)
     {
@@ -1071,6 +1142,8 @@ private:
         menu.addSeparator();
         menu.addItem (5, "Select tool", true, tool == select);
         menu.addItem (6, "Draw tool", true, tool == draw);
+        menu.addItem (7, "Erase tool", true, tool == erase);
+        menu.addItem (8, "Split tool", true, tool == split_);
         menu.addSeparator();
         menu.addItem (2, "Set loop to the marked range", timeTo > timeFrom);
         menu.addItem (3, "Clear the marked range", timeTo > timeFrom);
@@ -1085,8 +1158,10 @@ private:
                 case 2: setLoopRange (timeFrom, timeTo); repaint(); break;
                 case 3: clearTimeSelection(); break;
                 case 4: if (runCommand) runCommand ("Ask AI about the region"); break;
-                case 5: if (onToolChosen) onToolChosen (false); break;
-                case 6: if (onToolChosen) onToolChosen (true);  break;
+                case 5: if (onToolChosen) onToolChosen ("select"); break;
+                case 6: if (onToolChosen) onToolChosen ("draw");   break;
+                case 7: if (onToolChosen) onToolChosen ("erase");  break;
+                case 8: if (onToolChosen) onToolChosen ("split");  break;
                 default: break;
             }
 
@@ -1703,6 +1778,7 @@ private:
     DragMode dragMode = none;
     Tool tool = select;
     bool snapSuspended = false;
+    Point<int> panAnchor, panStart;
     Point<int> bendAnchor;
     double bendStart = 0.0;
     Point<int> dragAnchor, rubberStart;

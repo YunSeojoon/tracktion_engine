@@ -217,6 +217,8 @@ public:
                              commands::makeUnique, commands::splitClip, commands::duplicateClip,
                              commands::transposeUp, commands::transposeDown })
                 menu.addCommandItem (&commandManager, id);
+            menu.addSeparator();
+            menu.addCommandItem (&commandManager, commands::openPianoRoll);
         }
         else if (index == 2)
         {
@@ -224,9 +226,16 @@ public:
                 menu.addCommandItem (&commandManager, commands::togglePanelBase + panel);
             menu.addSeparator();
             menu.addCommandItem (&commandManager, commands::focusNextPanel);
+            menu.addSeparator();
+            for (auto id : { commands::fitWholeSong, commands::fitSelection,
+                             commands::restoreZoom, commands::followPlayhead })
+                menu.addCommandItem (&commandManager, id);
         }
         else if (index == 3)
         {
+            for (auto id : { commands::playStop, commands::stopPlayback, commands::returnToStart })
+                menu.addCommandItem (&commandManager, id);
+            menu.addSeparator();
             for (auto id : { commands::armChannel, commands::recordToggle, commands::countIn })
                 menu.addCommandItem (&commandManager, id);
             menu.addSeparator();
