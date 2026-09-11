@@ -943,13 +943,13 @@ public:
         mute.setEnabled (master == nullptr);
 
         effects.onClick = [this] { showEffectsMenu(); };
+
+        // The same door the menu's "Open" uses - 1000 + index * 10 + 0 is that item.
+        chain.openEffect = [this] (int index) { handleEffectChoice (1000 + index * 10); };
         routing.onClick = [this] { showRoutingMenu(); };
         effects.setEnabled (master == nullptr);
         routing.setEnabled (master == nullptr);
 
-        chain.setJustificationType (Justification::centredLeft);
-        chain.setColour (Label::textColourId, theme::accent);
-        chain.setFont (Font (FontOptions (10.0f)));
 
         for (auto* child : std::initializer_list<Component*> { &name, &gain, &pan, &mute, &feeds, &effects,
                                                                &routing, &chain })
@@ -1029,7 +1029,7 @@ public:
             gain.setValue (master->getVolumeDb(), dontSendNotification);
             pan.setValue (master->getPan(), dontSendNotification);
             feeds.setText ("all inserts", dontSendNotification);
-            chain.setText ({}, dontSendNotification);
+            chain.setChain ({});
             if (meterMoved)
                 repaint();
             return;
@@ -1057,8 +1057,9 @@ public:
                 ++sendCount;
         }
 
-        chain.setText (names.isEmpty() ? "no effects" : names.joinIntoString (" > "), dontSendNotification);
-        chain.setTooltip (chain.getText());
+        chain.setChain (names);
+        chain.setTooltipText (names.isEmpty() ? "Double-click an effect to open it"
+                                              : names.joinIntoString (" > ") + "   (double-click to open)");
 
         const auto destination = insert.getProperty (ids::output, masterInsert).toString();
         auto target = model.insertFor (destination);
@@ -1254,6 +1255,21 @@ private:
         notify();
     }
 
+public:
+    const String& insertID() const { return id; }
+
+    /** Opens the plugin window for the effect at this position in the chain. The same
+        path the menu's "Open" takes, so there is one way in and not two. */
+    bool openEffect (int index)
+    {
+        if (index < 0 || index >= chain.names.size())
+            return false;
+
+        handleEffectChoice (1000 + index * 10);
+        return true;
+    }
+
+private:
     void showRoutingMenu()
     {
         auto insert = model.insertFor (id);
@@ -1295,7 +1311,92 @@ private:
     Model& model;
     te::VolumeAndPanPlugin* master;
     std::function<void()> changed;
-    Label name, feeds, chain;
+    /** The effect chain, drawn as the names in order, where each name is a place you
+        can point at. It was a label - correct and unreachable - so the only way to
+        open an effect was to find it again in a menu. Double-clicking the thing you
+        are already looking at is what a person tries first. */
+    struct Chain final : public Component,
+                         public SettableTooltipClient
+    {
+        StringArray names;
+        std::function<void (int)> openEffect;
+        String tip;
+
+        void setTooltipText (const String& text) { tip = text; }
+        String getTooltip() override { return tip; }
+
+        void setChain (const StringArray& newNames)
+        {
+            if (names == newNames)
+                return;
+
+            names = newNames;
+            repaint();
+        }
+
+        int indexAt (int x) const
+        {
+            auto left = 0;
+            for (int i = 0; i < names.size(); ++i)
+            {
+                const auto width = widthOf (names[i]);
+                if (x >= left && x < left + width)
+                    return i;
+                left += width + separatorWidth();
+            }
+            return -1;
+        }
+
+        void mouseDoubleClick (const MouseEvent& e) override
+        {
+            if (const auto which = indexAt (e.x); which >= 0 && openEffect)
+                openEffect (which);
+        }
+
+        void paint (Graphics& g) override
+        {
+            g.setFont (theme::small_());
+
+            if (names.isEmpty())
+            {
+                g.setColour (theme::textFaint);
+                g.drawText ("no effects", getLocalBounds(), Justification::centredLeft, true);
+                return;
+            }
+
+            const auto under = indexAt (getMouseXYRelative().x);
+            auto left = 0;
+
+            for (int i = 0; i < names.size(); ++i)
+            {
+                const auto width = widthOf (names[i]);
+                g.setColour (i == under && isMouseOver() ? theme::accent : theme::textDim);
+                g.drawText (names[i], left, 0, width, getHeight(), Justification::centredLeft, true);
+                left += width;
+
+                if (i < names.size() - 1)
+                {
+                    g.setColour (theme::textFaint);
+                    g.drawText (">", left, 0, separatorWidth(), getHeight(),
+                                Justification::centred, false);
+                    left += separatorWidth();
+                }
+            }
+        }
+
+        void mouseMove (const MouseEvent&) override { repaint(); }
+        void mouseExit (const MouseEvent&) override { repaint(); }
+
+    private:
+        static int separatorWidth() { return 12; }
+        static int widthOf (const String& text)
+        {
+            return roundToInt (GlyphArrangement::getStringWidth (theme::small_(), text)) + 6;
+        }
+    };
+
+    Label name, feeds;
+    Chain chain;
     ValueSlider gain, pan;
     TextButton mute { "Mute" }, effects { "FX" }, routing { "> Master" };
     te::LevelMeasurer::Client client;
@@ -1365,6 +1466,11 @@ private:
     Viewport viewport;
     Component strips;
     OwnedArray<MixerStrip> mixerStrips;
+
+public:
+    const OwnedArray<MixerStrip>& stripList() const { return mixerStrips; }
+
+private:
 };
 
 //==============================================================================
@@ -2526,6 +2632,15 @@ public:
     /** Opens the note editor for whatever is selected. The button, the double-click,
         Enter and the target menu all come through here, so they cannot drift apart. */
     void showNoteEditor() { openPianoRoll (true); }
+
+    /** Opens one effect's own window, the way double-clicking it in the chain does. */
+    bool openEffectWindow (const String& insertID, int index)
+    {
+        for (auto* strip : mixer->stripList())
+            if (strip->insertID() == insertID)
+                return strip->openEffect (index);
+        return false;
+    }
 
     bool isNoteEditorOpen() const { return pianoRollEditor() != nullptr; }
 

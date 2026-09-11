@@ -1866,6 +1866,14 @@ private:
             return workspace.playlistGrid().pointerGesture (gesture[0].toString(), from, to, lane);
         }
 
+        if (action.hasProperty ("open_effect"))
+        {
+            // [insert id, index] - the gesture a double-click on the chain makes.
+            const auto what = action["open_effect"];
+            return what.isArray() && what.size() == 2
+                    && workspace.openEffectWindow (what[0].toString(), static_cast<int> (what[1]));
+        }
+
         if (action.hasProperty ("lane_height"))
         {
             workspace.playlistGrid().setLaneHeight (static_cast<int> (action["lane_height"]));
