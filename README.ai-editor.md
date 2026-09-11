@@ -99,13 +99,21 @@ the app, the project, the conversation or a log:
 
 ```powershell
 python tools/cocompose_bridge.py --project 'C:\absolute\song\project.json' --provider echo
+ollama serve
+python tools/cocompose_bridge.py --project 'C:\absolute\song\project.json' --provider ollama --model llama3.1:8b
 $env:OPENAI_API_KEY = '<key>'
 python tools/cocompose_bridge.py --project 'C:\absolute\song\project.json' --provider openai
 ```
 
 `echo` is not a model. It answers without a network, says so in every reply, and exists to
 check the plumbing. The panel names whichever provider is listening, so an echo answer
-cannot be mistaken for a real one. The conversation belongs to the project rather than to
+cannot be mistaken for a real one. The connection is verified end to end against a model
+running on this machine through ollama — `llama3.1:8b`, twice, no failures — by
+`python tools/test_ai_connection.py --model llama3.1:8b`, which asserts nothing about the
+words and everything about what must hold whatever a model writes: that the answer is
+about what was attached, that nothing claims to have heard audio that was never sent, that
+a follow-up sees the earlier exchange, that playback continued, and that asking moved no
+revision. With no model serving it exits 2 rather than passing. The conversation belongs to the project rather than to
 the run, so closing the app, closing the panel or changing provider does not start it over.
 
 An answer may arrive with a change worked out. A model proposes by writing its answer as
@@ -133,9 +141,13 @@ attached (`Ctrl+Alt+K`) before a proposal may touch it — an empty scope means 
 not any insert. A parameter change goes into the same transaction as the notes, so one
 Apply is still one Undo even when it moved a fader as well. Whatever proposed it — the echo bridge's
 mechanical suggestion or a model's block — goes through the same scope, keeps and revision
-checks in the app. No real API call has been made from here, so what automated checks prove
-is the echo bridge and the block-parsing a real reply would pass through; whether a model
-actually writes the block as asked is for the user to confirm on a real connection.
+checks in the app. A real model has now written one: the local model wrote the block
+itself, the app checked it, and Apply moved exactly the four notes it named, kept the
+rhythm, and touched nothing outside the attachment. Two limits remain. The hosted
+`--provider openai` path has still never been exercised from here; only the local ollama
+one has. And a small local model is not reliable at musical judgement — this one read "up
+one tone" as one semitone. The app's promises held either way, which is the point; the
+musical quality of a suggestion is the model's and is not claimed here.
 
 ## Working from outside
 
