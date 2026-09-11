@@ -3,6 +3,7 @@
 #include "../common/Components.h"
 #include "../common/PluginWindow.h"
 #include "Theme.h"
+#include "Tools.h"
 #include "LiveProject.h"
 #include "Recording.h"
 #include "Workspace.h"
@@ -99,6 +100,8 @@ public:
         LookAndFeel::setDefaultLookAndFeel (&look);
 
         setSize (1420, 860);
+        toolService = std::make_unique<live::ToolService> (*project.model, workspace.selection,
+                                                           project.projectID(), project.sessionID);
         workspace.setMidiLearnHandlers ([this] (const String& source, const String& plugin, const String& parameter)
                                         { startMidiLearn (source, plugin, parameter); },
                                         [this] { cancelMidiLearn(); });
@@ -1028,6 +1031,28 @@ private:
             });
     }
 
+    /** The way anything outside the app asks a tool to do something. One request file
+        in, one answer file out, exactly like control.json - which means the CLI needs no
+        new transport and the chat panel inside the app calls the same service directly.
+
+        A half-written request is not counted as seen, for the same reason a half-written
+        control request is not: the sender would wait for an answer that never comes. */
+    void pollToolRequest()
+    {
+        const auto contents = project.source.getSiblingFile ("tool-request.json").loadFileAsString();
+        if (contents == lastToolRequest || contents.isEmpty())
+            return;
+
+        auto request = JSON::parse (contents);
+        if (! request.isObject())
+            return;
+
+        lastToolRequest = contents;
+
+        live::atomicWrite (project.source.getSiblingFile ("tool-response.json"),
+                           JSON::toString (toolService->handle (request, project.revision), false));
+    }
+
     void pollControl()
     {
         const auto contents = project.source.getSiblingFile ("control.json").loadFileAsString();
@@ -1079,6 +1104,7 @@ private:
         {
         project.poll();
         pollControl();
+        pollToolRequest();
         workspace.refresh();
         workspace.store();
         // Some graph rebuilds briefly clear the engine's playing flag. Preserve the
@@ -1338,6 +1364,17 @@ private:
                                                                 static_cast<double> (drag[2]));
         }
 
+        if (action.hasProperty ("tool"))
+        {
+            // The in-app path: the same service, called directly rather than through a
+            // file. A check compares this answer with the one the CLI gets, which is how
+            // "the chat and the CLI agree" stops being a claim and becomes a test.
+            const auto answer = toolService->handle (action["tool"], project.revision);
+            live::atomicWrite (project.source.getSiblingFile ("tool-response-inapp.json"),
+                               JSON::toString (answer, false));
+            return true;
+        }
+
         if (action.hasProperty ("attach"))
         {
             // "region" | "notes" | "insert:<id>"
@@ -1585,7 +1622,10 @@ private:
     std::unique_ptr<FileChooser> chooser;
     std::unique_ptr<PluginDirectoryScanner> scanner;
     int scanned = 0;
-    String lastTransportKey, lastChatInspector;
+    String lastTransportKey, lastChatInspector, lastToolRequest;
+    /** Built once, so a request_id answered earlier is still known later in the run. */
+    std::unique_ptr<live::ToolService> toolService;
+
     live::CoComposeLookAndFeel look;
     uint32 messageAt = 0;
     int learningRow = -1;

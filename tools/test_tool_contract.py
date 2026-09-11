@@ -1,0 +1,192 @@
+"""Checks the AI tool contract against the app that implements it.
+
+Three things are worth checking and none of them is "does the model behave":
+
+  - what the app answers matches the published schema, so a caller written against
+    docs/ai-tool-contract.schema.json is not surprised;
+  - a bad request is refused with the word the contract promises, and refusing it
+    changes nothing;
+  - the chat panel inside the app and a script outside it get the same answer to the
+    same question, because they are the same service and not two implementations.
+
+Run with the app closed:
+    python tools/test_tool_contract.py --output <folder>
+"""
+import argparse
+import copy
+import json
+from pathlib import Path
+import sys
+import time
+import uuid
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import jsonschema
+
+from cocompose import atomic_write, read, tool, wait_for
+from test_plugin_compatibility import Session, prepare_song
+
+ROOT = Path(__file__).resolve().parents[1]
+SCHEMA = json.loads((ROOT / "docs" / "ai-tool-contract.schema.json").read_text(encoding="utf-8"))
+
+
+class Report:
+    def __init__(self):
+        self.failures = []
+
+    def expect(self, name, condition, detail=""):
+        print(("  ok   " if condition else "  FAIL ") + name + (("  " + str(detail)) if detail else ""))
+        if not condition:
+            self.failures.append(name)
+
+
+def valid_against(fragment, definition):
+    """True when this fragment matches one named shape in the schema."""
+    schema = dict(SCHEMA)
+    schema["$ref"] = "#/$defs/" + definition
+    schema.pop("oneOf", None)
+    try:
+        jsonschema.validate(fragment, schema)
+        return True, ""
+    except jsonschema.ValidationError as error:
+        return False, error.message
+
+
+def in_app(session, folder, request):
+    """Asks the same question through the app's own panel path."""
+    (folder / "tool-response-inapp.json").unlink(missing_ok=True)
+    session.run([{"tool": request}])
+    wait_for(lambda: read(folder / "tool-response-inapp.json").get("request_id") == request["request_id"],
+             timeout=30)
+    return read(folder / "tool-response-inapp.json")
+
+
+def run(exe, output):
+    output.mkdir(parents=True, exist_ok=True)
+    folder = output / "session"
+    folder.mkdir(exist_ok=True)
+    project = folder / "project.json"
+    report = Report()
+
+    session = Session(exe, folder).open()
+    try:
+        prepare_song(session)
+        state = session.settled()
+        pattern_id = state["patterns"][0]["id"]
+        insert_id = state["mixer"]["inserts"][0]["id"]
+        revision_before = read(folder / "sync-status.json")["revision"]
+
+        print("answers match the published schema")
+        caps = tool(project, "get_capabilities")
+        ok, why = valid_against(caps, "answer")
+        report.expect("an answer matches the answer shape", ok, why)
+        ok, why = valid_against(caps["result"], "capabilities")
+        report.expect("capabilities match the capabilities shape", ok, why)
+        report.expect("only built tools are offered",
+                      caps["result"]["tools"] == ["get_capabilities", "get_selection",
+                                                  "inspect_region", "inspect_insert",
+                                                  "inspect_pattern"],
+                      caps["result"]["tools"])
+        report.expect("no writes are offered while none are built",
+                      caps["result"]["writes"] == [], caps["result"]["writes"])
+        report.expect("audio is declared unavailable rather than left unsaid",
+                      caps["result"]["audio"]["can_send_audio"] is False)
+
+        region = tool(project, "inspect_region", {"start_beat": 0.0, "end_beat": 16.0})
+        ok, why = valid_against(region["result"], "region")
+        report.expect("a region matches the region shape", ok, why)
+        report.expect("what was asked about is kept apart from its context",
+                      "clips" in region["result"] and "context_clips" in region["result"])
+
+        pattern = tool(project, "inspect_pattern", {"pattern": pattern_id})
+        ok, why = valid_against(pattern["result"], "pattern")
+        report.expect("a pattern matches the pattern shape", ok, why)
+        report.expect("a pattern says how many placements share it",
+                      pattern["result"]["placement_count"] >= 1
+                      and isinstance(pattern["result"]["shared"], bool))
+        report.expect("notes carry stable ids, not positions",
+                      all(note["id"] for note in pattern["result"]["parts"][0]["notes"]))
+
+        insert = tool(project, "inspect_insert", {"insert": insert_id})
+        ok, why = valid_against(insert["result"], "insert")
+        report.expect("an insert matches the insert shape", ok, why)
+        report.expect("an insert admits what it cannot read",
+                      "not readable" in insert["result"]["opaque_state"])
+
+        print()
+        print("bad requests are refused by name")
+        cases = [
+            ("a backwards range", "inspect_region", {"start_beat": 8.0, "end_beat": 4.0},
+             "INVALID_ARGUMENT"),
+            ("a range that is not a number", "inspect_region",
+             {"start_beat": "bar one", "end_beat": 4.0}, "INVALID_ARGUMENT"),
+            ("a missing start", "inspect_region", {"end_beat": 4.0}, "INVALID_ARGUMENT"),
+            ("an insert that is not there", "inspect_insert", {"insert": "nope"}, "NOT_FOUND"),
+            ("a pattern that is not there", "inspect_pattern", {"pattern": "nope"}, "NOT_FOUND"),
+            ("a lane that is not there", "inspect_region",
+             {"start_beat": 0.0, "end_beat": 4.0, "lanes": ["nope"]}, "NOT_FOUND"),
+            ("a tool that does not exist", "fly_to_the_moon", {}, "INVALID_ARGUMENT"),
+            ("a tool that is not built yet", "apply_proposal", {}, "UNSUPPORTED"),
+        ]
+
+        for name, which, arguments, expected in cases:
+            answer = tool(project, which, arguments)
+            ok, why = valid_against(answer, "answer")
+            report.expect(name + " is refused as " + expected,
+                          answer["status"] == "error" and answer["error"]["code"] == expected and ok,
+                          answer.get("error", {}).get("code", answer["status"]) + (" " + why if not ok else ""))
+
+        wrong_version = tool(project, "get_selection", {}, contract_version=99)
+        report.expect("an unknown contract version is refused",
+                      wrong_version["error"]["code"] == "UNSUPPORTED")
+
+        report.expect("none of that changed the music",
+                      read(folder / "sync-status.json")["revision"] == revision_before,
+                      read(folder / "sync-status.json")["revision"])
+
+        print()
+        print("asking twice")
+        once = tool(project, "inspect_pattern", {"pattern": pattern_id}, request_id="same-question")
+        twice = tool(project, "inspect_pattern", {"pattern": pattern_id}, request_id="same-question")
+        report.expect("the same request id is answered once", once == twice)
+
+        print()
+        print("the chat panel and a script agree")
+        for name, which, arguments in [("capabilities", "get_capabilities", {}),
+                                       ("a region", "inspect_region", {"start_beat": 0.0, "end_beat": 16.0}),
+                                       ("a pattern", "inspect_pattern", {"pattern": pattern_id}),
+                                       ("an insert", "inspect_insert", {"insert": insert_id}),
+                                       ("a refusal", "inspect_insert", {"insert": "nope"})]:
+            request = {"contract_version": 1, "request_id": str(uuid.uuid4()),
+                       "tool": which, "arguments": arguments}
+            inside = in_app(session, folder, request)
+            outside = tool(project, which, arguments, request_id=str(uuid.uuid4()))
+
+            # Everything but the identifiers, which are per request by definition.
+            def comparable(answer):
+                trimmed = copy.deepcopy(answer)
+                trimmed.pop("request_id", None)
+                if "result" in trimmed and "session_id" in trimmed["result"]:
+                    trimmed["result"].pop("session_id")
+                return trimmed
+
+            report.expect(name + ": the same answer either way",
+                          comparable(inside) == comparable(outside),
+                          json.dumps(comparable(inside))[:120])
+    finally:
+        session.close()
+
+    print()
+    print("FAILURES:", report.failures if report.failures else "none")
+    return report
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--exe", type=Path,
+                        default=ROOT / "build-cocompose/CoCompose_artefacts/Release/CoCompose.exe")
+    parser.add_argument("--output", type=Path,
+                        default=ROOT / "build-cocompose" / ("contract-" + uuid.uuid4().hex[:8]))
+    args = parser.parse_args()
+    sys.exit(1 if run(args.exe.resolve(), args.output.resolve()).failures else 0)

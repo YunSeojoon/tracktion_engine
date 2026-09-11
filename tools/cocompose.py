@@ -152,12 +152,47 @@ def control(project, action, attempts=5):
     raise Conflict("Gave up sending %s after %d attempts" % (action, attempts))
 
 
+def tool(project, name, arguments=None, contract_version=1, request_id=None, timeout=30):
+    """Calls one of the app's tools and returns its answer.
+
+    This is the same service the chat panel inside the app talks to, reached through a
+    request file the way control() reaches the transport. Nothing is interpreted here:
+    whatever the app answers is what comes back, errors included, so a script and the
+    chat cannot end up with different ideas about what happened.
+    """
+    folder = Path(project).parent
+    request = {"contract_version": contract_version,
+               "request_id": request_id or str(uuid.uuid4()),
+               "tool": name,
+               "arguments": arguments or {}}
+
+    response = folder / "tool-response.json"
+    atomic_write(folder / "tool-request.json", request)
+
+    # The answer is the one carrying this request id. Asking the same id twice is
+    # answered from what the app already decided, so the second call returns at once
+    # with the same answer rather than doing the work again - which is the behaviour
+    # the contract asks for, not a shortcut taken here.
+    def answered():
+        current = read(response)
+        return current if current.get("request_id") == request["request_id"] else None
+
+    return wait_for(answered, timeout=timeout)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", type=Path,
                         default=Path.home() / "Documents/CoCompose/project.json")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("inspect")
+    call = commands.add_parser("tool", help="call one of the app's tools directly")
+    call.add_argument("name")
+    call.add_argument("--arg", action="append", default=[], metavar="KEY=VALUE",
+                      help="tool argument; repeat for more. Numbers and JSON are parsed.")
+    call.add_argument("--contract-version", type=int, default=1)
+    call.add_argument("--request-id", default=None,
+                      help="reuse one to check that a repeated request is answered once")
     tempo = commands.add_parser("tempo")
     tempo.add_argument("bpm", type=float)
     transpose = commands.add_parser("transpose")
@@ -182,6 +217,23 @@ def main():
     for action in ("play", "stop", "undo", "redo", "quit"):
         commands.add_parser(action)
     args = parser.parse_args()
+
+    # A tool call goes straight to the app's own service and is answered by it, so
+    # nothing here reads or rewrites the project first.
+    if args.command == "tool":
+        arguments = {}
+        for pair in args.arg:
+            key, _, raw = pair.partition("=")
+            try:
+                arguments[key] = json.loads(raw)
+            except json.JSONDecodeError:
+                arguments[key] = raw
+
+        answer = tool(args.project, args.name, arguments,
+                      contract_version=args.contract_version, request_id=args.request_id)
+        print(json.dumps(answer, ensure_ascii=False, indent=2))
+        raise SystemExit(0 if answer.get("status") == "ok" else 1)
+
     if args.command in ("play", "stop", "undo", "redo", "quit"):
         result = control(args.project, args.command)
     else:
