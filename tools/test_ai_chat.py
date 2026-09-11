@@ -584,12 +584,31 @@ def check_a_person_can_use_it(exe, folder, report):
         bridge = start_bridge(folder)
         wait_for(lambda: read(folder / "chat-inspector.json").get("bridge_connected"), timeout=30)
 
-        # With the note editor open, a suggested change has somewhere to be drawn.
-        s.run([{"select_channel": 0}, {"note": [84, 12.0, 1.0, 90]}])
-        time.sleep(0.6)
+        # The scenario the milestone names: some notes picked out in the piano roll,
+        # not the whole part. The editor has to be open for there to be a selection at
+        # all, so a few notes go in first.
+        s.run([{"select_channel": 0}]
+              + [{"note": [pitch, beat, 1.0, 100]}
+                 for pitch, beat in ((72, 0.0), (76, 2.0), (79, 4.0), (74, 6.0))])
+        time.sleep(0.8)
+
+        # The pattern the editor is on, not the first one in the project - they are
+        # not the same, and picking ids out of the wrong one picks out nothing.
+        here = tool(project, "get_selection")["result"]
+        whole = tool(project, "inspect_pattern",
+                     {"pattern": here["pattern"], "channel": here["channel"]})["result"]
+        part = [n["id"] for p in whole["parts"] for n in p["notes"]]
+        picked = part[:3]
+        s.run([{"pick_notes": picked}])
+        time.sleep(0.4)
 
         s.run([{"select_channel": 0}, {"attach": "notes"}])
         time.sleep(0.5)
+
+        card = read(folder / "chat-inspector.json")["attachments"][-1]
+        report.expect("only the notes picked out are attached",
+                      card["notes"] == len(picked) < len(part),
+                      (card["notes"], len(part)))
 
         # Whichever pattern the attachment named is the one to watch. Reading the first
         # pattern in the project instead would be watching the wrong music.

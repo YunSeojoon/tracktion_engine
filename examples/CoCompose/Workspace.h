@@ -2194,6 +2194,19 @@ public:
         return playlist->getGrid().shapeSelection (property, value);
     }
 
+    /** Picks notes out in the note editor, which is what a person does with the mouse
+        before asking about "these notes". Empty means the whole part, the same as
+        having picked nothing out. */
+    bool pickNotes (const StringArray& ids)
+    {
+        if (auto* editor = pianoRollEditor())
+        {
+            editor->selectNotes (ids);
+            return true;
+        }
+        return false;
+    }
+
     bool addPianoRollNote (int pitch, double startBeat, double lengthBeats, int velocity)
     {
         if (pianoRollWindow == nullptr || ! pianoRollWindow->isVisible())

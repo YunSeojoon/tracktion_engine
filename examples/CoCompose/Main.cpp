@@ -1917,6 +1917,15 @@ private:
             return workspace.shapeAudioClip (property, static_cast<double> (shape[1]));
         }
 
+        if (action.hasProperty ("pick_notes"))
+        {
+            StringArray ids;
+            if (auto* wanted = action["pick_notes"].getArray())
+                for (const auto& id : *wanted)
+                    ids.add (id.toString());
+            return workspace.pickNotes (ids);
+        }
+
         if (action.hasProperty ("note"))
         {
             const auto note = action["note"];
@@ -1944,7 +1953,11 @@ private:
 
         Array<var> labels;
         collectLabels (*this, labels);
-        const auto signature = JSON::toString (var (labels), true);
+        // What is in the picture has to be in here, or the picture stops being retaken
+        // when that thing changes. A suggested change moves no revision and renames no
+        // label, so it is the one that would go missing.
+        const auto signature = JSON::toString (var (labels), true)
+                                 + "|" + String (workspace.suggestedNoteCount());
         if (lastSnapshotRevision == project.revision && signature == lastLabels)
             return;
 

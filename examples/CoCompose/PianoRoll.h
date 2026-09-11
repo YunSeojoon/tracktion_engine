@@ -720,6 +720,14 @@ public:
         those and nothing else. */
     StringArray selectedNotes() const { return selected; }
 
+    /** Picks out notes by id, or clears the selection when given none. Selecting is not
+        an edit: it changes what a question is about, never the music. */
+    void selectNotes (const StringArray& ids)
+    {
+        selected = ids;
+        repaint();
+    }
+
 private:
     String lastSignature;
     int previewing = -1;
