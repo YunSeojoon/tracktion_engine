@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Attachment.h"
+#include "Proposal.h"
 
 namespace live
 {
@@ -118,16 +119,27 @@ public:
     {
         Array<var> readTools;
         for (const auto* name : { "get_capabilities", "get_selection", "inspect_region",
-                                  "inspect_insert", "inspect_pattern" })
+                                  "inspect_insert", "inspect_pattern",
+                                  "create_proposal", "apply_proposal", "get_proposal" })
             readTools.add (name);
+
+        // Exactly what a proposal may change. Anything not here is refused, whatever a
+        // caller asks for, so this list is the promise rather than the prompt.
+        Array<var> writeKinds;
+        for (const auto* name : { "note.pitch", "note.start_beat", "note.length_beats",
+                                  "note.velocity", "note.add", "note.remove",
+                                  "parameter.value" })
+            writeKinds.add (name);
 
         return object ({
             { "contract_version", tools::contractVersion },
             { "project_id", projectID },
             { "session_id", sessionID },
             { "tools", readTools },
-            { "writes", var (Array<var>()) },
-            { "notes", "Write tools are not implemented in this build and are not offered." },
+            { "writes", writeKinds },
+            { "notes", "A proposal is checked when it is made and again when it is applied. "
+                       "Applying one is a single undo. Effects, routing and clip moves are "
+                       "not proposable in this build." },
             { "units", object ({ { "time", "quarter-note beats, ranges are [start_beat, end_beat)" },
                                  { "pitch", "MIDI note number, 0-127" },
                                  { "velocity", "1-127" },
@@ -148,11 +160,13 @@ private:
         if (tool == "inspect_region")   return inspectRegion (arguments);
         if (tool == "inspect_insert")   return inspectInsert (arguments);
         if (tool == "inspect_pattern")  return inspectPattern (arguments);
+        if (tool == "create_proposal")  return createProposal (arguments, revision);
+        if (tool == "get_proposal")     return getProposal (arguments);
+        if (tool == "apply_proposal")   return applyProposal (arguments, revision);
 
         // Named in the contract but not built yet. Saying so by name is more use than
         // "unknown tool", because it tells a caller this is a version problem.
-        for (const auto* later : { "create_proposal", "preview_proposal", "apply_proposal",
-                                   "get_operation", "cancel_operation" })
+        for (const auto* later : { "preview_proposal", "get_operation", "cancel_operation" })
             if (tool == later)
                 throw ToolError (tools::errors::unsupported,
                                  String (later) + " is in the contract but not in this build");
@@ -358,6 +372,340 @@ private:
                          { "shared", placements.size() > 1 } });
     }
 
+    //==========================================================================
+    // Proposals.
+
+    /** Works out a change and keeps it. Nothing about the music moves here: that is the
+        whole point of a proposal existing separately from applying one. */
+    var createProposal (const var& arguments, int revision)
+    {
+        Proposal proposal;
+        proposal.id = Uuid().toString();
+        proposal.requestID = arguments["request_id"].toString();
+        proposal.description = arguments["description"].toString();
+        proposal.baseRevision = arguments.hasProperty ("base_revision")
+                                  ? static_cast<int> (arguments["base_revision"]) : revision;
+        proposal.keeps = Keeps::fromJson (arguments["keeps"]);
+
+        if (proposal.baseRevision != revision)
+            throw ToolError (tools::errors::staleRevision,
+                             "This was worked out against revision " + String (proposal.baseRevision)
+                               + " and the project is now at " + String (revision)
+                               + "; read it again and make a new one", true);
+
+        // What it may touch comes from the attachment, not from the proposal: a caller
+        // cannot widen its own scope by asking nicely.
+        proposal.patternID = arguments["pattern"].toString();
+        proposal.channelID = arguments["channel"].toString();
+
+        if (arguments["allowed_notes"].isArray())
+            for (const auto& id : *arguments["allowed_notes"].getArray())
+                proposal.allowedNotes.add (id.toString());
+
+        auto sequence = Model::findSequence (model.patternFor (proposal.patternID), proposal.channelID);
+
+        if (arguments["notes"].isArray() && ! arguments["notes"].getArray()->isEmpty())
+        {
+            if (! sequence.isValid())
+                throw ToolError (tools::errors::notFound,
+                                 "No part for that channel in that pattern");
+
+            for (const auto& entry : *arguments["notes"].getArray())
+                proposal.notes.push_back (readNoteChange (entry, sequence, proposal));
+        }
+
+        if (arguments["parameters"].isArray())
+            for (const auto& entry : *arguments["parameters"].getArray())
+                proposal.parameters.push_back (readParameterChange (entry, proposal));
+
+        if (proposal.notes.empty() && proposal.parameters.empty())
+            throw ToolError (tools::errors::invalidArgument, "A proposal must change something");
+
+        checkKeeps (proposal);
+
+        const auto id = proposal.id;
+        proposals.set (id, std::move (proposal));
+        return object ({ { "proposal", proposals.getReference (id).summary() },
+                         { "diff", diffOf (proposals.getReference (id)) } });
+    }
+
+    var getProposal (const var& arguments)
+    {
+        const auto id = arguments["proposal"].toString();
+        if (! proposals.contains (id))
+            throw ToolError (tools::errors::notFound, "No such proposal: " + id);
+
+        return object ({ { "proposal", proposals.getReference (id).summary() },
+                         { "diff", diffOf (proposals.getReference (id)) } });
+    }
+
+    /** Everything is checked again here, against the music as it is now rather than as
+        it was when the proposal was made. Then it goes in as one undo, or not at all. */
+    var applyProposal (const var& arguments, int revision)
+    {
+        const auto id = arguments["proposal"].toString();
+        if (! proposals.contains (id))
+            throw ToolError (tools::errors::notFound, "No such proposal: " + id);
+
+        auto& proposal = proposals.getReference (id);
+
+        // Pressing apply twice is one change, not two. The second press is told it was
+        // already done rather than doing it again.
+        if (proposal.applied)
+            return object ({ { "already_applied", true },
+                             { "proposal", proposal.summary() } });
+
+        if (proposal.baseRevision != revision)
+            throw ToolError (tools::errors::staleRevision,
+                             "The project moved from revision " + String (proposal.baseRevision)
+                               + " to " + String (revision) + " since this was worked out",
+                             true);
+
+        auto sequence = Model::findSequence (model.patternFor (proposal.patternID), proposal.channelID);
+
+        if (! proposal.notes.empty() && ! sequence.isValid())
+            throw ToolError (tools::errors::notFound, "The part this would change is gone");
+
+        // Everything that must hold is checked before anything is written, so a refusal
+        // leaves the music exactly as it was rather than half changed.
+        for (const auto& change : proposal.notes)
+        {
+            if (change.what == NoteChange::What::add)
+                continue;
+
+            if (! Model::withID (sequence, ids::NOTE, change.noteID).isValid())
+                throw ToolError (tools::errors::notFound,
+                                 "A note this would change is no longer there: " + change.noteID);
+
+            if (! proposal.allowedNotes.isEmpty() && ! proposal.allowedNotes.contains (change.noteID))
+                throw ToolError (tools::errors::outOfScope,
+                                 "That note was not part of what was attached");
+        }
+
+        checkKeeps (proposal);
+
+        auto& undo = model.edit.getUndoManager();
+        undo.beginNewTransaction (proposal.description.isNotEmpty()
+                                    ? proposal.description : String ("Apply AI proposal"));
+
+        for (const auto& change : proposal.notes)
+        {
+            if (change.what == NoteChange::What::remove)
+            {
+                sequence.removeChild (Model::withID (sequence, ids::NOTE, change.noteID), &undo);
+                continue;
+            }
+
+            if (change.what == NoteChange::What::add)
+            {
+                ValueTree note (ids::NOTE);
+                note.setProperty (ids::uid, Uuid().toString(), nullptr);
+                note.setProperty (ids::pitch, change.pitch.value_or (60), nullptr);
+                note.setProperty (ids::start, change.startBeat.value_or (0.0), nullptr);
+                note.setProperty (ids::length, change.lengthBeats.value_or (1.0), nullptr);
+                note.setProperty (ids::velocity, change.velocity.value_or (100), nullptr);
+                sequence.appendChild (note, &undo);
+                continue;
+            }
+
+            auto note = Model::withID (sequence, ids::NOTE, change.noteID);
+            if (change.pitch)       note.setProperty (ids::pitch, *change.pitch, &undo);
+            if (change.startBeat)   note.setProperty (ids::start, *change.startBeat, &undo);
+            if (change.lengthBeats) note.setProperty (ids::length, *change.lengthBeats, &undo);
+            if (change.velocity)    note.setProperty (ids::velocity, *change.velocity, &undo);
+        }
+
+        for (const auto& change : proposal.parameters)
+            if (auto* parameter = model.automatableParameter (change.ownerID, change.pluginID,
+                                                              change.parameterID))
+                parameter->setParameter (parameter->valueRange.convertFrom0to1 (
+                                             static_cast<float> (change.value)), sendNotification);
+
+        model.renderIfNeeded();
+        proposal.applied = true;
+
+        return object ({ { "applied", true },
+                         { "proposal", proposal.summary() },
+                         { "undo_description", undo.getUndoDescription() } });
+    }
+
+    NoteChange readNoteChange (const var& entry, ValueTree sequence, const Proposal& proposal) const
+    {
+        NoteChange change;
+        const auto what = entry.getProperty ("what", "change").toString();
+        change.what = what == "add" ? NoteChange::What::add
+                    : what == "remove" ? NoteChange::What::remove
+                                       : NoteChange::What::change;
+        change.noteID = entry["id"].toString();
+
+        if (change.what != NoteChange::What::add)
+        {
+            auto note = Model::withID (sequence, ids::NOTE, change.noteID);
+            if (! note.isValid())
+                throw ToolError (tools::errors::notFound, "No such note: " + change.noteID);
+
+            if (! proposal.allowedNotes.isEmpty() && ! proposal.allowedNotes.contains (change.noteID))
+                throw ToolError (tools::errors::outOfScope,
+                                 "Note " + change.noteID + " was not part of what was attached");
+
+            change.wasPitch = static_cast<int> (note[ids::pitch]);
+            change.wasStart = static_cast<double> (note[ids::start]);
+            change.wasLength = static_cast<double> (note[ids::length]);
+            change.wasVelocity = static_cast<int> (note[ids::velocity]);
+        }
+
+        if (entry.hasProperty ("pitch"))
+        {
+            const auto pitch = static_cast<int> (entry["pitch"]);
+            if (pitch < 0 || pitch > 127)
+                throw ToolError (tools::errors::invalidArgument,
+                                 "pitch must be a MIDI note number from 0 to 127");
+            change.pitch = pitch;
+        }
+
+        if (entry.hasProperty ("velocity"))
+        {
+            const auto velocity = static_cast<int> (entry["velocity"]);
+            if (velocity < 1 || velocity > 127)
+                throw ToolError (tools::errors::invalidArgument, "velocity must be from 1 to 127");
+            change.velocity = velocity;
+        }
+
+        if (entry.hasProperty ("start_beat"))
+        {
+            const auto start = static_cast<double> (entry["start_beat"]);
+            if (start < 0.0)
+                throw ToolError (tools::errors::invalidArgument, "start_beat cannot be negative");
+            change.startBeat = start;
+        }
+
+        if (entry.hasProperty ("length_beats"))
+        {
+            const auto length = static_cast<double> (entry["length_beats"]);
+            if (length <= 0.0)
+                throw ToolError (tools::errors::invalidArgument, "length_beats must be above zero");
+            change.lengthBeats = length;
+        }
+
+        // A note must stay inside the pattern it belongs to, or it would not be heard.
+        const auto patternLength = static_cast<double> (model.patternFor (proposal.patternID)[ids::length]);
+        const auto start = change.startBeat.value_or (change.wasStart);
+        const auto length = change.lengthBeats.value_or (change.wasLength);
+
+        if (patternLength > 0.0 && start + length > patternLength + 1.0e-6)
+            throw ToolError (tools::errors::outOfScope,
+                             "That note would run past the end of the pattern");
+
+        return change;
+    }
+
+    ParameterChange readParameterChange (const var& entry, const Proposal& proposal) const
+    {
+        ParameterChange change;
+        change.ownerID = entry["owner"].toString();
+        change.pluginID = entry["plugin"].toString();
+        change.parameterID = entry["parameter"].toString();
+
+        if (! proposal.allowedInserts.isEmpty() && ! proposal.allowedInserts.contains (change.ownerID))
+            throw ToolError (tools::errors::outOfScope, "That insert was not part of what was attached");
+
+        auto* parameter = model.automatableParameter (change.ownerID, change.pluginID, change.parameterID);
+        if (parameter == nullptr)
+            throw ToolError (tools::errors::notFound,
+                             "No such parameter: " + change.parameterID + " on " + change.pluginID);
+
+        if (! entry.hasProperty ("value"))
+            throw ToolError (tools::errors::invalidArgument, "A parameter change needs a value");
+
+        const auto value = static_cast<double> (entry["value"]);
+        if (value < 0.0 || value > 1.0)
+            throw ToolError (tools::errors::invalidArgument,
+                             "A parameter value is normalised, from 0 to 1");
+
+        if (parameter->hasAutomationPoints())
+            throw ToolError (tools::errors::locked,
+                             "That parameter is driven by an automation curve; changing the "
+                             "stored value would not be heard");
+
+        change.value = value;
+        change.wasValue = parameter->valueRange.convertTo0to1 (parameter->getCurrentExplicitValue());
+        return change;
+    }
+
+    /** Measures the proposal against what the person said must not change. Saying it
+        kept the rhythm is not the same as having kept it. */
+    static void checkKeeps (const Proposal& proposal)
+    {
+        if (! proposal.keeps.any())
+            return;
+
+        for (const auto& change : proposal.notes)
+        {
+            if (proposal.keeps.rhythm && change.what != NoteChange::What::change)
+                throw ToolError (tools::errors::locked,
+                                 "Adding or removing notes changes the rhythm, which was to be kept");
+
+            if (proposal.keeps.pitch && change.pitch && *change.pitch != change.wasPitch)
+                throw ToolError (tools::errors::locked, "The pitch was to be kept");
+
+            if (proposal.keeps.rhythm && change.startBeat
+                 && std::abs (*change.startBeat - change.wasStart) > 1.0e-6)
+                throw ToolError (tools::errors::locked, "The rhythm was to be kept");
+
+            if (proposal.keeps.rhythm && change.lengthBeats
+                 && std::abs (*change.lengthBeats - change.wasLength) > 1.0e-6)
+                throw ToolError (tools::errors::locked, "The note lengths were to be kept");
+
+            if (proposal.keeps.velocity && change.velocity && *change.velocity != change.wasVelocity)
+                throw ToolError (tools::errors::locked, "The velocities were to be kept");
+        }
+    }
+
+    static var diffOf (const Proposal& proposal)
+    {
+        Array<var> notes;
+        for (const auto& change : proposal.notes)
+        {
+            auto entry = object ({ { "what", change.what == NoteChange::What::add ? "add"
+                                           : change.what == NoteChange::What::remove ? "remove"
+                                                                                     : "change" },
+                                   { "id", change.noteID } });
+            auto* fields = entry.getDynamicObject();
+
+            if (change.what == NoteChange::What::change)
+            {
+                if (change.pitch)       fields->setProperty ("pitch", object ({ { "was", change.wasPitch }, { "now", *change.pitch } }));
+                if (change.startBeat)   fields->setProperty ("start_beat", object ({ { "was", change.wasStart }, { "now", *change.startBeat } }));
+                if (change.lengthBeats) fields->setProperty ("length_beats", object ({ { "was", change.wasLength }, { "now", *change.lengthBeats } }));
+                if (change.velocity)    fields->setProperty ("velocity", object ({ { "was", change.wasVelocity }, { "now", *change.velocity } }));
+            }
+            else if (change.what == NoteChange::What::add)
+            {
+                fields->setProperty ("pitch", change.pitch.value_or (60));
+                fields->setProperty ("start_beat", change.startBeat.value_or (0.0));
+                fields->setProperty ("length_beats", change.lengthBeats.value_or (1.0));
+                fields->setProperty ("velocity", change.velocity.value_or (100));
+            }
+            else
+            {
+                fields->setProperty ("pitch", change.wasPitch);
+                fields->setProperty ("start_beat", change.wasStart);
+            }
+
+            notes.add (entry);
+        }
+
+        Array<var> parameters;
+        for (const auto& change : proposal.parameters)
+            parameters.add (object ({ { "owner", change.ownerID },
+                                      { "plugin", change.pluginID },
+                                      { "parameter", change.parameterID },
+                                      { "was", change.wasValue },
+                                      { "now", change.value } }));
+
+        return object ({ { "notes", notes }, { "parameters", parameters } });
+    }
+
     var describeClip (ValueTree clip) const
     {
         auto pattern = model.patternFor (clip[ids::pattern].toString());
@@ -409,6 +757,7 @@ private:
     Selection& selection;
     String projectID, sessionID;
     HashMap<String, var> answered;
+    HashMap<String, Proposal> proposals;
 };
 
 } // namespace live

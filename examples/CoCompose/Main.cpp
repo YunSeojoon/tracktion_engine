@@ -1059,6 +1059,14 @@ private:
                 break;
         }
 
+        // Redrawing the conversation means building it as text, so it is only done when
+        // something about it could look different.
+        const auto shape = String (conversation->messages().size()) + ":"
+                             + (conversation->isWaiting() ? "1" : "0") + ":"
+                             + String (conversation->messages().empty()
+                                         ? 0 : conversation->messages().back().text.length()) + ":"
+                             + conversation->id();
+
         auto stated = bridge->connection();
         const auto note = stated.isObject()
                             ? (static_cast<bool> (stated["ready"])
@@ -1066,6 +1074,12 @@ private:
                                  : "bridge present but not ready")
                             : String ("no bridge running");
 
+        if (shape == lastConversationShape && note == lastConnectionNote
+             && update.what == live::ChatBridge::Update::What::nothing)
+            return;
+
+        lastConversationShape = shape;
+        lastConnectionNote = note;
         workspace.chatPanel().showConversation (*conversation, bridge->isWaiting(), note);
     }
 
@@ -1074,6 +1088,17 @@ private:
         music - attaching something is not an edit. */
     void writeChatInspector()
     {
+        // Same reasoning: the packet is only built when what it describes has moved.
+        const auto shape = String (workspace.chatPanel().current().size()) + ":"
+                             + workspace.chatPanel().draft() + ":"
+                             + (bridge != nullptr && bridge->isWaiting() ? "1" : "0") + ":"
+                             + String (project.revision);
+
+        if (shape == lastInspectorShape)
+            return;
+
+        lastInspectorShape = shape;
+
         auto packet = workspace.chatPanel().inspectorState();
         // What the app believes about the bridge, so a check can see the same thing the
         // panel shows instead of guessing from a status line.
@@ -1814,6 +1839,7 @@ private:
     std::unique_ptr<PluginDirectoryScanner> scanner;
     int scanned = 0;
     String lastTransportKey, lastChatInspector, lastToolRequest;
+    String lastConversationShape, lastConnectionNote, lastInspectorShape;
     /** Built once, so a request_id answered earlier is still known later in the run. */
     std::unique_ptr<live::ToolService> toolService;
     std::unique_ptr<live::Conversation> conversation;

@@ -363,6 +363,178 @@ def check_no_audio_is_claimed(exe, folder, report):
         s.close()
 
 
+def check_proposals_stay_inside_the_selection(exe, folder, report):
+    """A2: a proposal changes what was attached and nothing else, keeps what the person
+    said to keep, refuses when the ground has moved, and goes in as one undo."""
+    folder.mkdir(parents=True, exist_ok=True)
+    s = Session(exe, folder).open()
+    project = folder / "project.json"
+
+    def call(name, arguments):
+        return tool(project, name, arguments)
+
+    try:
+        prepare_song(s)
+        state = s.settled()
+        pattern_id = state["patterns"][0]["id"]
+        channel_id = state["channels"][0]["id"]
+
+        part = call("inspect_pattern", {"pattern": pattern_id, "channel": channel_id})
+        notes = part["result"]["parts"][0]["notes"]
+        report.expect("there are notes to work with", len(notes) >= 8, len(notes))
+
+        first_four = [note["id"] for note in notes[:4]]
+        rest = notes[4:]
+        revision = read(folder / "sync-status.json")["revision"]
+
+        def scoped(extra):
+            base = {"pattern": pattern_id, "channel": channel_id,
+                    "allowed_notes": first_four, "base_revision": revision,
+                    "description": "AI: rewrite the pitches"}
+            base.update(extra)
+            return base
+
+        # --- a proposal is not a change ------------------------------------------
+        made = call("create_proposal", scoped({
+            "keeps": {"rhythm": True, "velocity": True},
+            "notes": [{"what": "change", "id": first_four[0], "pitch": notes[0]["pitch"] + 5},
+                      {"what": "change", "id": first_four[1], "pitch": notes[1]["pitch"] + 7}]}))
+        report.expect("a proposal can be made", made["status"] == "ok",
+                      made.get("error", {}).get("message", ""))
+        proposal_id = made["result"]["proposal"]["id"]
+        report.expect("making one changes nothing",
+                      read(folder / "sync-status.json")["revision"] == revision)
+        report.expect("it shows what each note was and would become",
+                      made["result"]["diff"]["notes"][0]["pitch"]["was"] == notes[0]["pitch"]
+                      and made["result"]["diff"]["notes"][0]["pitch"]["now"] == notes[0]["pitch"] + 5)
+
+        # --- the rules, checked before anything is applied -------------------------
+        outside = call("create_proposal", scoped({
+            "keeps": {},
+            "notes": [{"what": "change", "id": rest[0]["id"], "pitch": 70}]}))
+        report.expect("a note outside the attachment is refused",
+                      outside["error"]["code"] == "OUT_OF_SCOPE",
+                      outside.get("error", {}).get("code"))
+
+        broke_rhythm = call("create_proposal", scoped({
+            "keeps": {"rhythm": True},
+            "notes": [{"what": "change", "id": first_four[0], "start_beat": 3.5}]}))
+        report.expect("moving a note when the rhythm was to be kept is refused",
+                      broke_rhythm["error"]["code"] == "LOCKED")
+
+        broke_pitch = call("create_proposal", scoped({
+            "keeps": {"pitch": True},
+            "notes": [{"what": "change", "id": first_four[0], "pitch": 80}]}))
+        report.expect("changing pitch when pitch was to be kept is refused",
+                      broke_pitch["error"]["code"] == "LOCKED")
+
+        added_note = call("create_proposal", scoped({
+            "keeps": {"rhythm": True},
+            "notes": [{"what": "add", "pitch": 64, "start_beat": 0.0, "length_beats": 1.0,
+                       "velocity": 90}]}))
+        report.expect("adding a note when the rhythm was to be kept is refused",
+                      added_note["error"]["code"] == "LOCKED")
+
+        bad_pitch = call("create_proposal", scoped({
+            "keeps": {}, "notes": [{"what": "change", "id": first_four[0], "pitch": 300}]}))
+        report.expect("a pitch outside MIDI range is refused",
+                      bad_pitch["error"]["code"] == "INVALID_ARGUMENT")
+
+        past_end = call("create_proposal", scoped({
+            "keeps": {}, "notes": [{"what": "change", "id": first_four[0],
+                                    "start_beat": 900.0, "length_beats": 4.0}]}))
+        report.expect("a note that would run past the pattern is refused",
+                      past_end["error"]["code"] == "OUT_OF_SCOPE")
+
+        missing = call("create_proposal", scoped({
+            "keeps": {}, "notes": [{"what": "change", "id": "no-such-note", "pitch": 60}]}))
+        report.expect("a note that does not exist is refused",
+                      missing["error"]["code"] == "NOT_FOUND")
+
+        report.expect("none of those refusals touched the music",
+                      read(folder / "sync-status.json")["revision"] == revision,
+                      read(folder / "sync-status.json")["revision"])
+
+        # --- applying ---------------------------------------------------------------
+        applied = call("apply_proposal", {"proposal": proposal_id})
+        report.expect("a good proposal applies", applied["status"] == "ok",
+                      applied.get("error", {}).get("message", ""))
+        time.sleep(1.0)
+
+        after = call("inspect_pattern", {"pattern": pattern_id, "channel": channel_id})
+        changed = {note["id"]: note for note in after["result"]["parts"][0]["notes"]}
+        report.expect("the pitches it asked for changed",
+                      changed[first_four[0]]["pitch"] == notes[0]["pitch"] + 5
+                      and changed[first_four[1]]["pitch"] == notes[1]["pitch"] + 7)
+        report.expect("the rhythm it promised to keep was kept",
+                      changed[first_four[0]]["start_beat"] == notes[0]["start_beat"]
+                      and changed[first_four[0]]["length_beats"] == notes[0]["length_beats"])
+        report.expect("the velocity it promised to keep was kept",
+                      changed[first_four[0]]["velocity"] == notes[0]["velocity"])
+        report.expect("everything outside the attachment is untouched",
+                      all(changed[note["id"]]["pitch"] == note["pitch"] for note in rest))
+
+        # --- one undo ---------------------------------------------------------------
+        report.expect("applying it is one undo",
+                      "AI" in read(folder / "sync-status.json")["undo"],
+                      read(folder / "sync-status.json")["undo"])
+
+        from cocompose import control
+        control(project, "undo")
+        time.sleep(0.8)
+        undone = call("inspect_pattern", {"pattern": pattern_id, "channel": channel_id})
+        back = {note["id"]: note for note in undone["result"]["parts"][0]["notes"]}
+        report.expect("one undo puts all of it back",
+                      all(back[note["id"]]["pitch"] == note["pitch"] for note in notes))
+
+        control(project, "redo")
+        time.sleep(0.8)
+        redone = call("inspect_pattern", {"pattern": pattern_id, "channel": channel_id})
+        again = {note["id"]: note for note in redone["result"]["parts"][0]["notes"]}
+        report.expect("redo brings it back",
+                      again[first_four[0]]["pitch"] == notes[0]["pitch"] + 5)
+
+        # --- pressing apply twice ---------------------------------------------------
+        second = call("apply_proposal", {"proposal": proposal_id})
+        report.expect("applying the same proposal again does nothing",
+                      second["result"].get("already_applied") is True)
+
+        # --- the ground moving under a proposal -------------------------------------
+        now = read(folder / "sync-status.json")["revision"]
+        stale = call("create_proposal", {"pattern": pattern_id, "channel": channel_id,
+                                         "allowed_notes": first_four,
+                                         "base_revision": now - 1,
+                                         "keeps": {},
+                                         "notes": [{"what": "change", "id": first_four[0],
+                                                    "pitch": 61}]})
+        report.expect("a proposal made against older music is refused",
+                      stale["error"]["code"] == "STALE_REVISION")
+        report.expect("and says it can be retried", stale["error"]["retryable"] is True)
+
+        pending = call("create_proposal", {"pattern": pattern_id, "channel": channel_id,
+                                           "allowed_notes": first_four,
+                                           "base_revision": now, "keeps": {},
+                                           "description": "AI: one more",
+                                           "notes": [{"what": "change", "id": first_four[2],
+                                                      "pitch": 61}]})
+        pending_id = pending["result"]["proposal"]["id"]
+
+        # A person edits between the proposal being made and being applied.
+        def nudge(live):
+            live["bpm"] = 124.0
+
+        apply_change(project, nudge)
+        time.sleep(1.0)
+        late = call("apply_proposal", {"proposal": pending_id})
+        report.expect("a proposal applied after the person edited is refused",
+                      late["error"]["code"] == "STALE_REVISION", late.get("error", {}).get("code"))
+        report.expect("and that refusal changed nothing",
+                      call("inspect_pattern", {"pattern": pattern_id, "channel": channel_id})
+                      ["result"]["parts"][0]["notes"][2]["pitch"] == notes[2]["pitch"])
+    finally:
+        s.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -381,6 +553,9 @@ def run(exe, output):
     print()
     print('no audio is claimed')
     check_no_audio_is_claimed(exe, output / 'audio', report)
+    print()
+    print('proposals stay inside the selection')
+    check_proposals_stay_inside_the_selection(exe, output / 'proposals', report)
 
     print()
     print('FAILURES:', report.failures if report.failures else 'none')

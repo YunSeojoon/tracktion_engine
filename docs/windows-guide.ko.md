@@ -1,6 +1,6 @@
 # Windows에서 CoCompose 실행하기
 
-CoCompose는 DAW·VST 사용자가 외부 AI와 함께 작곡하기 위한 Windows 편집기다. 앱 안의 채팅 대신 외부 스크립트나 AI가 JSON을 수정하고, 현재 열린 프로젝트의 UI와 엔진에 그 결과를 반영한다.
+CoCompose는 DAW·VST 사용자가 외부 AI와 함께 작곡하기 위한 Windows 편집기다. 외부 스크립트나 AI가 JSON을 수정하면 현재 열린 프로젝트의 UI와 엔진에 그 결과가 반영된다. 앱 안에도 곡의 일부를 붙여 물어보는 채팅 패널이 있지만, 그쪽은 읽고 답하기만 하며 곡을 바꾸지 않는다.
 
 ## ZIP으로 실행하기
 
@@ -50,7 +50,7 @@ C++ 소스를 수정해 다시 빌드할 때는 실행 파일 잠금을 풀기 �
 
 ## 화면 구성
 
-왼쪽에 Browser, 가운데 위아래로 Channel Rack과 Mixer, 오른쪽 위아래로 Pattern picker와 Playlist가 놓인다. 패널 사이 막대를 끌어 크기를 조절하고, View 메뉴 또는 `Alt+1`~`Alt+5`로 각 패널을 숨기거나 되살린다. 포커스가 있는 패널은 테두리가 밝게 표시되며 `F6`으로 다음 패널로 이동한다. 패널 크기·표시 여부·현재 선택은 세션에 저장되어 다시 열 때 복원된다.
+왼쪽에 Browser, 가운데 위아래로 Channel Rack과 Mixer, 그다음 위아래로 Pattern picker와 Playlist, 오른쪽 끝에 AI chat이 놓인다. 패널 사이 막대를 끌어 크기를 조절하고, View 메뉴 또는 `Alt+1`~`Alt+6`으로 각 패널을 숨기거나 되살린다. 패널 헤더 오른쪽에는 최소화·최대화·닫기 버튼이 있다. 최소화하면 헤더만 남고, 최대화는 같은 버튼으로 되돌리며, 닫은 패널은 View 메뉴로 되살린다. 셋 중 무엇을 해도 직전에 사람이 끌어 둔 분할 비율로 돌아가고, 닫힌 패널도 들고 있던 내용을 잃지 않는다. 포커스가 있는 패널은 테두리가 밝게 표시되며 `F6`으로 다음 패널로 이동한다. 패널 크기·표시 여부·현재 선택은 세션에 저장되어 다시 열 때 복원된다.
 
 | 영역 | 하는 일 |
 |---|---|
@@ -59,6 +59,7 @@ C++ 소스를 수정해 다시 빌드할 때는 실행 파일 잠금을 풀기 �
 | Mixer | Master와 인서트별 미터·볼륨·팬·mute, 효과 체인, 센드, 출력 라우팅, 배정된 채널 수 |
 | Pattern picker | 패턴 목록과 배치 횟수, 새로 만들기·복제·삭제 |
 | Playlist | 마디 눈금과 레인별 행으로 된 편곡 격자. 클립 배치·이동·크기 조절·복제·분할·삭제, 루프 범위 지정, 확대 |
+| AI chat | 물어볼 대상을 붙여 두는 첨부 카드, 대화 기록, 입력란. 자세한 내용은 [앱 안에서 AI에게 묻기](#앱-안에서-ai에게-묻기) |
 
 상단 툴바는 재생/정지, Song·Pattern 루프 전환, BPM, 마디:박 위치, 메트로놈, CPU 사용률, 포커스된 패널을 표시한다. 메뉴는 File(저장·복사본 저장·폴더 열기·종료), Edit(undo/redo, 채널·패턴 추가, 패턴 배치, 배치 독립화, 반음 이동), View(패널 표시), Tools(플러그인 스캔·오디오 설정), Help로 구성된다.
 
@@ -171,6 +172,122 @@ state, _ = apply_change(r"C:\song\project.json", busier)
 요청 하나는 무엇을 바꿨든 Undo 하나다. 사람이 변경을 듣고 한 번에 되돌릴 수 있다.
 
 MIDI learn과 하드웨어 컨트롤 서피스 연결은 아직 없다.
+
+## 앱 안에서 AI에게 묻기
+
+오른쪽 끝 AI chat 패널에서 지금 보고 있는 곡의 일부를 붙여 질문할 수 있다. **답을 만드는 것은 앱이 아니다.** 앱은 질문을 프로젝트 폴더에 파일로 적고, 따로 띄운 bridge 프로그램이 그것을 집어 모델에 묻고 답을 적는다. API 키는 bridge 프로세스에만 있으며 앱·프로젝트·대화 기록·로그 어디에도 들어가지 않는다.
+
+현재 이 경로로 할 수 있는 것은 **읽고 답하는 것뿐**이다. AI가 프로젝트를 바꾸는 기능은 없다.
+
+### 물어볼 대상 붙이기
+
+질문 전에 무엇에 대한 질문인지부터 붙인다. 단축키는 셋이다.
+
+| 단축키 | 붙는 것 |
+|---|---|
+| `Ctrl+K` | Playlist에서 선택한 클립 또는 루프 범위, 즉 편곡의 한 구간 |
+| `Ctrl+Shift+K` | 피아노롤에서 선택한 노트 |
+| `Ctrl+Alt+K` | Mixer에서 선택한 인서트 |
+
+붙일 것이 없으면 상태 표시줄이 무엇을 먼저 골라야 하는지 알려 준다.
+
+첨부는 **붙이는 순간의 상태로 고정된다.** 이후 다른 곳을 클릭해도 첨부는 그대로 같은 마디, 같은 노트, 같은 인서트를 가리킨다. 채널 이름이 바뀌거나 템포가 바뀌어도 가리키는 대상은 움직이지 않는다. 카드의 버튼은 셋이다.
+
+- `Go` — 그 음악이 있는 자리로 화면을 옮긴다.
+- `Update` — 지금 선택한 것으로 첨부를 다시 가져온다. 첨부가 가리키는 대상이 바뀌는 것은 이 버튼을 누를 때뿐이다.
+- `Remove` — 뗀다.
+
+첨부가 가리키던 클립이나 노트를 지우면 카드가 더 이상 존재하지 않는다고 표시한다. `What gets sent` 버튼은 지금 붙어 있는 것이 실제로 무엇을 담고 있는지 보여 주고, `Clear`는 전부 뗀다.
+
+첨부·이동·제거와 패널 최소화·최대화·닫기는 모두 곡을 건드리지 않는다. revision이 오르지 않고 undo 이력에도 남지 않는다. 편집 도중에 질문해도 그 질문이 편집의 일부가 되지 않는다.
+
+### bridge 실행하기
+
+앱과 별개로 PowerShell 창을 하나 더 열어 실행한다. `--project`는 앱에 넘긴 경로와 같아야 한다. Python 3만 있으면 되고 추가 패키지는 필요 없다.
+
+```powershell
+python tools/cocompose_bridge.py --project 'C:\project_private\my-song\project.json' --provider echo
+```
+
+`echo`는 모델이 아니다. 네트워크를 쓰지 않고, 모델에 보내졌을 프롬프트를 그대로 되돌려주며, 모든 답변에 자기가 모델이 아니라고 적는다. 앱과 bridge 사이의 배선이 살아 있는지 확인하는 용도다.
+
+실제 모델에 물으려면 `openai` provider를 쓴다. 키는 환경 변수에서만 읽는다.
+
+```powershell
+$env:OPENAI_API_KEY = '<키>'
+python tools/cocompose_bridge.py --project 'C:\project_private\my-song\project.json' --provider openai
+```
+
+`--model`로 모델 이름을, `--key-name`으로 키를 담은 환경 변수 이름을 바꿀 수 있다. `--once`는 한 번 답하고 끝낸다. bridge를 끄면 앱이 곧 알아차린다.
+
+채팅 패널 아래쪽에 현재 연결 상태가 적힌다. `connected: echo (no model, plumbing only)`처럼 어느 provider가 듣고 있는지 함께 보여 주므로, echo로 받은 답을 실제 모델의 답으로 오해할 일은 없다. 듣는 것이 없으면 `no bridge running`이다.
+
+### 묻기
+
+입력란에 질문을 쓰고 `Ask`를 누른다. 기다리는 동안 재생은 계속되고 편집도 계속할 수 있다. 답이 오지 않는 것과 앱이 멈추는 것은 다른 일이며, 모델과의 통신은 이 앱 안에서 일어나지 않는다. `Stop`은 기다리기를 그만둔다.
+
+bridge가 돌고 있지 않으면 질문은 보내지지 않고, **입력란에 쓴 글은 그대로 남는다.** 취소했을 때도, 실패했을 때도 마찬가지다. 입력란은 질문이 실제로 나갔을 때만 비워진다.
+
+대화는 프로젝트에 묶여 있다. 앱을 닫았다 열어도, 패널을 닫았다 열어도 이어진다. 기록은 프로젝트 폴더의 `conversation.json`에 있고 곡 파일과는 별개다. 지우거나 다른 곳에 복사해도 곡에는 아무 영향이 없다.
+
+### 지금 할 수 없는 것
+
+이 항목은 "아직 안 되는 것"이 아니라 **확인되지 않았거나 존재하지 않는 것**이다.
+
+- **실제 모델로는 아직 확인되지 않았다.** 지금까지 답한 것은 echo뿐이다. `--provider openai`가 실제로 동작하는지는 키를 가진 사용자가 직접 확인해야 한다.
+- **AI는 프로젝트를 바꿀 수 없다.** 곡을 수정하는 도구는 구현되어 있지 않고, 모델에게 알려 주는 도구 목록에도 넣지 않았다. 있다고 들은 도구를 모델이 쓰려다 실패하는 것보다 처음부터 없는 편이 낫기 때문이다. 바꿔 달라고 요청하면 무엇을 어떻게 바꿀지 말로만 답하고, 적용은 사람이 화면이나 `project.json`으로 한다.
+- **오디오는 보내지 않는다.** 어떤 경로로도 소리가 나가지 않으므로 모델은 곡이 어떻게 들리는지 알 수 없다. 구조·노트·레벨·라우팅에 대해서만 답한다.
+- 새 대화로 분기하는 버튼은 화면에 없다. 진단용 `--ui-script`로만 할 수 있다.
+- 답은 `echo`에서만 조각으로 나뉘어 들어온다. `openai`는 답이 다 온 뒤 한 번에 표시된다.
+
+### 채팅이 쓰는 파일
+
+프로젝트 폴더에 다음이 생긴다. 전부 프로젝트 옆에 있을 뿐 곡 파일의 일부가 아니다.
+
+| 파일 | 역할 |
+|---|---|
+| `conversation.json` | 이 프로젝트의 대화 기록. `project_id`에 묶이므로 앱을 다시 열어도 이어진다 |
+| `chat-request.json` | 앱이 적은 질문. bridge가 읽는다 |
+| `chat-reply.json` | bridge가 적은 답. 앱이 읽는다 |
+| `chat-cancel.json` | 기다리기를 그만두겠다는 요청 |
+| `chat-bridge.json` | bridge가 듣고 있는지와 어느 provider인지 |
+| `chat-inspector.json` | 지금 붙어 있는 첨부를 그대로 적은 읽기 전용 결과물. 앱이 쓰기만 하고 읽지 않는다 |
+
+`session.tracktionedit`에는 `project_id`가 함께 저장된다. 실행마다 바뀌는 `session_id`와 달리 폴더를 옮기거나 이름을 바꿔도 유지되며, 대화가 묶이는 대상이 이것이다.
+
+### 도구를 스크립트에서 직접 부르기
+
+채팅 패널이 곡을 읽을 때 쓰는 것과 **같은 서비스**를 밖에서도 부를 수 있다. 앱이 실행 중일 때 `tool-request.json`을 쓰면 앱이 `tool-response.json`으로 답하며, helper에 그 명령이 있다.
+
+```powershell
+python tools/cocompose.py --project 'C:\project_private\my-song\project.json' tool get_capabilities
+python tools/cocompose.py --project 'C:\project_private\my-song\project.json' tool inspect_region --arg start_beat=32 --arg end_beat=64
+```
+
+| 도구 | 인자 | 답하는 것 |
+|---|---|---|
+| `get_capabilities` | 없음 | 이 빌드가 실제로 제공하는 도구, 단위, 상한, 오디오 전송 가능 여부 |
+| `get_selection` | 없음 | 현재 선택된 채널·패턴·레인·인서트 |
+| `inspect_region` | `start_beat`, `end_beat`, 선택적으로 `lanes`, `context_beats` | 그 구간의 클립과, `context_clips`로 구분된 양옆의 맥락 |
+| `inspect_insert` | `insert` | 인서트의 효과 순서, 공개 파라미터, 센드, 출력, 배정된 채널 |
+| `inspect_pattern` | `pattern`, 선택적으로 `channel` | 패턴의 노트와 그 패턴이 배치된 횟수 |
+
+쓰기 도구(`create_proposal`·`apply_proposal` 등)는 계약에 이름만 있고 이 빌드에서는 `UNSUPPORTED`로 거절되며 `get_capabilities` 목록에도 나오지 않는다.
+
+거절은 항상 정해진 단어로 온다. `INVALID_ARGUMENT`, `NOT_FOUND`, `STALE_REVISION`, `OUT_OF_SCOPE`, `LOCKED`, `UNSUPPORTED`, `CANCELLED`, `IO_ERROR`. 옆의 문장은 사람이 읽기 위한 것이므로 분기에 쓰지 않는다. 같은 `request_id`로 다시 물으면 앱이 이미 정한 답을 그대로 돌려준다.
+
+요청과 응답의 정확한 모양은 [`docs/ai-tool-contract.schema.json`](ai-tool-contract.schema.json)에 있다.
+
+### 채팅 관련 검사
+
+앱을 종료한 상태에서 저장소 루트에서 실행한다. 검사는 새 폴더에 실제 앱을 띄운다.
+
+```powershell
+python tools/test_ai_chat.py --output build-cocompose/chat-test
+python tools/test_tool_contract.py --output build-cocompose/tool-test
+```
+
+앞의 것은 세 종류의 첨부와, 첨부·이동·제거·패널 조작이 revision을 건드리지 않는다는 것, `project_id`가 재시작을 넘고 `session_id`는 넘지 않는다는 것을 확인한다. 뒤의 것은 앱의 실제 답을 스키마와 대조하고, 잘못된 요청이 약속한 단어로 거절되며 아무것도 바꾸지 않는지, 그리고 앱 안의 채팅과 밖의 스크립트가 같은 질문에 같은 답을 받는지 확인한다. `test_tool_contract.py`는 `jsonschema` 패키지를 사용하므로 다른 검사와 달리 표준 라이브러리만으로는 실행되지 않는다.
 
 ## 외부 AI와 협업하기
 

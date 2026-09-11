@@ -83,13 +83,26 @@ def run(exe, output):
         report.expect("an answer matches the answer shape", ok, why)
         ok, why = valid_against(caps["result"], "capabilities")
         report.expect("capabilities match the capabilities shape", ok, why)
-        report.expect("only built tools are offered",
-                      caps["result"]["tools"] == ["get_capabilities", "get_selection",
-                                                  "inspect_region", "inspect_insert",
-                                                  "inspect_pattern"],
-                      caps["result"]["tools"])
-        report.expect("no writes are offered while none are built",
-                      caps["result"]["writes"] == [], caps["result"]["writes"])
+        # Rather than listing the expected tools here - which only proves the list
+        # matches another list - every tool that is offered is called, and none of them
+        # may answer "no such tool". That makes the promise check itself.
+        offered = caps["result"]["tools"]
+        report.expect("some tools are offered", len(offered) >= 5, offered)
+
+        for name in offered:
+            answer = tool(project, name, {})
+            unknown = (answer["status"] == "error"
+                       and ("No such tool" in answer["error"]["message"]
+                            or answer["error"]["code"] == "UNSUPPORTED"))
+            report.expect("an offered tool exists: " + name, not unknown,
+                          answer.get("error", {}).get("message", ""))
+
+        report.expect("writes are described as kinds of change, not as prose",
+                      all("." in kind for kind in caps["result"]["writes"]),
+                      caps["result"]["writes"])
+        report.expect("nothing beyond notes and parameters is offered as writable",
+                      all(kind.startswith(("note.", "parameter.")) for kind in caps["result"]["writes"]),
+                      caps["result"]["writes"])
         report.expect("audio is declared unavailable rather than left unsaid",
                       caps["result"]["audio"]["can_send_audio"] is False)
 
@@ -127,7 +140,7 @@ def run(exe, output):
             ("a lane that is not there", "inspect_region",
              {"start_beat": 0.0, "end_beat": 4.0, "lanes": ["nope"]}, "NOT_FOUND"),
             ("a tool that does not exist", "fly_to_the_moon", {}, "INVALID_ARGUMENT"),
-            ("a tool that is not built yet", "apply_proposal", {}, "UNSUPPORTED"),
+            ("a tool that is not built yet", "preview_proposal", {}, "UNSUPPORTED"),
         ]
 
         for name, which, arguments, expected in cases:
@@ -136,6 +149,10 @@ def run(exe, output):
             report.expect(name + " is refused as " + expected,
                           answer["status"] == "error" and answer["error"]["code"] == expected and ok,
                           answer.get("error", {}).get("code", answer["status"]) + (" " + why if not ok else ""))
+
+        for name in ["preview_proposal", "get_operation", "cancel_operation"]:
+            report.expect("a tool that is not built is not offered: " + name,
+                          name not in offered)
 
         wrong_version = tool(project, "get_selection", {}, contract_version=99)
         report.expect("an unknown contract version is refused",
