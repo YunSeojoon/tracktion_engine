@@ -271,6 +271,59 @@ def check_three_ways_of_the_same_bars(exe, folder, report):
         session.close()
 
 
+def check_the_model_is_told_what_it_already_offered(exe, folder, report):
+    """B3: "less complicated than the last one" has to point at a candidate.
+
+    Otherwise the phrase is resolved by whatever the model infers from the transcript,
+    and the model is the participant least able to do it: it has a record of what it
+    said, not of what it offered. So the question carries the shelf - by number, in the
+    order they were offered, with the taken one marked."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open()
+
+    try:
+        pattern_id = prepare_song(session)
+        state = session.settled()
+        channel_id = state["channels"][0]["id"]
+        notes = tool(folder / "project.json", "inspect_pattern",
+                     {"pattern": pattern_id, "channel": channel_id})["result"]["parts"][0]["notes"]
+        subject = notes[0]
+
+        with Liveness(folder / "chat-bridge.json", "fixture bridge"):
+            wait_for(lambda: read(folder / "chat-inspector.json").get("bridge_connected"),
+                     timeout=20, what="the app to see the fixture bridge")
+
+            first = ask_once(session, folder,
+                             {"description": "AI: up 2",
+                              "notes": [{"what": "change", "id": subject["id"],
+                                         "pitch": min(127, subject["pitch"] + 2)}]}, None)
+
+            report.expect("the first question carried no alternatives, because there were none",
+                          not (read(folder / "chat-request.json").get("candidates") or {})
+                              .get("offered_before"),
+                          read(folder / "chat-request.json").get("candidates"))
+
+            session.run([{"attach": "notes"}])
+            session.run([{"chat": "ask: less complicated than the last one"}])
+            asked = wait_for(lambda: (read(folder / "chat-request.json")
+                                      if read(folder / "chat-request.json").get("request_id") != first
+                                      else None),
+                             timeout=20, what="the follow-up question")
+
+            offered = (asked.get("candidates") or {}).get("offered_before") or []
+            report.expect("the follow-up carries what was already offered",
+                          len(offered) == 1, offered)
+            report.expect("and names it the way a person would refer to it",
+                          offered and offered[0].get("offered") == 1
+                          and offered[0]["description"] == "AI: up 2",
+                          offered[:1])
+            report.expect("and says plainly that naming one is not permission",
+                          "not permission" in ((asked.get("candidates") or {}).get("note") or ""),
+                          (asked.get("candidates") or {}).get("note", "")[:80])
+    finally:
+        session.close()
+
+
 def check_a_copied_project_does_not_inherit_the_shelf(exe, folder, report):
     """The same rule the notes follow. A copied folder is a different project, and the
     alternatives offered for the original were about music that is now somewhere else."""
@@ -319,6 +372,9 @@ def run(exe, output):
 
     print("three ways of the same bars, and taking one")
     check_three_ways_of_the_same_bars(exe, output / "three", report)
+    print()
+    print("the model is told what it already offered")
+    check_the_model_is_told_what_it_already_offered(exe, output / "told", report)
     print()
     print("a copied project does not inherit what was offered for the original")
     check_a_copied_project_does_not_inherit_the_shelf(exe, output / "copied", report)

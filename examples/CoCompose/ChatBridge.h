@@ -41,6 +41,10 @@ public:
         /** What is known about the project, with the three kinds kept apart: what the
             person decided, what the assistant guessed, and what is being asked now. */
         var notes;
+
+        /** The alternatives already offered, so a follow-up about "the last one" points
+            at a candidate rather than at whatever the model infers from the transcript. */
+        var candidates;
         int revision = 0;
     };
 
@@ -66,6 +70,7 @@ public:
             { "attachments", outgoing.attachments },
             { "history", outgoing.history },
             { "notes", outgoing.notes },
+            { "candidates", outgoing.candidates },
             { "asked_at_ms", Time::getCurrentTime().toMilliseconds() } }), false));
     }
 

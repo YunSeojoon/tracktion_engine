@@ -281,6 +281,22 @@ def build_prompt(request):
                      " change with this setting.")
         parts.append("")
 
+    shelf = (request.get("candidates") or {}).get("offered_before") or []
+    if shelf:
+        # Numbered, because that is how a person refers to them. Without this the model
+        # is asked to work out which of its own earlier answers "the last one" means by
+        # reading the transcript, and it is the participant least able to do that: it
+        # has no record of what it offered, only of what it said.
+        parts.append("Alternatives you already offered for this project, oldest first:")
+        for one in shelf:
+            parts.append("  %d. %s%s" % (one.get("offered", 0),
+                                         one.get("description") or "(no description)",
+                                         "  - this is the one they took" if one.get("adopted") else ""))
+        parts.append("  Phrases like \"the last one\" or \"the second one\" mean these, by"
+                     " that number. Naming one is not permission to change anything: what"
+                     " you may touch is still only what they attached.")
+        parts.append("")
+
     parts.append(describe_attachments(request.get("attachments", [])))
     parts.append("")
     parts.append("Their question: " + request.get("message", ""))

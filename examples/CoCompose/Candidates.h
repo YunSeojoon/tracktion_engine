@@ -181,6 +181,37 @@ public:
         return false;
     }
 
+    /** What to tell a model about what it has already offered.
+
+        Without this, "less complicated than the last one" is resolved by whatever the
+        model remembers, and the model is the one participant here that cannot be
+        relied on to remember: it is handed the conversation and asked to infer which
+        of its own answers a phrase points at. The shelf knows, so the shelf says - by
+        id, in the order they were offered, with the one that was taken marked.
+
+        Only the last few. A model given forty alternatives will pick from forty, and a
+        person saying "the last one" has never meant the ninth. */
+    var forContext (int howMany = 5) const
+    {
+        Array<var> recent;
+        const auto from = std::max (0, static_cast<int> (kept.size()) - howMany);
+
+        for (auto i = static_cast<size_t> (from); i < kept.size(); ++i)
+            recent.add (object ({ { "id", kept[i].id },
+                                  { "description", kept[i].description },
+                                  { "offered", static_cast<int> (i - static_cast<size_t> (from)) + 1 },
+                                  { "adopted", kept[i].adopted },
+                                  { "base_revision", kept[i].baseRevision },
+                                  { "diff", kept[i].diff } }));
+
+        return object ({ { "offered_before", recent },
+                         { "note", "These are alternatives this assistant already "
+                                   "offered, oldest first. A person saying \"the last "
+                                   "one\" or \"the second one\" means one of these, by "
+                                   "that order. Naming one is not permission to change "
+                                   "anything: scope still comes from what is attached." } });
+    }
+
     /** Everything about the shelf that the app reports, in one short string.
 
         The inspector packet is only rewritten when a key made of what it describes

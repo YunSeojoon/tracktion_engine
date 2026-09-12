@@ -1150,6 +1150,7 @@ private:
         outgoing.attachments = context;
         outgoing.history = conversation->recentForContext();
         outgoing.notes = notes->forContext();
+        outgoing.candidates = shelf->forContext();
         outgoing.revision = project.revision;
 
         bridge->ask (outgoing);
