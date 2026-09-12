@@ -30,12 +30,33 @@ namespace live
 */
 struct Note
 {
-    enum class Kind { condition, guess, request };
+    enum class Kind { condition, guess, request, todo };
+
+    /** Where in the song a note is about, and what should happen to that when the music
+        moves underneath it.
+
+        Two answers are both right, for different notes, and guessing which is meant is
+        how a note ends up pointing at the wrong bar. "The drop is too early" is about a
+        moment in the arrangement and stays there when a clip is dragged past it.
+        "Rewrite this fill" is about a particular clip and follows it. A note that
+        cannot say which it is has to be treated as one of them, and either choice is
+        wrong half the time.
+
+        And a clip can be deleted. A note that followed it then points at nothing, and
+        the honest thing is to say so rather than to quietly re-aim it at whatever is
+        nearest or to keep showing the place it used to be as though it were still
+        there. It keeps where it was, and it says the link is broken. */
+    enum class Anchor { nowhere, time, clip };
 
     String id;
     Kind kind = Kind::condition;
     String text;
     int64 atMillis = 0;
+
+    Anchor anchor = Anchor::nowhere;
+    double fromBeat = 0.0, toBeat = 0.0;   // where it points, in song beats
+    String clipID;                         // for a note that follows a clip
+    bool done = false;                     // for a todo
 
     /** For a guess: what it was read from, so a later turn can be told the music has
         moved since. Zero for a condition, which is about intent rather than a state. */
@@ -51,12 +72,31 @@ struct Note
         {
             case Kind::guess:   return "guess";
             case Kind::request: return "request";
+            case Kind::todo:    return "todo";
             default:            return "condition";
         }
     }
 
+    static String anchorName (Anchor a)
+    {
+        switch (a)
+        {
+            case Anchor::time: return "time";
+            case Anchor::clip: return "clip";
+            default:           return "nowhere";
+        }
+    }
+
+    static Anchor anchorNamed (const String& name)
+    {
+        if (name == "time") return Anchor::time;
+        if (name == "clip") return Anchor::clip;
+        return Anchor::nowhere;
+    }
+
     static Kind kindNamed (const String& name)
     {
+        if (name == "todo")    return Kind::todo;
         if (name == "guess")   return Kind::guess;
         if (name == "request") return Kind::request;
         return Kind::condition;
@@ -150,6 +190,88 @@ public:
         return add (Note::Kind::guess, text, aboutRevision, {});
     }
 
+    /** Something to come back to, pinned to a stretch of the song or tied to a clip.
+
+        A todo is not a condition: it is work that has not been done, not a rule about
+        how the music must be. Keeping them apart matters for the same reason the other
+        kinds are kept apart - an assistant that reads "rewrite this fill" as a rule
+        will defend the fill it was asked to replace. */
+    String addTodo (const String& text, Note::Anchor anchor, double fromBeat, double toBeat,
+                    const String& clipID)
+    {
+        const auto id = add (Note::Kind::todo, text, 0, {});
+        if (id.isEmpty())
+            return id;
+
+        for (auto& note : entries)
+            if (note.id == id)
+            {
+                note.anchor = anchor;
+                note.fromBeat = fromBeat;
+                note.toBeat = toBeat;
+                note.clipID = clipID;
+            }
+
+        save();
+        return id;
+    }
+
+    /** Marks a todo done. It stays on the list: what was done is part of what happened,
+        and a list that erases finished work cannot answer "did we ever fix that". */
+    bool complete (const String& id)
+    {
+        for (auto& note : entries)
+            if (note.id == id && note.kind == Note::Kind::todo)
+            {
+                note.done = true;
+                save();
+                return true;
+            }
+        return false;
+    }
+
+    /** Moves a clip-tracking note to where its clip now is, or marks it broken if the
+        clip has gone. Called by whoever can see the arrangement; the notes cannot look
+        at the music themselves and must not guess.
+
+        Returns true if anything moved or broke, so a caller knows to write it out. */
+    bool followClips (const std::function<bool (const String&, double&, double&)>& whereIsClip)
+    {
+        auto moved = false;
+
+        for (auto& note : entries)
+        {
+            if (note.anchor != Note::Anchor::clip || note.clipID.isEmpty())
+                continue;
+
+            double from = note.fromBeat, to = note.toBeat;
+
+            if (whereIsClip (note.clipID, from, to))
+            {
+                if (from != note.fromBeat || to != note.toBeat)
+                {
+                    note.fromBeat = from;
+                    note.toBeat = to;
+                    moved = true;
+                }
+            }
+            else if (! note.clipID.startsWith ("gone:"))
+            {
+                // The clip is not there any more. Where it was is kept, and the link is
+                // marked broken rather than quietly re-aimed at whatever is nearest -
+                // a note that moves somewhere nobody put it is worse than one that
+                // admits it lost its place.
+                note.clipID = "gone:" + note.clipID;
+                moved = true;
+            }
+        }
+
+        if (moved)
+            save();
+
+        return moved;
+    }
+
     String setRequest (const String& text)
     {
         for (int i = static_cast<int> (entries.size()); --i >= 0;)
@@ -207,11 +329,49 @@ public:
                 request = note.text;
         }
 
+        Array<var> todos;
+        for (const auto& note : entries)
+        {
+            if (note.kind != Note::Kind::todo || note.done)
+                continue;
+
+            const auto lost = note.clipID.startsWith ("gone:");
+            todos.add (object ({ { "id", note.id }, { "text", note.text },
+                                 { "anchor", Note::anchorName (note.anchor) },
+                                 { "from_beat", note.fromBeat },
+                                 { "to_beat", note.toBeat },
+                                 { "lost_its_clip", lost },
+                                 { "where", lost
+                                     ? "the clip this was about has been deleted; these "
+                                       "beats are where it used to be"
+                                     : "beats in the arrangement" } }));
+        }
+
         return object ({ { "conditions", conditions },
                          { "guesses", guesses },
+                         { "todos", todos },
                          { "request", request },
                          { "strength", strengthName (howFar) },
                          { "strength_means", describeStrength (howFar) } });
+    }
+
+    /** Everything the app reports about the notes, in one short string.
+
+        The inspector packet is rewritten only when a key built from what it describes
+        moves, and a note that slides along with its clip does not change how many notes
+        there are. The shelf keeps its key beside its contents for this reason; so does
+        this, and for the same one. */
+    String shape() const
+    {
+        String key (entries.size());
+        key << "/" << strengthName (howFar);
+
+        for (const auto& note : entries)
+            key << "|" << note.id << (note.done ? "x" : "-")
+                << Note::anchorName (note.anchor) << note.fromBeat << "," << note.toBeat
+                << note.clipID;
+
+        return key;
     }
 
     var asJson() const { return snapshot(); }
@@ -244,7 +404,12 @@ private:
                                { "text", note.text },
                                { "at_ms", note.atMillis },
                                { "about_revision", note.aboutRevision },
-                               { "promoted_from", note.promotedFrom } }));
+                               { "promoted_from", note.promotedFrom },
+                               { "anchor", Note::anchorName (note.anchor) },
+                               { "from_beat", note.fromBeat },
+                               { "to_beat", note.toBeat },
+                               { "clip", note.clipID },
+                               { "done", note.done } }));
 
         return object ({ { "schema", 1 }, { "project_id", projectID },
                          { "strength", strengthName (howFar) }, { "notes", out } });
@@ -276,6 +441,11 @@ private:
                 note.text = entry["text"].toString();
                 note.atMillis = static_cast<int64> (entry["at_ms"]);
                 note.aboutRevision = static_cast<int> (entry["about_revision"]);
+                note.anchor = Note::anchorNamed (entry["anchor"].toString());
+                note.fromBeat = static_cast<double> (entry["from_beat"]);
+                note.toBeat = static_cast<double> (entry["to_beat"]);
+                note.clipID = entry["clip"].toString();
+                note.done = static_cast<bool> (entry["done"]);
                 note.promotedFrom = entry["promoted_from"].toString();
 
                 // A request is about the moment it was made. Restoring one from a

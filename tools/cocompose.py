@@ -9,13 +9,23 @@ import uuid
 
 
 def read(path):
-    # Windows can briefly deny an open while the app atomically replaces a file.
-    for attempt in range(20):
+    """Reads one of the app's JSON files, waiting out a replacement in progress.
+
+    Windows denies an open while a file is being atomically replaced, and the app
+    replaces these constantly. Half a second of patience was enough until a run with
+    nine suites in it took longer than that under load, and the check that happened to
+    be reading at the time failed with a PermissionError that said nothing about why.
+    Three seconds, and then a sentence that names the file and the reason.
+    """
+    for attempt in range(120):
         try:
             return json.loads(Path(path).read_text(encoding="utf-8-sig"))
-        except (PermissionError, FileNotFoundError):
-            if attempt == 19:
-                raise
+        except (PermissionError, FileNotFoundError) as why:
+            if attempt == 119:
+                raise type(why)(
+                    "%s after 3s. The app replaces this file as it works, so a denial "
+                    "means it was being replaced for longer than that - a busy machine, "
+                    "not a broken check." % path) from None
             time.sleep(0.025)
 
 

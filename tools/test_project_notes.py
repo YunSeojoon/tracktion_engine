@@ -256,6 +256,89 @@ def check_the_model_is_told_taste_not_reach(report):
                   "not about what you may touch" in prompt)
 
 
+def check_a_note_about_a_place_keeps_its_place(exe, folder, report):
+    """B3: a note pinned to a stretch, and a note tied to a clip, when the music moves.
+
+    Both answers are right for different notes. "The drop is too early" is about a
+    moment in the arrangement and stays there when a clip is dragged past it. "Rewrite
+    this fill" is about a clip and follows it. Guessing which is meant is how a note
+    ends up pointing at the wrong bar.
+
+    And a clip can be deleted. A note that followed it then points at nothing, and the
+    honest thing is to say so - not to re-aim it at whatever is nearest, and not to go
+    on showing the old place as though the clip were still in it."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        state = session.settled()
+        clip = state["playlist"]["clips"][0]
+        report.expect("there is a clip to tie a note to", clip is not None)
+
+        session.run([{"project_note": ["todo_at", "the drop is too early", 16.0, 24.0]},
+                     {"project_note": ["todo_on", "rewrite this fill", clip["id"]]}])
+        time.sleep(0.6)
+
+        todos = of_kind(folder, "todo")
+        report.expect("both notes were taken", len(todos) == 2, [t["text"] for t in todos])
+        if len(todos) != 2:
+            return
+
+        pinned = next(t for t in todos if t["anchor"] == "time")
+        tied = next(t for t in todos if t["anchor"] == "clip")
+        report.expect("the pinned one is where it was put",
+                      (pinned["from_beat"], pinned["to_beat"]) == (16.0, 24.0),
+                      (pinned["from_beat"], pinned["to_beat"]))
+        report.expect("and the tied one starts where its clip is",
+                      tied["from_beat"] == clip["start"], (tied["from_beat"], clip["start"]))
+
+        def shift(live):
+            for placement in live["playlist"]["clips"]:
+                if placement["id"] == clip["id"]:
+                    placement["start"] = clip["start"] + 32.0
+
+        apply_change(project, shift)
+        time.sleep(1.5)
+        session.settled()
+
+        moved = of_kind(folder, "todo")
+        after_tied = next(t for t in moved if t["id"] == tied["id"])
+        after_pinned = next(t for t in moved if t["id"] == pinned["id"])
+        report.expect("the tied note went with its clip",
+                      after_tied["from_beat"] == clip["start"] + 32.0,
+                      (after_tied["from_beat"], clip["start"] + 32.0))
+        report.expect("and the pinned one stayed where it was put",
+                      (after_pinned["from_beat"], after_pinned["to_beat"]) == (16.0, 24.0),
+                      (after_pinned["from_beat"], after_pinned["to_beat"]))
+
+        def remove(live):
+            live["playlist"]["clips"] = [p for p in live["playlist"]["clips"]
+                                         if p["id"] != clip["id"]]
+
+        apply_change(project, remove)
+        time.sleep(1.5)
+        session.settled()
+
+        orphaned = next(t for t in of_kind(folder, "todo") if t["id"] == tied["id"])
+        report.expect("a note whose clip was deleted says so",
+                      orphaned["clip"].startswith("gone:"), orphaned["clip"])
+        report.expect("and keeps where the clip used to be, rather than moving somewhere "
+                      "nobody put it",
+                      orphaned["from_beat"] == clip["start"] + 32.0, orphaned["from_beat"])
+        report.expect("the pinned note is untouched by any of it",
+                      next(t for t in of_kind(folder, "todo")
+                           if t["id"] == pinned["id"])["from_beat"] == 16.0)
+
+        session.run([{"project_note": ["done", pinned["id"]]}])
+        time.sleep(0.6)
+        finished = next(t for t in of_kind(folder, "todo") if t["id"] == pinned["id"])
+        report.expect("a todo marked done stays on the list", finished["done"] is True)
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -277,6 +360,9 @@ def run(exe, output):
     print()
     print("the model is told which is which")
     check_the_model_is_told_which_is_which(report)
+    print()
+    print("a note about a place keeps its place")
+    check_a_note_about_a_place_keeps_its_place(exe, output / "places", report)
 
     print()
     print("FAILURES:", report.failures if report.failures else "none")

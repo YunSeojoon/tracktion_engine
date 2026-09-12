@@ -791,6 +791,7 @@ private:
     int startupTicks = 0;
     int lastSnapshotRevision = -1;
     String lastControl, lastLabels, scriptError, lastScript;
+    int notesFollowedAtRevision = -1;
     File scriptFile;
     var script;
     int scriptStep = 0, scriptRound = 0;
@@ -1531,12 +1532,12 @@ private:
                              + String (workspace.suggestedNoteCount()) + ":"
                              + workspace.noteEditorHeading() + ":"
                              + workspace.arrangementTool() + ":"
-                             + String (notes != nullptr ? notes->all().size() : 0) + ":"
-                             // The count alone does not move when the strength does, and
+                             // The count alone does not move when the strength does, or
+                             // when a note slides along with the clip it is tied to, and
                              // a packet that stops being rewritten is a packet that lies.
-                             // Third time this has come up here: whatever the file says,
-                             // put it in the key.
-                             + (notes != nullptr ? live::strengthName (notes->strength()) : String()) + ":"
+                             // This has now caught five fields here, so the key lives
+                             // next to the contents it describes rather than out here.
+                             + (notes != nullptr ? notes->shape() : String()) + ":"
                              + String (workspace.playlistGrid().laneHeight) + ":"
                              // Fourth. The shelf reports what was offered, which was
                              // taken and what each was heard with, and none of that
@@ -1775,6 +1776,31 @@ private:
             acknowledge (request, failure);
     }
 
+    /** Keeps clip-tracking notes pointing at their clips.
+
+        The notes cannot see the arrangement and must not guess at it, so the part that
+        can look does the looking and hands back an answer. Only when the music has
+        moved: walking every note against every clip on a quarter-second timer would be
+        work done to discover nothing, over and over. */
+    void followClipsWithNotes()
+    {
+        if (notes == nullptr || project.revision == notesFollowedAtRevision)
+            return;
+
+        notesFollowedAtRevision = project.revision;
+
+        notes->followClips ([this] (const String& clipID, double& from, double& to)
+        {
+            auto clip = project.model->placementFor (clipID);
+            if (! clip.isValid())
+                return false;
+
+            from = static_cast<double> (clip[live::ids::start]);
+            to = from + static_cast<double> (clip[live::ids::length]);
+            return true;
+        });
+    }
+
     void acknowledge (const var& request, const String& failure)
     {
         live::atomicWrite (project.source.getSiblingFile ("control-status.json"), JSON::toString (live::object ({
@@ -1789,6 +1815,7 @@ private:
         project.poll();
         pollControl();
         pollToolRequest();
+        followClipsWithNotes();
         workspace.refresh();
         workspace.store();
         // Some graph rebuilds briefly clear the engine's playing flag. Preserve the
@@ -2212,12 +2239,38 @@ private:
             // Not "note": that is a piano-roll note, and giving two different things
             // one name meant the new handler quietly ate the old action.
             const auto what = action["project_note"];
-            if (! what.isArray() || what.size() != 2)
+            if (! what.isArray() || what.size() < 2)
                 return false;
 
             const auto kind = what[0].toString();
             const auto value = what[1].toString();
 
+            // ["todo_at", text, fromBeat, toBeat] stays where it is put; ["todo_on",
+            // text, clip id] follows that clip. Two gestures because they are two
+            // different intentions and one of them is wrong for any given note.
+            if (kind == "todo_at" && what.size() == 4)
+                return notes->addTodo (value, live::Note::Anchor::time,
+                                       static_cast<double> (what[2]),
+                                       static_cast<double> (what[3]), {}).isNotEmpty();
+
+            if (kind == "todo_on" && what.size() == 3)
+            {
+                auto clip = project.model->placementFor (what[2].toString());
+                if (! clip.isValid())
+                    return false;
+
+                const auto start = static_cast<double> (clip[live::ids::start]);
+                return notes->addTodo (value, live::Note::Anchor::clip, start,
+                                       start + static_cast<double> (clip[live::ids::length]),
+                                       what[2].toString()).isNotEmpty();
+            }
+
+            if (what.size() != 2)
+                return false;
+
+            if (kind == "todo")      return notes->addTodo (value, live::Note::Anchor::nowhere,
+                                                             0.0, 0.0, {}).isNotEmpty();
+            if (kind == "done")      return notes->complete (value);
             if (kind == "condition") return notes->addCondition (value).isNotEmpty();
             if (kind == "guess")     return notes->addGuess (value, project.revision).isNotEmpty();
             if (kind == "request")   return notes->setRequest (value).isNotEmpty();

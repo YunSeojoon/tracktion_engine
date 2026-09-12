@@ -321,10 +321,17 @@ def suggested_change(request):
         if not detail:
             continue
 
+        # An empty list means nothing may be changed, not everything. The app was
+        # reading it the other way round until the fourth review reproduced what that
+        # allowed, and the same misreading was still sitting here: "no allowed list, so
+        # take the first four of the part" writes a change naming notes nobody attached,
+        # which the app then refuses - correctly, and after the fact.
         allowed = set(attachment.get("notes_allowed") or [])
+        if not allowed:
+            continue
 
         for part in detail.get("parts", []):
-            notes = [n for n in part.get("notes", []) if not allowed or n["id"] in allowed][:4]
+            notes = [n for n in part.get("notes", []) if n["id"] in allowed][:4]
             if not notes:
                 continue
 
