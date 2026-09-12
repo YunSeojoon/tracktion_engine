@@ -1,0 +1,209 @@
+"""A4's first piece: what is known about a project, kept apart by who said it.
+
+Three things get called "the notes", and collapsing them is how an assistant starts
+building confidently on something nobody agreed to. A person's condition is a rule. The
+assistant's guess is a reading that may be right and is still a guess. The current
+request is neither and expires with the answer.
+
+The rule these checks exist for is the one that is easy to lose: a guess never becomes
+a rule on its own. An assistant that reads "this is in D minor", is later shown its own
+note, and treats it as an instruction, will insist on a key nobody chose.
+
+    python tools/test_project_notes.py
+"""
+import argparse
+from pathlib import Path
+import sys
+import time
+import uuid
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from cocompose import apply_change, read, wait_for
+from test_plugin_compatibility import Session, prepare_song
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class Report:
+    def __init__(self):
+        self.failures = []
+
+    def expect(self, name, condition, detail=''):
+        print(('  ok   ' if condition else '  FAIL ') + name + (('  ' + str(detail)) if detail else ''))
+        if not condition:
+            self.failures.append(name)
+
+
+def notes_of(folder):
+    return read(folder / "chat-inspector.json").get("notes", {}).get("notes", [])
+
+
+def of_kind(folder, kind):
+    return [n for n in notes_of(folder) if n["kind"] == kind]
+
+
+def check_a_guess_never_becomes_a_rule_on_its_own(exe, folder, report):
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+    try:
+        prepare_song(session)
+        session.settled()
+        revision = read(folder / "sync-status.json")["revision"]
+
+        session.run([{"project_note": ["condition", "keep the drums as they are"]},
+                     {"project_note": ["guess", "this sounds like D minor"]},
+                     {"project_note": ["request", "make the bass busier"]}])
+        time.sleep(0.6)
+
+        report.expect("a person's decision is recorded as decided",
+                      [n["text"] for n in of_kind(folder, "condition")]
+                      == ["keep the drums as they are"],
+                      of_kind(folder, "condition"))
+        report.expect("the assistant's reading is recorded as a guess",
+                      [n["text"] for n in of_kind(folder, "guess")] == ["this sounds like D minor"])
+        report.expect("a guess says which music it was read from",
+                      of_kind(folder, "guess")[0]["about_revision"] == revision,
+                      (of_kind(folder, "guess")[0]["about_revision"], revision))
+        report.expect("and it is not a condition",
+                      len(of_kind(folder, "condition")) == 1)
+
+        # Only a person turns a guess into a rule, and the guess stays where it was.
+        guess_id = of_kind(folder, "guess")[0]["id"]
+        session.run([{"project_note": ["accept", guess_id]}])
+        time.sleep(0.5)
+
+        agreed = of_kind(folder, "condition")
+        report.expect("accepting a guess makes a condition",
+                      any(n["text"] == "this sounds like D minor" for n in agreed), agreed)
+        report.expect("and says which guess it came from",
+                      any(n["promoted_from"] == guess_id for n in agreed))
+        report.expect("the guess is still there, as a guess",
+                      len(of_kind(folder, "guess")) == 1)
+
+        report.expect("writing notes changed no music",
+                      read(folder / "sync-status.json")["revision"] == revision,
+                      read(folder / "sync-status.json")["revision"])
+    finally:
+        session.close()
+
+
+def check_notes_outlive_the_app_but_not_the_request(exe, folder, report):
+    """A condition is a decision and survives; a request is about a moment and does not."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open()
+    try:
+        prepare_song(session)
+        session.settled()
+        session.run([{"project_note": ["condition", "stay in 3/4"]},
+                     {"project_note": ["guess", "the chorus starts at bar 17"]},
+                     {"project_note": ["request", "try something for the bridge"]}])
+        time.sleep(0.6)
+        report.expect("there is a request while it is being asked",
+                      len(of_kind(folder, "request")) == 1)
+    finally:
+        session.close()
+
+    session = Session(exe, folder).open()
+    try:
+        session.settled()
+        time.sleep(0.8)
+        report.expect("a decision survives closing the app",
+                      any(n["text"] == "stay in 3/4" for n in of_kind(folder, "condition")),
+                      of_kind(folder, "condition"))
+        report.expect("so does a guess, still marked as one",
+                      any(n["text"] == "the chorus starts at bar 17" for n in of_kind(folder, "guess")))
+        report.expect("a finished request does not come back",
+                      not of_kind(folder, "request"), of_kind(folder, "request"))
+    finally:
+        session.close()
+
+
+def check_notes_do_not_move_between_projects(exe, folder, report):
+    """Notes belong to a project id. A copied folder is a different project and must not
+    inherit decisions made about the original."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open()
+    try:
+        prepare_song(session)
+        session.settled()
+        session.run([{"project_note": ["condition", "the outro fades"]}])
+        time.sleep(0.5)
+        report.expect("the note is here", len(of_kind(folder, "condition")) == 1)
+    finally:
+        session.close()
+
+    # The same notes file, claimed by a project that is not the one it was written for.
+    copied = folder.parent / (folder.name + "-copy")
+    copied.mkdir(parents=True, exist_ok=True)
+    import shutil
+    for name in ("project.json", "notes.json"):
+        if (folder / name).exists():
+            shutil.copyfile(folder / name, copied / name)
+
+    session = Session(exe, copied).open()
+    try:
+        session.settled()
+        time.sleep(0.8)
+        # A fresh project id means the notes file is not this project's.
+        report.expect("a copied project does not inherit the original's decisions",
+                      not of_kind(copied, "condition"), of_kind(copied, "condition"))
+    finally:
+        session.close()
+
+
+def check_the_model_is_told_which_is_which(report):
+    """The prompt has to keep them apart, or a model reads its own guess as an
+    instruction it was given."""
+    from cocompose_bridge import build_prompt
+
+    prompt = build_prompt({
+        "revision": 5,
+        "message": "make the bridge less busy",
+        "attachments": [],
+        "history": {"messages": []},
+        "notes": {"conditions": [{"id": "c1", "text": "keep the drums as they are"}],
+                  "guesses": [{"id": "g1", "text": "this sounds like D minor",
+                               "about_revision": 4}],
+                  "request": "make the bridge less busy"}})
+
+    report.expect("what the person decided is marked as decided",
+                  "DECIDED by the person: keep the drums as they are" in prompt)
+    report.expect("what the assistant guessed is marked as a guess",
+                  "guessed by you earlier, not agreed" in prompt)
+    report.expect("and the model is told a guess is not a rule",
+                  "A guess is not a rule" in prompt)
+    report.expect("a guess carries the music it was read from", "revision 4" in prompt)
+
+
+def run(exe, output):
+    output.mkdir(parents=True, exist_ok=True)
+    report = Report()
+
+    print("a guess is not a rule")
+    check_a_guess_never_becomes_a_rule_on_its_own(exe, output / "kinds", report)
+    print()
+    print("what survives a restart")
+    check_notes_outlive_the_app_but_not_the_request(exe, output / "restart", report)
+    print()
+    print("notes belong to one project")
+    check_notes_do_not_move_between_projects(exe, output / "project", report)
+    print()
+    print("the model is told which is which")
+    check_the_model_is_told_which_is_which(report)
+
+    print()
+    print("FAILURES:", report.failures if report.failures else "none")
+    return report
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--exe", type=Path,
+                        default=ROOT / "build-cocompose/CoCompose_artefacts/Release/CoCompose.exe")
+    parser.add_argument("--output", type=Path,
+                        default=ROOT / "build-cocompose" / ("notes-" + uuid.uuid4().hex[:8]))
+    args = parser.parse_args()
+    sys.exit(1 if run(args.exe.resolve(), args.output.resolve()).failures else 0)

@@ -91,12 +91,29 @@ class Session:
         # next check fail at startup, in a different file, for no visible reason.
         wait_for_no_running_app()
 
+        # Whose session the files belong to right now. Waiting for state.json to merely
+        # exist is no wait at all on a second open: the previous run left one, so the
+        # check reads yesterday's answers and believes them. What tells a new app from
+        # an old file is the session id changing.
+        was = None
+        try:
+            was = read(self.folder / "sync-status.json").get("session_id")
+        except (FileNotFoundError, ValueError):
+            pass
+
         atomic_write(self.script, [])
         self.round = 0
         self.process = start(self.exe, self.folder, self.script, extra)
 
+        def a_new_app_is_answering():
+            status = read(self.folder / "sync-status.json")
+            return status if status.get("session_id") and status.get("session_id") != was else None
+
         try:
-            wait_for(lambda: read(self.folder / "state.json"), timeout=90)
+            wait_for(a_new_app_is_answering, timeout=90,
+                     what="a session id other than " + str(was))
+            wait_for(lambda: read(self.folder / "state.json"), timeout=90,
+                     what="the project state")
         except TimeoutError:
             if self.process.poll() is not None:
                 raise TimeoutError(
@@ -114,7 +131,9 @@ class Session:
         self.round += 1
         atomic_write(self.script, [{"comment": self.round}] + list(actions))
         wait_for(lambda: (read(self.folder / "ui-script-status.json").get("round") == self.round
-                          and read(self.folder / "ui-script-status.json").get("finished")), timeout=timeout)
+                          and read(self.folder / "ui-script-status.json").get("finished")),
+                 timeout=timeout,
+                 what="round %d to finish (%s)" % (self.round, json.dumps(list(actions))[:180]))
         status = read(self.folder / "ui-script-status.json")
         if status["error"]:
             raise RuntimeError(status["error"])

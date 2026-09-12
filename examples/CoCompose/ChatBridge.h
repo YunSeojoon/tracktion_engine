@@ -37,6 +37,10 @@ public:
         String message;
         var attachments;      // what was attached, already read out of the music
         var history;          // what came before, for a provider with no memory
+
+        /** What is known about the project, with the three kinds kept apart: what the
+            person decided, what the assistant guessed, and what is being asked now. */
+        var notes;
         int revision = 0;
     };
 
@@ -60,6 +64,7 @@ public:
             { "message", outgoing.message },
             { "attachments", outgoing.attachments },
             { "history", outgoing.history },
+            { "notes", outgoing.notes },
             { "asked_at_ms", Time::getCurrentTime().toMilliseconds() } }), false));
     }
 

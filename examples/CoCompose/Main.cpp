@@ -3,6 +3,7 @@
 #include "../common/Components.h"
 #include "../common/PluginWindow.h"
 #include "Theme.h"
+#include "Notes.h"
 #include "Tools.h"
 #include "ChatBridge.h"
 #include "LiveProject.h"
@@ -108,6 +109,8 @@ public:
                                                            project.projectID(), project.sessionID);
         conversation = std::make_unique<live::Conversation> (
             project.source.getSiblingFile ("conversation.json"), project.projectID());
+        notes = std::make_unique<live::ProjectNotes> (
+            project.source.getSiblingFile ("notes.json"), project.projectID());
         bridge = std::make_unique<live::ChatBridge> (project.source);
 
         workspace.chatPanel().onSend = [this] { askTheAssistant(); };
@@ -1114,6 +1117,7 @@ private:
         outgoing.message = typed;
         outgoing.attachments = context;
         outgoing.history = conversation->recentForContext();
+        outgoing.notes = notes->forContext();
         outgoing.revision = project.revision;
 
         bridge->ask (outgoing);
@@ -1437,6 +1441,7 @@ private:
                              + String (workspace.suggestedNoteCount()) + ":"
                              + workspace.noteEditorHeading() + ":"
                              + workspace.arrangementTool() + ":"
+                             + String (notes != nullptr ? notes->all().size() : 0) + ":"
                              + String (workspace.playlistGrid().laneHeight) + ":"
                              + String (project.revision);
 
@@ -1455,6 +1460,7 @@ private:
             fields->setProperty ("waiting", bridge != nullptr && bridge->isWaiting());
             fields->setProperty ("conversation_id", conversation != nullptr ? conversation->id() : String());
             fields->setProperty ("suggested_notes_drawn", workspace.suggestedNoteCount());
+            fields->setProperty ("notes", notes != nullptr ? notes->asJson() : var());
             fields->setProperty ("grid_tool", workspace.arrangementTool());
             fields->setProperty ("lane_height", workspace.playlistGrid().laneHeight);
             fields->setProperty ("editor_open", workspace.isNoteEditorOpen());
@@ -2025,6 +2031,26 @@ private:
             return workspace.playlistGrid().pointerGesture (gesture[0].toString(), from, to, lane);
         }
 
+        if (action.hasProperty ("project_note"))
+        {
+            // ["condition"|"guess"|"accept"|"remove"|"request", text or id]
+            // Not "note": that is a piano-roll note, and giving two different things
+            // one name meant the new handler quietly ate the old action.
+            const auto what = action["project_note"];
+            if (! what.isArray() || what.size() != 2)
+                return false;
+
+            const auto kind = what[0].toString();
+            const auto value = what[1].toString();
+
+            if (kind == "condition") return notes->addCondition (value).isNotEmpty();
+            if (kind == "guess")     return notes->addGuess (value, project.revision).isNotEmpty();
+            if (kind == "request")   return notes->setRequest (value).isNotEmpty();
+            if (kind == "accept")    return notes->acceptGuess (value);
+            if (kind == "remove")    return notes->remove (value);
+            return false;
+        }
+
         if (action.hasProperty ("preview"))
         {
             // [proposal id, fromBeat, toBeat]
@@ -2469,6 +2495,7 @@ private:
     /** Built once, so a request_id answered earlier is still known later in the run. */
     std::unique_ptr<live::ToolService> toolService;
     std::unique_ptr<live::Conversation> conversation;
+    std::unique_ptr<live::ProjectNotes> notes;
     std::unique_ptr<live::ChatBridge> bridge;
 
     live::CoComposeLookAndFeel look;

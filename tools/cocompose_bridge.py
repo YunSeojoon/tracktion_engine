@@ -257,6 +257,23 @@ def build_prompt(request):
             parts.append("  (a message above was cut; ask rather than assume what it said)")
         parts.append("")
 
+    known = request.get("notes") or {}
+
+    if known.get("conditions") or known.get("guesses"):
+        parts.append("What is known about this project:")
+
+        for condition in known.get("conditions", []):
+            parts.append("  DECIDED by the person: " + condition["text"])
+
+        for guess in known.get("guesses", []):
+            parts.append("  guessed by you earlier, not agreed: %s  (read at revision %s)"
+                         % (guess["text"], guess.get("about_revision")))
+
+        if known.get("guesses"):
+            parts.append("  A guess is not a rule. Do not treat one as something you were"
+                         " told, and say so if you are relying on it.")
+        parts.append("")
+
     parts.append(describe_attachments(request.get("attachments", [])))
     parts.append("")
     parts.append("Their question: " + request.get("message", ""))
