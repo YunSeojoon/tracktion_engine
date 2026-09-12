@@ -1860,6 +1860,14 @@ public:
 
         grid->onToolChosen = [this] (const String& name) { setTool (name); };
 
+        // The lane menu presses the buttons beside it rather than repeating them.
+        grid->onLaneAction = [this] (const String& what)
+        {
+            if (what == "add")    addLane.triggerClick();
+            if (what == "remove") removeLane.triggerClick();
+            if (what == "mute")   muteLane.triggerClick();
+        };
+
         addAndMakeVisible (viewport);
         for (auto* child : std::initializer_list<Component*> { &addLane, &removeLane, &muteLane,
                                                               &duplicate, &makeUnique, &remove,

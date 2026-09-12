@@ -206,6 +206,24 @@ public:
             return;
         }
 
+        // The lane names down the left are a target in their own right. Right-clicking
+        // one used to fall through to the empty-grid menu, which offers to place a
+        // pattern at a beat the pointer is not over.
+        if (e.mods.isRightButtonDown() && e.x < laneWidth && curveIndexAt (e.y) < 0)
+        {
+            dragMode = none;
+            const auto index = laneIndexAt (e.y);
+
+            if (auto lane = model.lanes().getChild (index); lane.isValid())
+            {
+                selection.setLane (Model::uidOf (lane));
+                notify();
+                showLaneMenu (Model::uidOf (lane));
+                repaint();
+                return;
+            }
+        }
+
         auto hit = clipAt (e.getPosition());
 
         if (! hit.isValid())
@@ -1106,6 +1124,10 @@ public:
         be holding a different tool from the one it says it is. */
     std::function<void (const String&)> onToolChosen;
 
+    /** "add", "remove" or "mute", for the lane menu. The panel owns those three as
+        buttons and the menu presses them; the grid does not keep a second copy. */
+    std::function<void (const String&)> onLaneAction;
+
     static Tool toolNamed (const String& name)
     {
         if (name == "draw")  return draw;
@@ -1222,6 +1244,81 @@ private:
     static String describeSeconds (double seconds)
     {
         return seconds <= 0.0 ? String ("none") : String (seconds, 2) + " s";
+    }
+
+    /** A playlist lane's menu, on its name.
+
+        Add, remove and mute are the panel's own buttons - the menu presses them rather
+        than repeating what they do, so the two cannot come to disagree. Rename has no
+        button anywhere, which is why it is written out here. */
+    void showLaneMenu (const String& laneID)
+    {
+        auto lane = model.laneFor (laneID);
+        if (! lane.isValid())
+            return;
+
+        const auto muted = static_cast<bool> (lane[ids::mute]);
+
+        PopupMenu menu;
+        menu.addSectionHeader (lane[ids::name].toString());
+        menu.addItem (1, "Rename...");
+        menu.addItem (2, "Mute", true, muted);
+        menu.addSeparator();
+        menu.addItem (3, "Taller");
+        menu.addItem (4, "Shorter", laneHeight > 16);
+        menu.addSeparator();
+        menu.addItem (5, "Ask AI about this part");
+        menu.addSeparator();
+        menu.addItem (6, "Add a lane");
+        menu.addItem (7, "Remove this lane");
+
+        menu.showMenuAsync (PopupMenu::Options(), [this, laneID] (int chosen)
+        {
+            // Looked up again: a lane can go while its menu is open, from a script or
+            // an answer arriving.
+            if (chosen == 0 || ! model.laneFor (laneID).isValid())
+                return;
+
+            switch (chosen)
+            {
+                case 1: renameLane (laneID); break;
+                case 2: if (onLaneAction) onLaneAction ("mute"); break;
+                case 3: setLaneHeight (laneHeight + 6); break;
+                case 4: setLaneHeight (laneHeight - 6); break;
+                case 5: if (runCommand) runCommand ("Ask AI about the region"); break;
+                case 6: if (onLaneAction) onLaneAction ("add"); break;
+                case 7: if (onLaneAction) onLaneAction ("remove"); break;
+                default: break;
+            }
+        });
+    }
+
+    void renameLane (const String& laneID)
+    {
+        auto* box = new AlertWindow ("Rename lane", "What should this lane be called?",
+                                     MessageBoxIconType::NoIcon);
+        box->addTextEditor ("name", model.laneFor (laneID)[ids::name].toString());
+        box->addButton ("Rename", 1, KeyPress (KeyPress::returnKey));
+        box->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+
+        box->enterModalState (true, ModalCallbackFunction::create (
+            [this, laneID, box] (int result)
+            {
+                std::unique_ptr<AlertWindow> owned (box);
+
+                auto lane = model.laneFor (laneID);
+                const auto typed = owned->getTextEditorContents ("name").trim();
+
+                // An empty box means "never mind", not "call it nothing": a lane with no
+                // name is a row a person cannot tell from the next one.
+                if (result != 1 || typed.isEmpty() || ! lane.isValid())
+                    return;
+
+                undo().beginNewTransaction ("Rename playlist lane");
+                lane.setProperty (ids::name, typed, &undo());
+                notify();
+                repaint();
+            }), false);
     }
 
     void showEmptyMenu (Point<int> where)

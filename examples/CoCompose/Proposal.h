@@ -89,7 +89,11 @@ struct Proposal
 
     // What it is allowed to touch, taken from the attachment it was made against.
     String patternID, channelID;
-    StringArray allowedNotes;   // empty means "any note of this channel's part"
+    // Empty means nothing may be touched, not everything. It meant the opposite once,
+    // and a question with no notes attached could therefore rewrite a whole part; the
+    // fourth review reproduced it. "No permission" and "the whole part" have to be
+    // different values, and the caller says which by listing what it was given.
+    StringArray allowedNotes;
     StringArray allowedInserts;
 
     Keeps keeps;

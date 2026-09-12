@@ -639,6 +639,19 @@ def check_every_target_has_a_menu_and_opening_it_changes_nothing(exe, folder, re
                           read(folder / "sync-status.json")["revision"] == revision,
                           read(folder / "sync-status.json")["revision"])
 
+        # The lane names down the left of the arrangement. The grid takes a beat and a
+        # lane, and a beat of 0 lands inside the name column, which is the point.
+        session.run([{"ruler": ["right-click", -1.0, -1.0, 0]}])
+        time.sleep(0.5)
+        session.run([{"dismiss_menus": True}])
+        time.sleep(0.3)
+        report.expect("and opening a lane header's menu changed nothing",
+                      read(folder / "sync-status.json")["revision"] == revision,
+                      read(folder / "sync-status.json")["revision"])
+        report.expect("and it did not place a clip, the way the empty-grid menu would",
+                      len(session.settled()["playlist"]["clips"]) == clips_before,
+                      len(session.settled()["playlist"]["clips"]))
+
         right_click({"right_click": ["channel", 0]}, "a channel header")
         right_click({"right_click": ["effect", insert_id, 0]}, "an effect in the chain")
         right_click({"right_click": ["effect", insert_id, -1]}, "the empty part of a chain")
