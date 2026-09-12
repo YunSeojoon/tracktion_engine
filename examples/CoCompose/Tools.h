@@ -141,7 +141,8 @@ public:
                                   // a kind listed here is one a model will try, and
                                   // offering something that cannot be previewed means
                                   // offering a change nobody can hear before taking it.
-                                  "clip.start_beat", "clip.lane", "clip.copy", "clip.remove" })
+                                  "clip.start_beat", "clip.lane", "clip.copy", "clip.remove",
+                                  "clip.make_unique" })
             writeKinds.add (name);
 
         return object ({
@@ -153,9 +154,11 @@ public:
             { "notes", "A proposal is checked when it is made and again when it is applied. "
                        "Applying one is a single undo. Within a region that was attached "
                        "a clip can be moved along the song or to another lane, copied to "
-                       "another place, or taken out; a copy points at the same pattern, so "
-                       "the two are one part played twice. Effects and routing are not "
-                       "proposable in this build." },
+                       "another place, taken out, or given its own copy of the pattern it "
+                       "shares. A copy of a clip points at the same pattern, so the two are "
+                       "one part played twice; making one unique is the opposite, and on "
+                       "its own it changes nothing anybody can hear. Effects and routing "
+                       "are not proposable in this build." },
             { "units", object ({ { "time", "quarter-note beats, ranges are [start_beat, end_beat)" },
                                  { "pitch", "MIDI note number, 0-127" },
                                  { "velocity", "1-127" },
@@ -593,7 +596,11 @@ private:
             if (! clip.isValid())
                 continue;
 
-            if (change.what == ClipChange::What::remove)
+            if (change.what == ClipChange::What::makeUnique)
+            {
+                model.makeUnique (clip, &undo);
+            }
+            else if (change.what == ClipChange::What::remove)
             {
                 model.instances().removeChild (clip, &undo);
             }
@@ -640,13 +647,15 @@ private:
         change.clipID = entry["id"].toString();
 
         const auto what = entry.getProperty ("what", "move").toString();
-        if (what != "move" && what != "copy" && what != "remove")
+        if (what != "move" && what != "copy" && what != "remove" && what != "make_unique")
             throw ToolError (tools::errors::invalidArgument,
-                             "A clip change's \"what\" must be move, copy or remove, not \"" + what + "\"");
+                             "A clip change's \"what\" must be move, copy, remove or "
+                             "make_unique, not \"" + what + "\"");
 
         change.what = what == "copy" ? ClipChange::What::copy
                     : what == "remove" ? ClipChange::What::remove
-                                       : ClipChange::What::move;
+                    : what == "make_unique" ? ClipChange::What::makeUnique
+                                            : ClipChange::What::move;
 
         if (! proposal.allowedClips.contains (change.clipID))
             throw ToolError (tools::errors::outOfScope,
@@ -682,6 +691,29 @@ private:
                 throw ToolError (tools::errors::notFound, "No such lane: " + lane);
 
             change.laneID = lane;
+        }
+
+        if (change.what == ClipChange::What::makeUnique)
+        {
+            if (change.startBeat || change.laneID)
+                throw ToolError (tools::errors::invalidArgument,
+                                 "Making a clip unique does not move it; ask for both "
+                                 "separately if that is what you mean");
+
+            // Nothing to break if it is already alone, and saying so is more use than
+            // quietly doing nothing: a caller that asked for this wanted the sharing
+            // gone, and should be told it was never there.
+            auto sharing = 0;
+            for (auto other : model.instances())
+                if (other[ids::pattern].toString() == clip[ids::pattern].toString())
+                    ++sharing;
+
+            if (sharing <= 1)
+                throw ToolError (tools::errors::invalidArgument,
+                                 "This clip is the only one playing its pattern, so it is "
+                                 "already unique");
+
+            return change;
         }
 
         if (change.what == ClipChange::What::remove)
@@ -942,7 +974,7 @@ private:
             auto entry = object ({ { "what", ClipChange::whatName (change.what) },
                                    { "id", change.clipID } });
 
-            if (change.what != ClipChange::What::remove)
+            if (change.what == ClipChange::What::move || change.what == ClipChange::What::copy)
             {
                 entry.getDynamicObject()->setProperty ("start_beat",
                     object ({ { "was", change.wasStart },

@@ -56,7 +56,7 @@ struct NoteChange
     it. A clip outside that is refused the same way a note outside an attachment is. */
 struct ClipChange
 {
-    enum class What { move, copy, remove };
+    enum class What { move, copy, remove, makeUnique };
 
     What what = What::move;
     String clipID;              // the placement being moved, copied or taken out
@@ -71,9 +71,10 @@ struct ClipChange
     {
         switch (w)
         {
-            case What::copy:   return "copy";
-            case What::remove: return "remove";
-            default:           return "move";
+            case What::copy:       return "copy";
+            case What::remove:     return "remove";
+            case What::makeUnique: return "make_unique";
+            default:               return "move";
         }
     }
 };
@@ -231,7 +232,31 @@ struct Proposal
                 if (Model::uidOf (clip) != change.clipID)
                     continue;
 
-                if (change.what == ClipChange::What::remove)
+                if (change.what == ClipChange::What::makeUnique)
+                {
+                    // The clip stops sharing its pattern and gets one of its own. On a
+                    // copy, with no undo manager and no engine, this is the same two
+                    // steps the live path takes: copy the pattern with fresh note ids,
+                    // and point the placement at the copy.
+                    auto patterns = coCompose.getChildWithName (ids::PATTERNS);
+                    if (! patterns.isValid())
+                        break;
+
+                    for (auto pattern : patterns)
+                        if (Model::uidOf (pattern) == clip[ids::pattern].toString())
+                        {
+                            auto own = pattern.createCopy();
+                            own.setProperty (ids::uid, Uuid().toString(), nullptr);
+                            for (auto sequence : own)
+                                for (auto note : sequence)
+                                    note.setProperty (ids::uid, Uuid().toString(), nullptr);
+
+                            patterns.appendChild (own, nullptr);
+                            clip.setProperty (ids::pattern, Model::uidOf (own), nullptr);
+                            break;
+                        }
+                }
+                else if (change.what == ClipChange::What::remove)
                 {
                     instances.removeChild (i, nullptr);
                 }
@@ -319,6 +344,7 @@ struct Proposal
                          { "clips_moved", countClips (ClipChange::What::move) },
                          { "clips_added", countClips (ClipChange::What::copy) },
                          { "clips_removed", countClips (ClipChange::What::remove) },
+                         { "clips_made_unique", countClips (ClipChange::What::makeUnique) },
                          { "placements", placements },
                          { "keeps", keeps.toJson() } });
     }

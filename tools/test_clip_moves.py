@@ -297,6 +297,125 @@ def check_a_clip_can_be_copied_and_taken_out(exe, folder, report):
         session.close()
 
 
+def check_a_clip_can_stop_sharing_its_pattern(exe, folder, report):
+    """B5: make unique - a real change that, on its own, nobody can hear.
+
+    Two clips playing one pattern are one part played twice: editing either edits both.
+    Making one unique gives it a copy of its own, so the next edit reaches only that
+    place. The copy is identical, so the song sounds exactly the same afterwards.
+
+    That is the interesting part. A person who listens to an A/B of this and hears no
+    difference has every reason to think the comparison is broken, so the app says that
+    both halves play the same music rather than leaving them to work it out. It reads
+    that off what each half actually played, which makes it true of anything that turns
+    out inaudible and not only of this."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        pattern_id = prepare_song(session)
+        state = session.settled()
+        channel_id = state["channels"][0]["id"]
+
+        alone = next(c for c in clips(state) if c["pattern"] == pattern_id)
+        revision = read(folder / "sync-status.json")["revision"]
+
+        # A clip that is the only one playing its pattern is already unique, and is told
+        # so rather than being quietly given a copy it did not need.
+        already = tool(project, "create_proposal", {
+            "description": "AI: give it its own", "base_revision": revision,
+            "allowed_clips": [alone["id"]],
+            "clips": [{"what": "make_unique", "id": alone["id"]}]})
+        report.expect("a clip that already has its pattern to itself is told so",
+                      already["status"] == "error"
+                      and already["error"]["code"] == "INVALID_ARGUMENT",
+                      already.get("error", {}))
+
+        # Now place it twice, so the pattern is genuinely shared.
+        session.run([{"select_pattern": 1}, {"select_lane": 0}, {"place": [0, 32.0]}])
+        time.sleep(0.8)
+        state = session.settled()
+        sharing = [c for c in clips(state) if c["pattern"] == pattern_id]
+        report.expect("the pattern is played in two places", len(sharing) == 2,
+                      [(c["start"], c["id"]) for c in sharing])
+        if len(sharing) != 2:
+            return
+
+        second = sharing[1]
+        revision = read(folder / "sync-status.json")["revision"]
+        scoped = {"description": "AI: let this one go its own way",
+                  "base_revision": revision, "allowed_clips": [second["id"]]}
+
+        moving_too = tool(project, "create_proposal",
+                          dict(scoped, clips=[{"what": "make_unique", "id": second["id"],
+                                               "start_beat": 48.0}]))
+        report.expect("making a clip unique does not also move it",
+                      moving_too["status"] == "error"
+                      and moving_too["error"]["code"] == "INVALID_ARGUMENT",
+                      moving_too.get("error", {}))
+
+        made = tool(project, "create_proposal",
+                    dict(scoped, clips=[{"what": "make_unique", "id": second["id"]}]))
+        report.expect("a clip inside what was attached can stop sharing",
+                      made["status"] == "ok", made.get("error", {}).get("message", ""))
+        if made["status"] != "ok":
+            return
+
+        report.expect("the proposal counts it apart from the other kinds",
+                      (made["result"]["proposal"]["clips_made_unique"],
+                       made["result"]["proposal"]["clips_moved"]) == (1, 0),
+                      made["result"]["proposal"])
+        report.expect("and its diff carries no destination",
+                      "start_beat" not in made["result"]["diff"]["clips"][0],
+                      made["result"]["diff"]["clips"][0])
+
+        # The comparison: real, and silent.
+        (folder / "preview-status.json").unlink(missing_ok=True)
+        session.run([{"preview": [made["result"]["proposal"]["id"], 0.0, 48.0]}])
+        status = wait_for(lambda: (read(folder / "preview-status.json")
+                                   if (folder / "preview-status.json").exists()
+                                   and read(folder / "preview-status.json").get("running") is False
+                                   else None),
+                          timeout=240, what="the comparison to finish")
+
+        report.expect("both halves were rendered",
+                      status["before"]["exists"] and status["after"]["exists"])
+        report.expect("and they play the same music, because this change is not audible",
+                      sorted(status["before"]["notes"]) == sorted(status["after"]["notes"]),
+                      (len(status["before"]["notes"]), len(status["after"]["notes"])))
+        report.expect("the app says so rather than leaving a listener to wonder",
+                      status["same_music_both_halves"] is True,
+                      status.get("same_music_both_halves"))
+
+        # Apply, and the sharing is gone without the music moving.
+        before_notes = [n["pitch"] for p in tool(project, "inspect_pattern",
+                                                 {"pattern": pattern_id, "channel": channel_id})
+                        ["result"]["parts"] for n in p["notes"]]
+
+        tool(project, "apply_proposal", {"proposal": made["result"]["proposal"]["id"]})
+        after = session.settled()
+
+        now = next(c for c in clips(after) if c["id"] == second["id"])
+        report.expect("the clip plays a pattern of its own now",
+                      now["pattern"] != pattern_id, (pattern_id, now["pattern"]))
+        report.expect("the other clip still plays the original",
+                      next(c for c in clips(after) if c["id"] == sharing[0]["id"])["pattern"]
+                      == pattern_id)
+        report.expect("and the original pattern is untouched",
+                      [n["pitch"] for p in tool(project, "inspect_pattern",
+                                                {"pattern": pattern_id, "channel": channel_id})
+                       ["result"]["parts"] for n in p["notes"]] == before_notes)
+
+        control(project, "undo")
+        time.sleep(1.0)
+        report.expect("one undo puts the sharing back",
+                      next(c for c in clips(session.settled())
+                           if c["id"] == second["id"])["pattern"] == pattern_id)
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -306,6 +425,9 @@ def run(exe, output):
     print()
     print("a clip can be copied and taken out, and the music survives both")
     check_a_clip_can_be_copied_and_taken_out(exe, output / "copies", report)
+    print()
+    print("a clip can stop sharing its pattern, and that is inaudible on purpose")
+    check_a_clip_can_stop_sharing_its_pattern(exe, output / "unique", report)
 
     print()
     if report.unchecked:

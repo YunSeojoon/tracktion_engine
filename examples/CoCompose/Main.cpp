@@ -2043,6 +2043,15 @@ private:
                                // that they are listening to one of the three places this
                                // would change - the difference between what was heard
                                // and what Apply does.
+                               // A real change can be inaudible. Making a clip unique
+                               // breaks the sharing and leaves the music identical, and a
+                               // person who listens, hears nothing and is told nothing
+                               // reasonably concludes the comparison is broken. Read off
+                               // what each half actually played rather than from the kind
+                               // of change, so it is true of anything that turns out this
+                               // way and not only of the case that prompted it.
+                               { "same_music_both_halves",
+                                 ! running && preview.beforeNotes == preview.afterNotes },
                                { "changes_places", preview.placesChanged },
                                { "places_in_this_stretch", preview.placesHeard },
                                { "before", describe (preview.before, preview.beforeNotes) },

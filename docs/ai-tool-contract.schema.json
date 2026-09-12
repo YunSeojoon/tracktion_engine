@@ -518,7 +518,8 @@
         "keeps",
         "clips_moved",
         "clips_added",
-        "clips_removed"
+        "clips_removed",
+        "clips_made_unique"
       ],
       "properties": {
         "id": {
@@ -583,6 +584,10 @@
           "minimum": 0
         },
         "clips_removed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "clips_made_unique": {
           "type": "integer",
           "minimum": 0
         }
@@ -745,7 +750,8 @@
                 "enum": [
                   "move",
                   "copy",
-                  "remove"
+                  "remove",
+                  "make_unique"
                 ]
               },
               "id": {
@@ -782,7 +788,7 @@
                 }
               }
             },
-            "description": "A placement moved, copied or taken out. A removal has no destination, so it carries no start_beat and no lane - saying where a clip goes when it is going nowhere would be a request that contradicts itself."
+            "description": "A placement moved, copied, taken out, or given its own copy of the pattern it was sharing. Only a move and a copy have a destination; a removal and a make_unique carry no start_beat and no lane, because saying where a clip goes when it is not going anywhere would be a request that contradicts itself."
           }
         }
       }
