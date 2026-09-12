@@ -100,8 +100,21 @@ def run(exe, output):
         report.expect("writes are described as kinds of change, not as prose",
                       all("." in kind for kind in caps["result"]["writes"]),
                       caps["result"]["writes"])
-        report.expect("nothing beyond notes and parameters is offered as writable",
-                      all(kind.startswith(("note.", "parameter.")) for kind in caps["result"]["writes"]),
+        # A closed list, not a prefix test that would wave through anything starting
+        # with a word it likes. What a proposal may change is the promise this whole
+        # contract rests on, so adding to it is a thing somebody does on purpose and
+        # this line is where they have to say so.
+        #
+        # Clip moves joined it once a comparison could include them: announcing a kind
+        # a model cannot hear before it is taken would be offering a change nobody can
+        # judge. Adding, removing and duplicating clips, and anything to do with
+        # effects or routing, are deliberately still absent.
+        report.expect("exactly the kinds of change this build means to allow are offered",
+                      sorted(caps["result"]["writes"]) == sorted([
+                          "note.pitch", "note.start_beat", "note.length_beats",
+                          "note.velocity", "note.add", "note.remove",
+                          "parameter.value",
+                          "clip.start_beat", "clip.lane"]),
                       caps["result"]["writes"])
         report.expect("audio is declared unavailable rather than left unsaid",
                       caps["result"]["audio"]["can_send_audio"] is False)
@@ -222,6 +235,20 @@ def run(exe, output):
         report.expect("rewrite-melody promises the rhythm and the velocities",
                       pitched["proposal"]["keeps"]["rhythm"] is True
                       and pitched["proposal"]["keeps"]["velocity"] is True)
+
+        # The published schema described every read answer and nothing that writes, so
+        # a kind of change could be added to a proposal without the contract noticing -
+        # which is what happened when clip moves went in. A caller reads the summary to
+        # decide and the diff to see both sides, so both are part of the promise.
+        ok, why = valid_against(pitched["proposal"], "proposalSummary")
+        report.expect("a proposal matches the published proposal shape", ok, why)
+
+        made = tool(project, "get_proposal", {"proposal": pitched["proposal"]["id"]})
+        ok, why = valid_against(made["result"]["diff"], "proposalDiff")
+        report.expect("and its diff matches the published diff shape", ok, why)
+        report.expect("the diff always names all three kinds, empty or not",
+                      set(made["result"]["diff"]) == {"notes", "parameters", "clips"},
+                      sorted(made["result"]["diff"]))
 
         levelled = recipes.tidy_velocity(project, pattern=pattern_id, channel=channel_id,
                                          notes=notes[:2], velocity=96)

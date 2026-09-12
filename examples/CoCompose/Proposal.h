@@ -45,6 +45,26 @@ struct NoteChange
     double wasStart = 0.0, wasLength = 0.0;
 };
 
+/** Moving a placement: where a clip sits, and which lane it sits on.
+
+    The first thing a proposal may do that is not about a note or a knob. A clip is a
+    reference to a pattern, so moving one moves where that music is heard without
+    copying or altering the music itself - which is why it can be offered before the
+    harder arrangement edits: nothing here can damage a pattern.
+
+    Scope comes from a region attachment, which already knows which clips fall inside
+    it. A clip outside that is refused the same way a note outside an attachment is. */
+struct ClipChange
+{
+    String clipID;
+    std::optional<double> startBeat;
+    std::optional<String> laneID;
+
+    // What they are now, so a person sees both sides before deciding.
+    double wasStart = 0.0;
+    String wasLane;
+};
+
 struct ParameterChange
 {
     String ownerID;     // the channel or insert whose plugin this is
@@ -96,10 +116,15 @@ struct Proposal
     StringArray allowedNotes;
     StringArray allowedInserts;
 
+    /** Which placements may be moved, from the region that was attached. Empty means
+        none, for the same reason the note list does. */
+    StringArray allowedClips;
+
     Keeps keeps;
 
     std::vector<NoteChange> notes;
     std::vector<ParameterChange> parameters;
+    std::vector<ClipChange> clips;
 
     /** How many places in the song this pattern is played. A note change edits the
         pattern, so it is heard everywhere the pattern is placed - and the person has to
@@ -172,6 +197,33 @@ struct Proposal
         return true;
     }
 
+    /** Moves the placements on a detached copy of the tree, for a preview.
+
+        Clips are in the tree, so unlike a parameter this needs nothing but the tree -
+        and unlike a note change it does not touch a pattern, so the music itself is
+        the same music in a different place. */
+    int applyClipsTo (ValueTree coCompose) const
+    {
+        auto playlist = coCompose.getChildWithName (ids::PLAYLIST);
+        auto instances = playlist.isValid() ? playlist.getChildWithName (ids::CLIPS) : ValueTree();
+        if (! instances.isValid())
+            return 0;
+
+        auto moved = 0;
+
+        for (const auto& change : clips)
+            for (auto clip : instances)
+                if (Model::uidOf (clip) == change.clipID)
+                {
+                    if (change.startBeat) clip.setProperty (ids::start, *change.startBeat, nullptr);
+                    if (change.laneID)    clip.setProperty (ids::lane, *change.laneID, nullptr);
+                    ++moved;
+                    break;
+                }
+
+        return moved;
+    }
+
     /** The other half, on a copy's plugins rather than a copy's tree.
 
         `copy` is a model wrapper over the Edit the render will run, so this reaches its
@@ -220,6 +272,7 @@ struct Proposal
                          { "notes_added", added },
                          { "notes_removed", removed },
                          { "parameters_changed", static_cast<int> (parameters.size()) },
+                         { "clips_moved", static_cast<int> (clips.size()) },
                          { "placements", placements },
                          { "keeps", keeps.toJson() } });
     }

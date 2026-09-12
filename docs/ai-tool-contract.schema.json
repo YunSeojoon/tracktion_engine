@@ -3,7 +3,6 @@
   "$id": "https://cocompose.local/ai-tool-contract/v1",
   "title": "CoCompose AI tool contract, version 1",
   "description": "The shape of a request to the app's tool service and of its answer. Written alongside docs/ai-daw-tool-contract.ko.md; the examples in that document are checked against this file by tools/test_tool_contract.py, so the prose and the schema cannot drift apart silently.",
-
   "$defs": {
     "stableId": {
       "type": "string",
@@ -15,14 +14,23 @@
       "description": "Quarter-note beats from the start of the arrangement. Ranges are [start_beat, end_beat)."
     },
     "errorCode": {
-      "enum": ["INVALID_ARGUMENT", "NOT_FOUND", "STALE_REVISION", "OUT_OF_SCOPE",
-               "LOCKED", "UNSUPPORTED", "CANCELLED", "IO_ERROR"],
+      "enum": [
+        "INVALID_ARGUMENT",
+        "NOT_FOUND",
+        "STALE_REVISION",
+        "OUT_OF_SCOPE",
+        "LOCKED",
+        "UNSUPPORTED",
+        "CANCELLED",
+        "IO_ERROR"
+      ],
       "description": "The word a caller branches on. The message beside it is for a person."
     },
-
     "request": {
       "type": "object",
-      "required": ["tool"],
+      "required": [
+        "tool"
+      ],
       "properties": {
         "contract_version": {
           "type": "integer",
@@ -34,37 +42,72 @@
           "description": "Sending the same one twice is answered once; the second call returns the first answer."
         },
         "tool": {
-          "enum": ["get_capabilities", "get_selection", "inspect_region",
-                   "inspect_insert", "inspect_pattern",
-                   "create_proposal", "preview_proposal", "apply_proposal",
-                   "get_operation", "cancel_operation"],
+          "enum": [
+            "get_capabilities",
+            "get_selection",
+            "inspect_region",
+            "inspect_insert",
+            "inspect_pattern",
+            "create_proposal",
+            "preview_proposal",
+            "apply_proposal",
+            "get_operation",
+            "cancel_operation"
+          ],
           "description": "Tools past inspect_pattern are named by the contract but are refused as UNSUPPORTED until they are built."
         },
-        "arguments": { "type": "object" }
+        "arguments": {
+          "type": "object"
+        }
       },
       "additionalProperties": false
     },
-
     "answer": {
       "type": "object",
-      "required": ["status", "contract_version", "revision"],
+      "required": [
+        "status",
+        "contract_version",
+        "revision"
+      ],
       "properties": {
-        "status": { "enum": ["ok", "error"] },
-        "request_id": { "type": "string" },
-        "contract_version": { "type": "integer", "minimum": 1 },
+        "status": {
+          "enum": [
+            "ok",
+            "error"
+          ]
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "contract_version": {
+          "type": "integer",
+          "minimum": 1
+        },
         "revision": {
           "type": "integer",
           "minimum": 0,
           "description": "What the music was at when this was true."
         },
-        "result": { "type": "object" },
+        "result": {
+          "type": "object"
+        },
         "error": {
           "type": "object",
-          "required": ["code", "message", "retryable"],
+          "required": [
+            "code",
+            "message",
+            "retryable"
+          ],
           "properties": {
-            "code": { "$ref": "#/$defs/errorCode" },
-            "message": { "type": "string" },
-            "retryable": { "type": "boolean" }
+            "code": {
+              "$ref": "#/$defs/errorCode"
+            },
+            "message": {
+              "type": "string"
+            },
+            "retryable": {
+              "type": "boolean"
+            }
           },
           "additionalProperties": false
         }
@@ -72,169 +115,668 @@
       "additionalProperties": false,
       "allOf": [
         {
-          "if": { "properties": { "status": { "const": "ok" } }, "required": ["status"] },
-          "then": { "required": ["result"], "not": { "required": ["error"] } }
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ok"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "result"
+            ],
+            "not": {
+              "required": [
+                "error"
+              ]
+            }
+          }
         },
         {
-          "if": { "properties": { "status": { "const": "error" } }, "required": ["status"] },
-          "then": { "required": ["error"], "not": { "required": ["result"] } }
+          "if": {
+            "properties": {
+              "status": {
+                "const": "error"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "error"
+            ],
+            "not": {
+              "required": [
+                "result"
+              ]
+            }
+          }
         }
       ]
     },
-
     "capabilities": {
       "type": "object",
-      "required": ["contract_version", "project_id", "session_id", "tools", "writes", "units", "audio", "limits"],
+      "required": [
+        "contract_version",
+        "project_id",
+        "session_id",
+        "tools",
+        "writes",
+        "units",
+        "audio",
+        "limits"
+      ],
       "properties": {
-        "contract_version": { "type": "integer" },
-        "project_id": { "$ref": "#/$defs/stableId" },
-        "session_id": { "$ref": "#/$defs/stableId" },
+        "contract_version": {
+          "type": "integer"
+        },
+        "project_id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/stableId"
+        },
         "tools": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Only what this build can actually do. A tool that is not here must not be attempted."
         },
         "writes": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Kinds of change that can be proposed. Empty while the service is read-only."
         },
-        "notes": { "type": "string" },
-        "units": { "type": "object" },
+        "notes": {
+          "type": "string"
+        },
+        "units": {
+          "type": "object"
+        },
         "audio": {
           "type": "object",
-          "required": ["can_send_audio"],
+          "required": [
+            "can_send_audio"
+          ],
           "properties": {
-            "can_send_audio": { "type": "boolean" },
-            "reason": { "type": "string" }
+            "can_send_audio": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": "string"
+            }
           }
         },
-        "limits": { "type": "object" }
+        "limits": {
+          "type": "object"
+        }
       }
     },
-
     "region": {
       "type": "object",
-      "required": ["start_beat", "end_beat", "clips", "context_clips"],
+      "required": [
+        "start_beat",
+        "end_beat",
+        "clips",
+        "context_clips"
+      ],
       "properties": {
-        "start_beat": { "$ref": "#/$defs/beat" },
-        "end_beat": { "$ref": "#/$defs/beat" },
-        "bars": { "type": "string", "description": "The same range as a person reads it." },
-        "lanes": { "type": "array", "items": { "$ref": "#/$defs/stableId" } },
-        "tempo": { "type": "number", "exclusiveMinimum": 0 },
-        "clips": { "type": "array", "items": { "$ref": "#/$defs/clip" } },
-        "context_beats": { "type": "number", "minimum": 0 },
+        "start_beat": {
+          "$ref": "#/$defs/beat"
+        },
+        "end_beat": {
+          "$ref": "#/$defs/beat"
+        },
+        "bars": {
+          "type": "string",
+          "description": "The same range as a person reads it."
+        },
+        "lanes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/stableId"
+          }
+        },
+        "tempo": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "clips": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/clip"
+          }
+        },
+        "context_beats": {
+          "type": "number",
+          "minimum": 0
+        },
         "context_clips": {
           "type": "array",
-          "items": { "$ref": "#/$defs/clip" },
+          "items": {
+            "$ref": "#/$defs/clip"
+          },
           "description": "Readable for understanding, and kept separate from what was asked about."
         }
       }
     },
-
     "clip": {
       "type": "object",
-      "required": ["id", "lane", "pattern", "start_beat", "length_beats"],
+      "required": [
+        "id",
+        "lane",
+        "pattern",
+        "start_beat",
+        "length_beats"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/stableId" },
-        "lane": { "$ref": "#/$defs/stableId" },
-        "pattern": { "$ref": "#/$defs/stableId" },
-        "pattern_name": { "type": "string" },
-        "start_beat": { "$ref": "#/$defs/beat" },
-        "length_beats": { "type": "number", "exclusiveMinimum": 0 }
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "lane": {
+          "$ref": "#/$defs/stableId"
+        },
+        "pattern": {
+          "$ref": "#/$defs/stableId"
+        },
+        "pattern_name": {
+          "type": "string"
+        },
+        "start_beat": {
+          "$ref": "#/$defs/beat"
+        },
+        "length_beats": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
       }
     },
-
     "pattern": {
       "type": "object",
-      "required": ["id", "length_beats", "parts", "placements", "placement_count", "shared"],
+      "required": [
+        "id",
+        "length_beats",
+        "parts",
+        "placements",
+        "placement_count",
+        "shared"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/stableId" },
-        "name": { "type": "string" },
-        "length_beats": { "type": "number", "exclusiveMinimum": 0 },
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "length_beats": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
         "parts": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["channel", "notes"],
+            "required": [
+              "channel",
+              "notes"
+            ],
             "properties": {
-              "channel": { "$ref": "#/$defs/stableId" },
-              "channel_name": { "type": "string" },
-              "instrument": { "type": "string" },
-              "notes": { "type": "array", "items": { "$ref": "#/$defs/note" } }
+              "channel": {
+                "$ref": "#/$defs/stableId"
+              },
+              "channel_name": {
+                "type": "string"
+              },
+              "instrument": {
+                "type": "string"
+              },
+              "notes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/note"
+                }
+              }
             }
           }
         },
-        "placements": { "type": "array", "items": { "type": "object" } },
-        "placement_count": { "type": "integer", "minimum": 0 },
+        "placements": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "placement_count": {
+          "type": "integer",
+          "minimum": 0
+        },
         "shared": {
           "type": "boolean",
           "description": "True when changing these notes changes more than one placement."
         }
       }
     },
-
     "note": {
       "type": "object",
-      "required": ["id", "pitch", "start_beat", "length_beats", "velocity"],
+      "required": [
+        "id",
+        "pitch",
+        "start_beat",
+        "length_beats",
+        "velocity"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/stableId" },
-        "pitch": { "type": "integer", "minimum": 0, "maximum": 127 },
-        "start_beat": { "$ref": "#/$defs/beat" },
-        "length_beats": { "type": "number", "exclusiveMinimum": 0 },
-        "velocity": { "type": "integer", "minimum": 1, "maximum": 127 }
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "pitch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 127
+        },
+        "start_beat": {
+          "$ref": "#/$defs/beat"
+        },
+        "length_beats": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "velocity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 127
+        }
       }
     },
-
     "insert": {
       "type": "object",
-      "required": ["id", "index", "effects", "sends", "output", "opaque_state"],
+      "required": [
+        "id",
+        "index",
+        "effects",
+        "sends",
+        "output",
+        "opaque_state"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/stableId" },
-        "index": { "type": "integer", "minimum": 0 },
-        "name": { "type": "string" },
-        "gain_db": { "type": "number" },
-        "pan": { "type": "number", "minimum": -1, "maximum": 1 },
-        "mute": { "type": "boolean" },
-        "output": { "type": "string" },
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "gain_db": {
+          "type": "number"
+        },
+        "pan": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "mute": {
+          "type": "boolean"
+        },
+        "output": {
+          "type": "string"
+        },
         "effects": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["id", "type", "bypass", "parameters"],
+            "required": [
+              "id",
+              "type",
+              "bypass",
+              "parameters"
+            ],
             "properties": {
-              "id": { "$ref": "#/$defs/stableId" },
-              "type": { "type": "string" },
-              "name": { "type": "string" },
-              "bypass": { "type": "boolean" },
-              "wet": { "type": "number", "minimum": 0, "maximum": 1 },
+              "id": {
+                "$ref": "#/$defs/stableId"
+              },
+              "type": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "bypass": {
+                "type": "boolean"
+              },
+              "wet": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
               "parameters": {
                 "type": "array",
                 "items": {
                   "type": "object",
-                  "required": ["id", "value"],
+                  "required": [
+                    "id",
+                    "value"
+                  ],
                   "properties": {
-                    "id": { "type": "string" },
-                    "name": { "type": "string" },
-                    "value": { "type": "number", "minimum": 0, "maximum": 1 }
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
                   }
                 }
               }
             }
           }
         },
-        "sends": { "type": "array", "items": { "type": "object" } },
-        "fed_by": { "type": "array", "items": { "type": "object" } },
+        "sends": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "fed_by": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
         "opaque_state": {
           "type": "string",
           "description": "Says plainly that a plugin's own settings are not readable, so a caller does not take the parameter list for the whole picture."
         }
       }
+    },
+    "proposalSummary": {
+      "description": "What a proposal would do, in counts. Read before deciding, so every kind of change a proposal can carry has to appear here - a kind that is applied but not counted is a change made without being shown.",
+      "type": "object",
+      "required": [
+        "id",
+        "base_revision",
+        "applied",
+        "notes_changed",
+        "notes_added",
+        "notes_removed",
+        "parameters_changed",
+        "clips_moved",
+        "placements",
+        "keeps"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "description": {
+          "type": "string"
+        },
+        "base_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "applied": {
+          "type": "boolean"
+        },
+        "notes_changed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "notes_added": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "notes_removed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "parameters_changed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "clips_moved": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "placements": {
+          "description": "How many places in the song the pattern this touches is played. A note change is heard in all of them.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "keeps": {
+          "type": "object",
+          "required": [
+            "pitch",
+            "rhythm",
+            "velocity"
+          ],
+          "properties": {
+            "pitch": {
+              "type": "boolean"
+            },
+            "rhythm": {
+              "type": "boolean"
+            },
+            "velocity": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "proposalDiff": {
+      "description": "Both sides of every change, so a person reads what it is now and what it would become rather than being asked to remember. The three lists are always present, empty when a proposal does not touch that kind.",
+      "type": "object",
+      "required": [
+        "notes",
+        "parameters",
+        "clips"
+      ],
+      "properties": {
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "what",
+              "id"
+            ],
+            "properties": {
+              "what": {
+                "enum": [
+                  "add",
+                  "remove",
+                  "change"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "pitch": {
+                "type": "object",
+                "required": [
+                  "was",
+                  "now"
+                ],
+                "properties": {
+                  "was": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 127
+                  },
+                  "now": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 127
+                  }
+                }
+              },
+              "start_beat": {
+                "type": "object",
+                "required": [
+                  "was",
+                  "now"
+                ],
+                "properties": {
+                  "was": {
+                    "$ref": "#/$defs/beat"
+                  },
+                  "now": {
+                    "$ref": "#/$defs/beat"
+                  }
+                }
+              },
+              "length_beats": {
+                "type": "object",
+                "required": [
+                  "was",
+                  "now"
+                ],
+                "properties": {
+                  "was": {
+                    "type": "number"
+                  },
+                  "now": {
+                    "type": "number"
+                  }
+                }
+              },
+              "velocity": {
+                "type": "object",
+                "required": [
+                  "was",
+                  "now"
+                ],
+                "properties": {
+                  "was": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 127
+                  },
+                  "now": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 127
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "owner",
+              "plugin",
+              "parameter",
+              "value"
+            ],
+            "properties": {
+              "owner": {
+                "$ref": "#/$defs/stableId"
+              },
+              "plugin": {
+                "type": "string"
+              },
+              "parameter": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "object",
+                "required": [
+                  "was",
+                  "now"
+                ],
+                "properties": {
+                  "was": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "now": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "clips": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "start_beat",
+              "lane"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/stableId"
+              },
+              "start_beat": {
+                "type": "object",
+                "required": [
+                  "was",
+                  "now"
+                ],
+                "properties": {
+                  "was": {
+                    "$ref": "#/$defs/beat"
+                  },
+                  "now": {
+                    "$ref": "#/$defs/beat"
+                  }
+                }
+              },
+              "lane": {
+                "type": "object",
+                "required": [
+                  "was",
+                  "now"
+                ],
+                "properties": {
+                  "was": {
+                    "$ref": "#/$defs/stableId"
+                  },
+                  "now": {
+                    "$ref": "#/$defs/stableId"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
-
   "oneOf": [
-    { "$ref": "#/$defs/request" },
-    { "$ref": "#/$defs/answer" }
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/answer"
+    }
   ]
 }

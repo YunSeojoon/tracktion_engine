@@ -1181,11 +1181,11 @@ private:
         // naming real note ids could edit notes nobody attached. A comment saying the
         // right thing is not the same as code doing it.
         for (const auto* field : { "pattern", "channel", "allowed_notes", "allowed_inserts",
-                                   "base_revision", "request_id" })
+                                   "allowed_clips", "base_revision", "request_id" })
             fields->removeProperty (field);
 
         String pattern, channel;
-        Array<var> allowedNotes, allowedInserts;
+        Array<var> allowedNotes, allowedInserts, allowedClips;
         auto askedAtRevision = project.revision;
         auto foundTheQuestion = false;
 
@@ -1207,6 +1207,15 @@ private:
                 if (attachment.kind == live::Attachment::Kind::insert)
                 {
                     allowedInserts.add (attachment.insertID);
+                    continue;
+                }
+
+                if (attachment.kind == live::Attachment::Kind::region)
+                {
+                    // A region already knows which placements fall inside it, and those
+                    // are the only ones a reply may move.
+                    for (const auto& clipID : attachment.clipIDs)
+                        allowedClips.add (clipID);
                     continue;
                 }
 
@@ -1240,6 +1249,7 @@ private:
         fields->setProperty ("channel", channel);
         fields->setProperty ("allowed_notes", allowedNotes);
         fields->setProperty ("allowed_inserts", allowedInserts);
+        fields->setProperty ("allowed_clips", allowedClips);
         fields->setProperty ("base_revision", askedAtRevision);
 
         const auto answer = ask ("create_proposal", scoped);
@@ -2068,7 +2078,11 @@ private:
 
                     const auto started = proposal != nullptr
                         && exporter.startPreview (preview.after, range, preview.revision,
-                                                  [proposal] (ValueTree& copy) { proposal->applyNotesTo (copy); },
+                                                  [proposal] (ValueTree& copy)
+                                                  {
+                                                      proposal->applyNotesTo (copy);
+                                                      proposal->applyClipsTo (copy);
+                                                  },
                                                   [this, proposal] (live::Model& copy)
                                                   {
                                                       // Runs on the message thread, before the worker

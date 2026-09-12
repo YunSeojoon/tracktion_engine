@@ -136,7 +136,12 @@ public:
         Array<var> writeKinds;
         for (const auto* name : { "note.pitch", "note.start_beat", "note.length_beats",
                                   "note.velocity", "note.add", "note.remove",
-                                  "parameter.value" })
+                                  "parameter.value",
+                                  // Announced only now that a comparison can include it:
+                                  // a kind listed here is one a model will try, and
+                                  // offering something that cannot be previewed means
+                                  // offering a change nobody can hear before taking it.
+                                  "clip.start_beat", "clip.lane" })
             writeKinds.add (name);
 
         return object ({
@@ -146,8 +151,10 @@ public:
             { "tools", readTools },
             { "writes", writeKinds },
             { "notes", "A proposal is checked when it is made and again when it is applied. "
-                       "Applying one is a single undo. Effects, routing and clip moves are "
-                       "not proposable in this build." },
+                       "Applying one is a single undo. A clip can be moved along the song "
+                       "or to another lane, within a region that was attached; adding, "
+                       "removing or duplicating clips, and anything to do with effects or "
+                       "routing, are not proposable in this build." },
             { "units", object ({ { "time", "quarter-note beats, ranges are [start_beat, end_beat)" },
                                  { "pitch", "MIDI note number, 0-127" },
                                  { "velocity", "1-127" },
@@ -434,6 +441,13 @@ private:
             for (const auto& id : *arguments["allowed_inserts"].getArray())
                 proposal.allowedInserts.add (id.toString());
 
+        // Which placements may be moved, from the region that was attached. Empty means
+        // none, the same as the note list - a caller with no region attached may not
+        // move anything, however precisely it names a clip.
+        if (arguments["allowed_clips"].isArray())
+            for (const auto& id : *arguments["allowed_clips"].getArray())
+                proposal.allowedClips.add (id.toString());
+
         auto sequence = Model::findSequence (model.patternFor (proposal.patternID), proposal.channelID);
 
         proposal.placements = 0;
@@ -462,7 +476,11 @@ private:
             for (const auto& entry : *arguments["parameters"].getArray())
                 proposal.parameters.push_back (readParameterChange (entry, proposal));
 
-        if (proposal.notes.empty() && proposal.parameters.empty())
+        if (arguments["clips"].isArray())
+            for (const auto& entry : *arguments["clips"].getArray())
+                proposal.clips.push_back (readClipChange (entry, proposal));
+
+        if (proposal.notes.empty() && proposal.parameters.empty() && proposal.clips.empty())
             throw ToolError (tools::errors::invalidArgument, "A proposal must change something");
 
         checkKeeps (proposal);
@@ -566,6 +584,15 @@ private:
             if (change.velocity)    note.setProperty (ids::velocity, *change.velocity, &undo);
         }
 
+        // Placements are in the tree, so they go into the same transaction the notes
+        // did and come back with them on one Undo.
+        for (const auto& change : proposal.clips)
+            if (auto clip = model.placementFor (change.clipID); clip.isValid())
+            {
+                if (change.startBeat) clip.setProperty (ids::start, *change.startBeat, &undo);
+                if (change.laneID)    clip.setProperty (ids::lane, *change.laneID, &undo);
+            }
+
         // A parameter's playback value does not live in the tree, so setting it would
         // fall outside the transaction the notes went into and the one Undo the person
         // is promised would leave it behind. It goes in as an action instead.
@@ -584,6 +611,56 @@ private:
         return object ({ { "applied", true },
                          { "proposal", proposal.summary() },
                          { "undo_description", undo.getUndoDescription() } });
+    }
+
+    /** One placement move, checked against what was attached and against the shape of
+        the arrangement before it is kept. */
+    ClipChange readClipChange (const var& entry, const Proposal& proposal) const
+    {
+        ClipChange change;
+        change.clipID = entry["id"].toString();
+
+        if (! proposal.allowedClips.contains (change.clipID))
+            throw ToolError (tools::errors::outOfScope,
+                             proposal.allowedClips.isEmpty()
+                               ? String ("No region was attached, so no clip may be moved")
+                               : "Clip " + change.clipID + " was not part of what was attached");
+
+        auto clip = model.placementFor (change.clipID);
+        if (! clip.isValid())
+            throw ToolError (tools::errors::notFound, "No such clip: " + change.clipID);
+
+        change.wasStart = static_cast<double> (clip[ids::start]);
+        change.wasLane = clip[ids::lane].toString();
+
+        if (entry.hasProperty ("start_beat"))
+        {
+            const auto start = number (entry, "start_beat");
+
+            // Before the beginning is not a place. A clip there would play from part way
+            // through itself or not at all, depending on who read it, which is the sort
+            // of thing that is discovered much later.
+            if (start < 0.0)
+                throw ToolError (tools::errors::invalidArgument,
+                                 "A clip cannot start before the beginning of the song");
+
+            change.startBeat = start;
+        }
+
+        if (entry.hasProperty ("lane"))
+        {
+            const auto lane = entry["lane"].toString();
+            if (! model.laneFor (lane).isValid())
+                throw ToolError (tools::errors::notFound, "No such lane: " + lane);
+
+            change.laneID = lane;
+        }
+
+        if (! change.startBeat && ! change.laneID)
+            throw ToolError (tools::errors::invalidArgument,
+                             "A clip move has to say where to: a start_beat, a lane, or both");
+
+        return change;
     }
 
     NoteChange readNoteChange (const var& entry, ValueTree sequence, const Proposal& proposal) const
@@ -814,6 +891,14 @@ private:
         }
 
         Array<var> parameters;
+        Array<var> clips;
+        for (const auto& change : proposal.clips)
+            clips.add (object ({ { "id", change.clipID },
+                                 { "start_beat", object ({ { "was", change.wasStart },
+                                                           { "now", change.startBeat.value_or (change.wasStart) } }) },
+                                 { "lane", object ({ { "was", change.wasLane },
+                                                     { "now", change.laneID.value_or (change.wasLane) } }) } }));
+
         for (const auto& change : proposal.parameters)
             parameters.add (object ({ { "owner", change.ownerID },
                                       { "plugin", change.pluginID },
@@ -821,7 +906,7 @@ private:
                                       { "was", change.wasValue },
                                       { "now", change.value } }));
 
-        return object ({ { "notes", notes }, { "parameters", parameters } });
+        return object ({ { "notes", notes }, { "parameters", parameters }, { "clips", clips } });
     }
 
     /** A clip, and what is actually played in it.
