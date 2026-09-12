@@ -4,6 +4,7 @@
 #include "../common/PluginWindow.h"
 #include "Theme.h"
 #include "Notes.h"
+#include "Candidates.h"
 #include "Tools.h"
 #include "ChatBridge.h"
 #include "LiveProject.h"
@@ -109,6 +110,8 @@ public:
                                                            project.projectID(), project.sessionID);
         conversation = std::make_unique<live::Conversation> (
             project.source.getSiblingFile ("conversation.json"), project.projectID());
+        shelf = std::make_unique<live::Shelf> (
+            project.source.getSiblingFile ("candidates.json"), project.projectID());
         notes = std::make_unique<live::ProjectNotes> (
             project.source.getSiblingFile ("notes.json"), project.projectID());
         bridge = std::make_unique<live::ChatBridge> (project.source);
@@ -1240,10 +1243,25 @@ private:
         const auto answer = ask ("create_proposal", scoped);
 
         if (answer["status"].toString() == "ok")
+        {
             conversation->attachProposal (requestID,
                                           answer["result"]["proposal"]["id"].toString(),
                                           answer["result"]["proposal"],
                                           answer["result"]["diff"], {});
+
+            // Shelved as it is offered, not when a person decides they liked it. By
+            // then the next answer has arrived and the one they meant is gone: asking
+            // three times used to leave nothing to go back to, so "the second one"
+            // became a fourth version described as the second.
+            live::Candidate kept;
+            kept.id = answer["result"]["proposal"]["id"].toString();
+            kept.description = answer["result"]["proposal"]["description"].toString();
+            kept.requestID = requestID;
+            kept.baseRevision = static_cast<int> (answer["result"]["proposal"]["base_revision"]);
+            kept.atMillis = Time::currentTimeMillis();
+            kept.diff = answer["result"]["diff"];
+            shelf->keep (kept);
+        }
         else
             conversation->attachProposal (requestID, {}, var(), var(),
                                           answer["error"]["code"].toString() + ": "
@@ -1255,6 +1273,12 @@ private:
     void applySuggestedChange (const String& proposalID)
     {
         const auto answer = ask ("apply_proposal", live::object ({ { "proposal", proposalID } }));
+
+        // Taken. The others stay on the shelf exactly as they are: choosing the second
+        // of three is not a judgement on the first and the third, and a person who
+        // changes their mind an hour later should still find them.
+        if (answer["status"].toString() == "ok")
+            shelf->adopt (proposalID);
 
         if (answer["status"].toString() != "ok")
         {
@@ -1513,6 +1537,10 @@ private:
                              // put it in the key.
                              + (notes != nullptr ? live::strengthName (notes->strength()) : String()) + ":"
                              + String (workspace.playlistGrid().laneHeight) + ":"
+                             // Fourth. The shelf reports what was offered, which was
+                             // taken and what each was heard with, and none of that
+                             // moves the count.
+                             + (shelf != nullptr ? shelf->shape() : String()) + ":"
                              + String (project.revision);
 
         if (shape == lastInspectorShape)
@@ -1531,6 +1559,11 @@ private:
             fields->setProperty ("conversation_id", conversation != nullptr ? conversation->id() : String());
             fields->setProperty ("suggested_notes_drawn", workspace.suggestedNoteCount());
             fields->setProperty ("notes", notes != nullptr ? notes->asJson() : var());
+            // The shelf as this app sees it, which is not always the shelf on disk: a
+            // copied project folder still holds the file that was written for the
+            // original, and this app will not adopt it. What the app believes is the
+            // thing worth reading, and the file is only where it keeps it.
+            fields->setProperty ("candidates", shelf != nullptr ? shelf->snapshot() : var());
             fields->setProperty ("grid_tool", workspace.arrangementTool());
             fields->setProperty ("lane_height", workspace.playlistGrid().laneHeight);
             fields->setProperty ("editor_open", workspace.isNoteEditorOpen());
@@ -2017,6 +2050,16 @@ private:
                 preview.afterNotes = result->notes;
                 preview.stage = Preview::Stage::idle;
                 writePreviewStatus (false);
+
+                // The candidate remembers what it was heard with. Fingerprints rather
+                // than paths: the next comparison writes to these same two files, so a
+                // candidate that named them would point at somebody else's audio.
+                shelf->noteComparison (preview.proposalID,
+                                       fingerprintOf (preview.before), fingerprintOf (preview.after),
+                                       "beats " + String (preview.fromBeat, 2) + " to "
+                                         + String (preview.toBeat, 2) + ", covering "
+                                         + String (preview.placesHeard) + " of "
+                                         + String (preview.placesChanged) + " places it changes");
                 say ("A and B are rendered. Listening to them is still your part.");
                 return;
             }
@@ -2198,6 +2241,38 @@ private:
             const auto what = action["open_effect"];
             return what.isArray() && what.size() == 2
                     && workspace.openEffectWindow (what[0].toString(), static_cast<int> (what[1]));
+        }
+
+        if (action.hasProperty ("candidate"))
+        {
+            // ["adopt"|"discard", id] or ["adopt_latest"] - the shelf, driven the way a
+            // person would drive it. Adopting goes through the same apply path a press
+            // of the button does, so a candidate cannot be taken by a route that skips
+            // the checks.
+            const auto what = action["candidate"];
+            if (! what.isArray() || what.size() < 1)
+                return false;
+
+            const auto kind = what[0].toString();
+
+            if (kind == "adopt_latest")
+            {
+                const auto* latest = shelf->mostRecent();
+                if (latest == nullptr)
+                    return false;
+
+                applySuggestedChange (latest->id);
+                return true;
+            }
+
+            if (what.size() != 2)
+                return false;
+
+            const auto id = what[1].toString();
+
+            if (kind == "adopt")   { applySuggestedChange (id); return true; }
+            if (kind == "discard") return shelf->discard (id);
+            return false;
         }
 
         if (action.hasProperty ("right_click"))
@@ -2647,6 +2722,7 @@ private:
     std::unique_ptr<live::ToolService> toolService;
     std::unique_ptr<live::Conversation> conversation;
     std::unique_ptr<live::ProjectNotes> notes;
+    std::unique_ptr<live::Shelf> shelf;
     std::unique_ptr<live::ChatBridge> bridge;
 
     live::CoComposeLookAndFeel look;
