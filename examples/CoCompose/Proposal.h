@@ -114,10 +114,10 @@ struct Proposal
         undo manager, no engine and no live model involved - and nothing here can reach
         the song, because the tree it is handed is not the song's.
 
-        Parameter changes are not applied. They live in the plugins rather than in the
-        tree, and setting them on a copy means opening its plugins, which a preview
-        does not do. A caller is told, rather than being given a preview that quietly
-        left half the proposal out. */
+        Parameter changes are not here, because they are not in the tree: they live
+        inside the plugins. applyParametersTo does that half, on the copy's own
+        plugins, and a preview runs both - a comparison that left half a proposal out
+        would be worse than no comparison, because it would be believed. */
     bool applyNotesTo (ValueTree coCompose) const
     {
         auto patterns = coCompose.getChildWithName (ids::PATTERNS);
@@ -170,6 +170,35 @@ struct Proposal
         }
 
         return true;
+    }
+
+    /** The other half, on a copy's plugins rather than a copy's tree.
+
+        `copy` is a model wrapper over the Edit the render will run, so this reaches its
+        plugins the way the live path reaches the song's - and, like applyNotesTo, it
+        touches nothing that outlives the render, because the Edit it is given is thrown
+        away when the comparison is done. No undo manager: there is nothing to take back
+        from an Edit that is about to stop existing.
+
+        Returns how many of the changes found something to set. A parameter that is not
+        there - a plugin removed since the proposal was worked out - is the caller's to
+        report, because a comparison missing part of what Apply would do is exactly the
+        thing this whole path exists to avoid. */
+    int applyParametersTo (Model& copy) const
+    {
+        auto set = 0;
+
+        for (const auto& change : parameters)
+            if (auto* plugin = copy.pluginFor (change.ownerID, change.pluginID))
+                if (auto parameter = plugin->getAutomatableParameterByID (change.parameterID))
+                {
+                    parameter->setParameter (parameter->valueRange.convertFrom0to1 (
+                                                 static_cast<float> (change.value)),
+                                             juce::sendNotification);
+                    ++set;
+                }
+
+        return set;
     }
 
     var summary() const

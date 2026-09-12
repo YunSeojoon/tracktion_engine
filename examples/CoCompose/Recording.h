@@ -280,9 +280,10 @@ public:
         files is meant to be the change, which is why both go through here rather than
         one of them through a different path. */
     bool startPreview (const File& destination, te::TimeRange range, int revision,
-                       std::function<void (ValueTree&)> adjust)
+                       std::function<void (ValueTree&)> adjust,
+                       std::function<void (Model&)> adjustPlugins = {})
     {
-        if (! begin (range, revision, std::move (adjust)))
+        if (! begin (range, revision, std::move (adjust), std::move (adjustPlugins)))
             return false;
 
         target = destination.hasFileExtension ("wav") ? destination : destination.withFileExtension ("wav");
@@ -334,7 +335,8 @@ public:
         plugin's state, not the undo history - because the live project is never the
         thing being changed. */
     bool begin (te::TimeRange range, int revision,
-                std::function<void (ValueTree&)> adjust = {})
+                std::function<void (ValueTree&)> adjust = {},
+                std::function<void (Model&)> adjustPlugins = {})
     {
         if (isBusy() || range.getLength().inSeconds() <= 0.0)
             return false;
@@ -371,6 +373,15 @@ public:
         {
             Model derived (*renderEdit);
             derived.render();
+
+            // A parameter is not in the tree. It lives inside the plugin, so adjusting
+            // the copy's tree cannot move it and a preview that only did that was of
+            // half the proposal - the notes as asked for, the mixer as it stands - while
+            // pressing Apply changed both. The copy's plugins are real plugins and this
+            // wrapper reaches them the same way the live one does, so the second half
+            // happens here, on the copy, and is thrown away with it.
+            if (adjustPlugins != nullptr)
+                adjustPlugins (derived);
         }
 
         renderedNotes = notesPlayedBy (*renderEdit, range);

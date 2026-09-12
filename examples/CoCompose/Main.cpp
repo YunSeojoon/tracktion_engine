@@ -1830,9 +1830,6 @@ private:
         preview.before = project.source.getSiblingFile ("preview-before.wav");
         preview.after = project.source.getSiblingFile ("preview-after.wav");
 
-        if (! proposal->parameters.empty())
-            preview.problem = "This proposal also changes mixer parameters, which a preview "
-                              "does not include; what you hear is the note changes only.";
 
         auto& timeline = project.edit->tempoSequence;
         const te::TimeRange range { timeline.toTime (te::BeatPosition::fromBeats (fromBeat)),
@@ -1954,7 +1951,26 @@ private:
 
                     const auto started = proposal != nullptr
                         && exporter.startPreview (preview.after, range, preview.revision,
-                                                  [proposal] (ValueTree& copy) { proposal->applyNotesTo (copy); });
+                                                  [proposal] (ValueTree& copy) { proposal->applyNotesTo (copy); },
+                                                  [this, proposal] (live::Model& copy)
+                                                  {
+                                                      // Runs on the message thread, before the worker
+                                                      // starts, so what it finds is in the status file
+                                                      // that goes out with this half.
+                                                      const auto wanted = static_cast<int> (proposal->parameters.size());
+                                                      const auto set = proposal->applyParametersTo (copy);
+
+                                                      // A parameter with nothing to set is a plugin that
+                                                      // has gone since the proposal was worked out. The
+                                                      // comparison is then of less than Apply would do,
+                                                      // and saying so is the whole difference between a
+                                                      // partial preview and a misleading one.
+                                                      if (set < wanted)
+                                                          preview.problem = "Part of this proposal is not in the comparison: "
+                                                                          + String (wanted - set)
+                                                                          + " of its mixer changes point at a plugin that is "
+                                                                            "no longer there. Applying it would not make them either.";
+                                                  });
 
                     if (! started)
                     {

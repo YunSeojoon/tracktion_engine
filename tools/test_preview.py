@@ -17,8 +17,8 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from cocompose import read, tool, wait_for
-from test_plugin_compatibility import Session, prepare_song
+from cocompose import apply_change, control, read, tool, wait_for
+from test_plugin_compatibility import Session, prepare_song, read_wav
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -188,12 +188,262 @@ def check_an_ab_is_two_files_and_an_untouched_song(exe, folder, report):
         session.close()
 
 
+def check_a_mixer_change_is_in_what_you_hear(exe, folder, report):
+    """B2: a proposal that moves a knob has to be in the comparison, not just in Apply.
+
+    Notes live in the project tree and a preview could apply them to its copy. A
+    parameter lives inside the plugin, so the copy's tree knew nothing about it and the
+    preview rendered the mixer as it stands while Apply changed it. Half a proposal,
+    presented as the proposal - which is worse than no preview, because a person who
+    listens and approves is approving something they did not hear.
+
+    Renders here are not bit-stable, so "the audio differs" is measured with room:
+    a reverb taken from a third to fully wet moves the level of the whole file well
+    past the drift between two renders of the same thing."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        state = session.settled()
+        insert_id = state["mixer"]["inserts"][0]["id"]
+
+        def add_a_reverb(live):
+            live["mixer"]["inserts"][0].setdefault("effects", []).append(
+                {"id": "one-to-turn-up", "type": "reverb", "bypass": False, "wet": 1.0})
+
+        apply_change(project, add_a_reverb)
+        time.sleep(1.0)
+        session.settled()
+
+        insert = tool(project, "inspect_insert", {"insert": insert_id})["result"]
+        # The effect's own id is what create_proposal takes for "plugin" - the service
+        # matches either the engine's plugin id or the effect uid, and the effect uid is
+        # the one a reader of inspect_insert actually has.
+        wet, effect_id = None, None
+        for effect in insert.get("effects", []):
+            for p in effect.get("parameters", []):
+                if p["name"].lower().startswith("wet"):
+                    wet, effect_id = p, effect["id"]
+                    break
+        report.expect("there is a mixer parameter to move", wet is not None,
+                      [p["name"] for e in insert.get("effects", []) for p in e.get("parameters", [])])
+        if wet is None:
+            return
+
+        was = wet["value"]
+        revision = read(folder / "sync-status.json")["revision"]
+        made = tool(project, "create_proposal", {
+            "description": "AI: drown it in reverb",
+            "allowed_inserts": [insert_id],
+            "base_revision": revision,
+            "parameters": [{"owner": insert_id, "plugin": effect_id,
+                            "parameter": wet["id"], "value": 1.0}]})
+        report.expect("a mixer proposal to listen to", made["status"] == "ok",
+                      made.get("error", {}).get("message", ""))
+        if made["status"] != "ok":
+            return
+
+        proposal = made["result"]["proposal"]["id"]
+
+        (folder / "preview-status.json").unlink(missing_ok=True)
+        session.run([{"preview": [proposal, 0.0, 8.0]}])
+
+        def finished():
+            path = folder / "preview-status.json"
+            status = read(path) if path.exists() else {}
+            return status if status and status.get("running") is False else None
+
+        status = wait_for(finished, timeout=240)
+        report.expect("both halves were rendered",
+                      status["before"]["exists"] and status["after"]["exists"],
+                      (status["before"]["exists"], status["after"]["exists"]))
+
+        # The notes are identical on both sides - this proposal does not touch them -
+        # so anything that differs between the two files is the mixer, which is the
+        # point. A preview that ignored the parameter would produce two renders of the
+        # same thing and could only differ by drift.
+        report.expect("the notes are the same on both sides, so only the mixer differs",
+                      sorted(status["before"].get("notes", [])) == sorted(status["after"].get("notes", [])))
+
+        a, b = read_wav(folder / "preview-before.wav"), read_wav(folder / "preview-after.wav")
+        drift = abs(a["rms"]) * 0.02 + 1.0e-6
+        report.expect("and it is audible - the two halves do not measure the same",
+                      abs(a["rms"] - b["rms"]) > drift, (a["rms"], b["rms"], drift))
+
+        report.expect("the app does not say the mixer was left out",
+                      "parameter" not in (status.get("limits") or "").lower(),
+                      status.get("limits"))
+
+        # And the song paid nothing for it.
+        report.expect("rendering it changed no music",
+                      read(folder / "sync-status.json")["revision"] == revision,
+                      read(folder / "sync-status.json")["revision"])
+        after = tool(project, "inspect_insert", {"insert": insert_id})["result"]
+        still = next(p for effect in after.get("effects", []) for p in effect.get("parameters", [])
+                     if p["id"] == wet["id"])
+        report.expect("and the knob in the song has not moved", still["value"] == was,
+                      (was, still["value"]))
+
+        # Apply, and what was heard is what the song now has.
+        applied = tool(project, "apply_proposal", {"proposal": proposal})
+        report.expect("applying it works", applied["status"] == "ok",
+                      applied.get("error", {}).get("message", ""))
+        moved = tool(project, "inspect_insert", {"insert": insert_id})["result"]
+        now = next(p for effect in moved.get("effects", []) for p in effect.get("parameters", [])
+                   if p["id"] == wet["id"])
+        report.expect("and the knob is where the comparison had it",
+                      abs(now["value"] - 1.0) < 1.0e-3, now["value"])
+
+        report.for_a_person("whether the previewed mixer and the applied mixer sound the same",
+                            "two renders of the same music are not bit-identical here, so "
+                            "the last word is a person's")
+    finally:
+        session.close()
+
+
+def check_a_mixed_proposal_is_heard_whole(exe, folder, report):
+    """B2: notes and a mixer move in one proposal, and the comparison has both.
+
+    These were the halves that came apart: notes went into the copy's tree and were
+    heard, the parameter stayed in the plugin and was not, and Apply did both. A person
+    who listened to that and approved it approved something they had not heard."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        state = session.settled()
+        pattern_id = state["patterns"][0]["id"]
+        channel_id = state["channels"][0]["id"]
+        insert_id = state["mixer"]["inserts"][0]["id"]
+
+        def add_a_reverb(live):
+            live["mixer"]["inserts"][0].setdefault("effects", []).append(
+                {"id": "one-to-turn-up", "type": "reverb", "bypass": False, "wet": 1.0})
+
+        apply_change(project, add_a_reverb)
+        time.sleep(1.0)
+        session.settled()
+
+        insert = tool(project, "inspect_insert", {"insert": insert_id})["result"]
+        wet, effect_id = None, None
+        for effect in insert.get("effects", []):
+            for p in effect.get("parameters", []):
+                if p["name"].lower().startswith("wet"):
+                    wet, effect_id = p, effect["id"]
+                    break
+
+        part = tool(project, "inspect_pattern",
+                    {"pattern": pattern_id, "channel": channel_id})["result"]
+        notes = [n for p in part["parts"] for n in p["notes"]]
+        report.expect("there are notes and a knob to change together",
+                      wet is not None and len(notes) >= 4, (wet is not None, len(notes)))
+        if wet is None or len(notes) < 4:
+            return
+
+        revision = read(folder / "sync-status.json")["revision"]
+        made = tool(project, "create_proposal", {
+            "description": "AI: a fifth up, and wetter",
+            "pattern": pattern_id, "channel": channel_id,
+            "allowed_notes": [n["id"] for n in notes[:4]],
+            "allowed_inserts": [insert_id],
+            "base_revision": revision,
+            "notes": [{"what": "change", "id": n["id"], "pitch": min(127, n["pitch"] + 7)}
+                      for n in notes[:4]],
+            "parameters": [{"owner": insert_id, "plugin": effect_id,
+                            "parameter": wet["id"], "value": 1.0}]})
+        report.expect("a proposal that does both", made["status"] == "ok",
+                      made.get("error", {}).get("message", ""))
+        if made["status"] != "ok":
+            return
+
+        proposal = made["result"]["proposal"]["id"]
+        summary = made["result"]["proposal"]
+        report.expect("and it says it does both",
+                      summary["notes_changed"] == 4 and summary["parameters_changed"] == 1,
+                      (summary["notes_changed"], summary["parameters_changed"]))
+
+        (folder / "preview-status.json").unlink(missing_ok=True)
+        session.run([{"preview": [proposal, 0.0, 8.0]}])
+
+        def finished():
+            path = folder / "preview-status.json"
+            status = read(path) if path.exists() else {}
+            return status if status and status.get("running") is False else None
+
+        status = wait_for(finished, timeout=240)
+
+        lifted = {min(127, n["pitch"] + 7) for n in notes[:4]}
+        played_after = {int(entry.split("@")[0]) for entry in status["after"].get("notes", [])}
+        report.expect("the notes moved in the half you listen to",
+                      lifted.issubset(played_after), (sorted(lifted), sorted(played_after)[:8]))
+        report.expect("and the notes are not the same on both sides",
+                      sorted(status["before"].get("notes", [])) != sorted(status["after"].get("notes", [])))
+
+        a, b = read_wav(folder / "preview-before.wav"), read_wav(folder / "preview-after.wav")
+        report.expect("and the audio moved further than two renders drift apart",
+                      abs(a["rms"] - b["rms"]) > abs(a["rms"]) * 0.02 + 1.0e-6,
+                      (a["rms"], b["rms"]))
+        report.expect("nothing is reported as left out of the comparison",
+                      not (status.get("limits") or ""), status.get("limits"))
+
+        report.expect("and the song still has neither change",
+                      read(folder / "sync-status.json")["revision"] == revision)
+
+        # Apply, then read both halves back out of the song.
+        applied = tool(project, "apply_proposal", {"proposal": proposal})
+        report.expect("applying it works", applied["status"] == "ok",
+                      applied.get("error", {}).get("message", ""))
+
+        heard = tool(project, "inspect_pattern",
+                     {"pattern": pattern_id, "channel": channel_id})["result"]
+        pitches = {n["id"]: n["pitch"] for p in heard["parts"] for n in p["notes"]}
+        report.expect("the notes in the song are where the comparison had them",
+                      all(pitches[n["id"]] == min(127, n["pitch"] + 7) for n in notes[:4]))
+
+        moved = tool(project, "inspect_insert", {"insert": insert_id})["result"]
+        now = next(p for effect in moved.get("effects", []) for p in effect.get("parameters", [])
+                   if p["id"] == wet["id"])
+        report.expect("and so is the knob", abs(now["value"] - 1.0) < 1.0e-3, now["value"])
+
+        # One apply is one undo, and that has to hold for a proposal made of two
+        # different kinds of change. An earlier draft of this line called a read tool
+        # and asserted it answered, which proves nothing about undo at all.
+        control(project, "undo")
+        time.sleep(1.0)
+        session.settled()
+
+        back = tool(project, "inspect_pattern",
+                    {"pattern": pattern_id, "channel": channel_id})["result"]
+        where = {n["id"]: n["pitch"] for p in back["parts"] for n in p["notes"]}
+        report.expect("one undo puts the notes back",
+                      all(where[n["id"]] == n["pitch"] for n in notes[:4]),
+                      [(n["pitch"], where[n["id"]]) for n in notes[:4]])
+
+        returned = tool(project, "inspect_insert", {"insert": insert_id})["result"]
+        knob = next(p for effect in returned.get("effects", []) for p in effect.get("parameters", [])
+                    if p["id"] == wet["id"])
+        report.expect("and the same undo puts the knob back",
+                      abs(knob["value"] - wet["value"]) < 1.0e-3, (wet["value"], knob["value"]))
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
 
     print("an A/B, and a song that did not change")
     check_an_ab_is_two_files_and_an_untouched_song(exe, output / "ab", report)
+    print()
+    print("a mixer change is in what you hear, not only in what you apply")
+    check_a_mixer_change_is_in_what_you_hear(exe, output / "mixer", report)
+    print()
+    print("notes and a mixer move in one proposal, heard whole")
+    check_a_mixed_proposal_is_heard_whole(exe, output / "mixed", report)
 
     print()
     if report.unchecked:
