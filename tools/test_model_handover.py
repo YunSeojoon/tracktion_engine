@@ -165,6 +165,57 @@ def check_a_handover_keeps_the_work_and_not_the_authorship(exe, folder, report):
         session.close()
 
 
+def check_a_question_in_flight_is_not_handed_to_a_stranger(exe, folder, report):
+    """B4: switching the model while an answer is coming.
+
+    A question goes to a particular model. If the bridge is replaced before the answer
+    lands, the question is now in front of somebody the person did not ask - and the
+    app cannot tell that from nothing having happened by looking at "is a bridge
+    connected", because one is. The switch has to be noticed and the question handed
+    back, so that asking the new model is a thing the person does on purpose."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        session.settled()
+
+        with Liveness(folder / "chat-bridge.json", "the one that was asked",
+                      provider="fixture", model="model-one"):
+            wait_for(lambda: read(folder / "chat-inspector.json").get("bridge_connected"),
+                     timeout=20, what="the app to see the first bridge")
+
+            session.run([{"attach": "notes"}])
+            session.run([{"chat": "ask: something slow"}])
+            asked = wait_for(lambda: read(folder / "chat-request.json"), timeout=20,
+                             what="the question to go out")
+            report.expect("the app is waiting for an answer",
+                          read(folder / "chat-inspector.json").get("waiting") is True)
+
+        # No answer. A different bridge takes over while the question is still in flight.
+        with Liveness(folder / "chat-bridge.json", "a different one",
+                      provider="fixture", model="model-two"):
+            wait_for(lambda: (read(folder / "chat-inspector.json").get("waiting") is False),
+                     timeout=30, what="the app to notice the model changed")
+
+            said = read(folder / "conversation.json")["messages"]
+            answer = next((m for m in said if m.get("request_id") == asked["request_id"]
+                           and m["from"] == "assistant"), None)
+            report.expect("the question was not left in front of the new model",
+                          answer is not None and not answer["streaming"],
+                          answer and answer.get("streaming"))
+            report.expect("and the transcript says why",
+                          answer is not None and "model changed" in (answer.get("text") or ""),
+                          answer and (answer.get("text") or "")[:70])
+            report.expect("the words are back in the box to ask again",
+                          "something slow" in (read(folder / "chat-inspector.json").get("draft") or ""),
+                          read(folder / "chat-inspector.json").get("draft"))
+            report.expect("and nothing was changed in the music",
+                          read(folder / "sync-status.json")["error"] == "")
+    finally:
+        session.close()
+
+
 def check_no_key_is_written_anywhere(exe, folder, report):
     """B4: a key belongs in the environment, not in the project or the conversation.
 
@@ -203,6 +254,9 @@ def run(exe, output):
 
     print("a handover keeps the work and not the authorship")
     check_a_handover_keeps_the_work_and_not_the_authorship(exe, output / "handover", report)
+    print()
+    print("a question in flight is not handed to a stranger")
+    check_a_question_in_flight_is_not_handed_to_a_stranger(exe, output / "inflight", report)
     print()
     print("no key is written anywhere")
     check_no_key_is_written_anywhere(exe, output / "keys", report)

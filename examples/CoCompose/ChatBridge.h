@@ -53,6 +53,11 @@ public:
     {
         pending = outgoing.requestID;
         pendingProject = outgoing.projectID;
+        // Which bridge was asked. A question goes to a particular model, and if that
+        // bridge is replaced while the answer is still coming the question is now in
+        // front of somebody else. Remembering only "a bridge is connected" cannot tell
+        // that apart from nothing having happened.
+        askedInstance = instanceNow();
         askedAtMillis = Time::getCurrentTime().toMilliseconds();
         lastSeenReply.clear();
         streamedSoFar.clear();
@@ -214,6 +219,23 @@ public:
     }
 
     /** How long a question has been outstanding, in milliseconds; zero when none is. */
+    /** Whether the bridge now listening is a different one from the bridge that was
+        asked. Empty either side means nobody said, and an old bridge that does not
+        name itself is not called an impostor for it. */
+    bool changedHandsWhileWaiting() const
+    {
+        if (pending.isEmpty() || askedInstance.isEmpty())
+            return false;
+
+        const auto now = instanceNow();
+        return now.isNotEmpty() && now != askedInstance;
+    }
+
+    String instanceNow() const
+    {
+        return connection()["instance"].toString();
+    }
+
     int64 waitingFor() const
     {
         return pending.isEmpty() ? 0
@@ -235,7 +257,7 @@ private:
 
     File folder;
     int64 askedAtMillis = 0;
-    String pending, pendingProject, lastSeenReply, streamedSoFar;
+    String pending, pendingProject, askedInstance, lastSeenReply, streamedSoFar;
     StringArray cancelled;
 };
 

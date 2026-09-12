@@ -1304,6 +1304,30 @@ private:
         forgive. */
     void noticeIfNothingIsListening()
     {
+        // A bridge swapped underneath a question in flight. Something is connected, so
+        // the check below would see nothing wrong - but the model that was asked is no
+        // longer the one that would answer, and letting it through means a person gets
+        // an answer from somebody they did not ask. The question goes back in the box,
+        // the same as when the bridge simply stopped, and the switch is theirs to make
+        // again on purpose.
+        if (bridge->isWaiting() && bridge->changedHandsWhileWaiting())
+        {
+            const auto lost = bridge->abandon();
+            for (const auto& message : conversation->messages())
+                if (message.requestID == lost && message.from == live::ChatMessage::From::person
+                     && workspace.chatPanel().draft().isEmpty())
+                {
+                    workspace.chatPanel().setDraft (message.text);
+                    break;
+                }
+
+            conversation->finishStreaming (lost, "(the model changed while this was being "
+                                                 "answered; nothing was changed)");
+            say ("The model changed while that was in flight. Your question is back in "
+                 "the box - ask it again when you are ready.");
+            return;
+        }
+
         if (! bridge->isWaiting() || bridge->isConnected())
             return;
 
