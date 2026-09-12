@@ -18,6 +18,21 @@ inline var object (std::initializer_list<std::pair<Identifier, var>> fields)
 
 inline String text (const var& value) { return JSON::toString (value, true); }
 
+/** Delivers a real right-button press to a component, at a point inside it.
+
+    For the diagnostic UI script. Calling the function that opens a menu would say the
+    menu exists and nothing about whether right-clicking gets there, and it is the
+    wiring between the two - not the menu - that has been the thing left out. */
+inline bool rightClickOn (Component& target, Point<float> where)
+{
+    const ModifierKeys mods (ModifierKeys::rightButtonModifier);
+    target.mouseDown (MouseEvent (Desktop::getInstance().getMainMouseSource(), where, mods,
+                                  1.0f, 0.0f, 0.0f, 0.0f, 0.0f, &target, &target,
+                                  Time::getCurrentTime(), where, Time::getCurrentTime(),
+                                  1, false));
+    return true;
+}
+
 inline void require (bool condition, const String& error)
 {
     if (! condition) throw std::runtime_error (error.toStdString());

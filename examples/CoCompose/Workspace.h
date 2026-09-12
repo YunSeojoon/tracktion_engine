@@ -400,7 +400,7 @@ public:
 
     bool toggleStep (int step) { return steps.toggleStep (step); }
 
-    void mouseDown (const MouseEvent&) override
+    void mouseDown (const MouseEvent& e) override
     {
         selection.setChannel (id);
 
@@ -413,7 +413,68 @@ public:
                 selection.setInsert (Model::uidOf (feeds));
 
         if (changed != nullptr) changed();
+
+        // Picking first and then opening the menu, in that order, so the menu is about
+        // the channel under the pointer rather than whichever one was selected before.
+        if (e.mods.isPopupMenu())
+            showChannelMenu();
     }
+
+    /** The channel's own menu, where a person is already pointing at the channel.
+
+        Every item here is a second door to something that exists already - a button on
+        this row, or a command in the menu bar - so a menu item and the button beside it
+        cannot drift into disagreeing about what they do. */
+    void showChannelMenu()
+    {
+        auto* track = model.trackFor (id);
+
+        PopupMenu menu;
+        menu.addItem (1, "Rename...");
+        menu.addSeparator();
+        menu.addItem (2, "Choose instrument...");
+        menu.addItem (3, "Open instrument window",
+                      track != nullptr && Model::instrumentOf (*track) != nullptr);
+        menu.addItem (4, "Load a sample...");
+        menu.addItem (5, "Presets...");
+        menu.addItem (6, "Step settings...");
+        menu.addSeparator();
+        menu.addItem (7, "Mute", true, mute.getToggleState());
+        menu.addItem (8, "Solo", true, solo.getToggleState());
+        menu.addSeparator();
+        menu.addItem (9, "Ask AI about this channel's insert");
+        menu.addSeparator();
+        menu.addItem (10, "Remove this channel");
+
+        menu.showMenuAsync (PopupMenu::Options().withTargetComponent (this), [this] (int chosen)
+        {
+            // A menu stays open for as long as a person leaves it open, and the song
+            // does not wait: a channel can be removed by a script or by an answer
+            // arriving. So the channel is looked up again rather than remembered.
+            if (chosen == 0 || ! channel().isValid())
+                return;
+
+            switch (chosen)
+            {
+                case 1:  name.showEditor();            break;
+                case 2:  instrument.showPopup();       break;
+                case 3:  openInstrument.triggerClick(); break;
+                case 4:  sample.triggerClick();        break;
+                case 5:  presets.triggerClick();       break;
+                case 6:  stepSettings.triggerClick();  break;
+                case 7:  mute.triggerClick();          break;
+                case 8:  solo.triggerClick();          break;
+                case 9:  if (runCommand) runCommand ("Ask AI about the insert"); break;
+                case 10: if (removeChannel) removeChannel(); break;
+                default: break;
+            }
+        });
+    }
+
+    /** Set by the rack that owns the row: the menu bar's commands, and the one action
+        that belongs to the rack rather than to any single row. */
+    std::function<bool (const String&)> runCommand;
+    std::function<void()> removeChannel;
 
     void refresh()
     {
@@ -794,6 +855,12 @@ public:
             for (const auto& channelID : wanted)
             {
                 auto* row = channelRows.add (new ChannelRow (model, selection, channelID, changed));
+                // Through the rack rather than copied into the row: the runner is set
+                // after the workspace is built, and rows are thrown away and remade
+                // whenever channels change, so a copy would be stale half the time.
+                row->runCommand = [this] (const String& command)
+                                  { return runCommand != nullptr && runCommand (command); };
+                row->removeChannel = [this] { remove.triggerClick(); };
                 rows.addAndMakeVisible (row);
             }
             layoutRows();
@@ -806,6 +873,14 @@ public:
             row->refresh();
 
         layoutRows(); // The step grid grows and shrinks with the selected pattern.
+    }
+
+    /** Where a row's menu sends the commands it does not own. */
+    std::function<bool (const String&)> runCommand;
+
+    ChannelRow* rowAt (int index) const
+    {
+        return isPositiveAndBelow (index, channelRows.size()) ? channelRows[index] : nullptr;
     }
 
     ChannelRow* selectedRow() const
@@ -946,6 +1021,7 @@ public:
 
         // The same door the menu's "Open" uses - 1000 + index * 10 + 0 is that item.
         chain.openEffect = [this] (int index) { handleEffectChoice (1000 + index * 10); };
+        chain.slotMenu = [this] (int index) { showSlotMenu (index); };
         routing.onClick = [this] { showRoutingMenu(); };
         effects.setEnabled (master == nullptr);
         routing.setEnabled (master == nullptr);
@@ -1148,6 +1224,40 @@ private:
         notify();
     }
 
+    /** One effect's menu, on the effect. The item codes are the ones showEffectsMenu
+        already sends to handleEffectChoice, so the list in the button's menu and the
+        slot under the pointer cannot end up meaning different things. */
+    void showSlotMenu (int index)
+    {
+        auto insert = model.insertFor (id);
+
+        if (master != nullptr || ! insert.isValid())
+            return;
+
+        int seen = 0;
+        for (auto child : insert)
+        {
+            if (! child.hasType (ids::EFFECT) || seen++ != index)
+                continue;
+
+            PopupMenu menu;
+            menu.addSectionHeader (model.effectName (child[ids::type].toString()));
+            menu.addItem (1000 + index * 10 + 0, "Open");
+            menu.addItem (1000 + index * 10 + 1, "Bypass", true, static_cast<bool> (child[ids::bypass]));
+            menu.addItem (1000 + index * 10 + 2, "Move up", index > 0);
+            menu.addItem (1000 + index * 10 + 3, "Move down");
+            menu.addSeparator();
+            menu.addItem (1000 + index * 10 + 4, "Remove");
+
+            menu.showMenuAsync (PopupMenu::Options().withTargetComponent (&chain),
+                                [this] (int choice) { handleEffectChoice (choice); });
+            return;
+        }
+
+        // Nothing under the pointer: the chain as a whole, which is where "Add" lives.
+        showEffectsMenu();
+    }
+
     void showEffectsMenu()
     {
         auto insert = model.insertFor (id);
@@ -1269,6 +1379,15 @@ public:
         return true;
     }
 
+    /** Right-clicks the chain where that effect is drawn. A negative index means past
+        the last one, which is the gesture that offers "Add effect". */
+    bool rightClickChain (int index)
+    {
+        return live::rightClickOn (chain, { (float) (index < 0 ? chain.getWidth() - 2
+                                                              : chain.centreOfSlot (index)),
+                                            (float) chain.getHeight() / 2.0f });
+    }
+
 private:
     void showRoutingMenu()
     {
@@ -1320,6 +1439,7 @@ private:
     {
         StringArray names;
         std::function<void (int)> openEffect;
+        std::function<void (int)> slotMenu;
         String tip;
 
         void setTooltipText (const String& text) { tip = text; }
@@ -1332,6 +1452,22 @@ private:
 
             names = newNames;
             repaint();
+        }
+
+        /** The middle of one slot, for anything that has an index and needs a place to
+            point at. The inverse of indexAt, which is why they sit together: if the
+            spacing changes, both change with it. */
+        int centreOfSlot (int index) const
+        {
+            auto left = 0;
+            for (int i = 0; i < names.size(); ++i)
+            {
+                const auto width = widthOf (names[i]);
+                if (i == index)
+                    return left + width / 2;
+                left += width + separatorWidth();
+            }
+            return left + 4;
         }
 
         int indexAt (int x) const
@@ -1351,6 +1487,15 @@ private:
         {
             if (const auto which = indexAt (e.x); which >= 0 && openEffect)
                 openEffect (which);
+        }
+
+        // Past the last effect indexAt gives -1, which the strip reads as "the chain,
+        // not one of its slots" and answers with the whole chain's menu. That is what
+        // makes right-clicking the empty part of an empty chain still offer "Add".
+        void mouseDown (const MouseEvent& e) override
+        {
+            if (e.mods.isPopupMenu() && slotMenu)
+                slotMenu (indexAt (e.x));
         }
 
         void paint (Graphics& g) override
@@ -2377,6 +2522,8 @@ public:
     {
         menuRunner = std::move (runner);
         playlist->getGrid().runCommand = menuRunner;
+        if (rack != nullptr)
+            rack->runCommand = menuRunner;
         if (auto* editor = pianoRollEditor())
             editor->askAboutSelection = askNotes;
     }
@@ -2639,6 +2786,28 @@ public:
         for (auto* strip : mixer->stripList())
             if (strip->insertID() == insertID)
                 return strip->openEffect (index);
+        return false;
+    }
+
+    /** Right-clicks a channel's header, the way a person would. Calling the menu
+        function straight would prove the menu exists and nothing about whether the
+        gesture reaches it, and the gesture is the half that has broken before. */
+    bool rightClickChannel (int index)
+    {
+        if (rack == nullptr)
+            return false;
+
+        auto* row = rack->rowAt (index);
+        return row != nullptr
+                && live::rightClickOn (*row, { 8.0f, (float) row->getHeight() / 2.0f });
+    }
+
+    /** The same, on one effect in a mixer strip's chain. */
+    bool rightClickEffectSlot (const String& insertID, int index)
+    {
+        for (auto* strip : mixer->stripList())
+            if (strip->insertID() == insertID)
+                return strip->rightClickChain (index);
         return false;
     }
 

@@ -2155,6 +2155,25 @@ private:
                     && workspace.openEffectWindow (what[0].toString(), static_cast<int> (what[1]));
         }
 
+        if (action.hasProperty ("right_click"))
+        {
+            // ["channel", row] or ["effect", insert id, slot] - a real right-button
+            // press on the thing itself, not a call to the function that opens a menu.
+            const auto what = action["right_click"];
+            if (! what.isArray() || what.size() < 2)
+                return false;
+
+            const auto target = what[0].toString();
+
+            if (target == "channel")
+                return workspace.rightClickChannel (static_cast<int> (what[1]));
+
+            if (target == "effect" && what.size() == 3)
+                return workspace.rightClickEffectSlot (what[1].toString(), static_cast<int> (what[2]));
+
+            return false;
+        }
+
         if (action.hasProperty ("lane_height"))
         {
             workspace.playlistGrid().setLaneHeight (static_cast<int> (action["lane_height"]));

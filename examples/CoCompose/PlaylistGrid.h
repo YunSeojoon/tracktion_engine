@@ -1135,7 +1135,42 @@ private:
         PopupMenu menu;
         const auto many = selected.size() > 1;
         const auto what = many ? " " + String (selected.size()) + " clips" : String();
+        const auto audio = isAudio (model.placementFor (clipID));
 
+        // A pattern clip and an audio clip are not the same thing and used to be
+        // offered the same menu: "Open in piano roll" and "Make unique" on a recording
+        // are items that either do nothing or mean nothing. What a piece of audio has
+        // instead is its shape - level, fades, speed - so that is what it is offered.
+        if (audio)
+        {
+            PopupMenu gain, fadeIn, fadeOut, speed;
+            for (const auto db : { 6.0, 3.0, 0.0, -3.0, -6.0, -12.0 })
+                gain.addItem (100 + roundToInt ((db + 12.0) * 10.0),
+                              (db > 0.0 ? "+" : "") + String (db, 1) + " dB");
+            for (const auto seconds : { 0.0, 0.01, 0.05, 0.1, 0.25, 0.5 })
+            {
+                fadeIn.addItem  (300 + roundToInt (seconds * 100.0), describeSeconds (seconds));
+                fadeOut.addItem (400 + roundToInt (seconds * 100.0), describeSeconds (seconds));
+            }
+            for (const auto rate : { 0.5, 0.75, 1.0, 1.5, 2.0 })
+                speed.addItem (500 + roundToInt (rate * 100.0), String (rate, 2) + "x");
+
+            menu.addSubMenu ("Level" + what, gain);
+            menu.addSubMenu ("Fade in" + what, fadeIn);
+            menu.addSubMenu ("Fade out" + what, fadeOut);
+            menu.addSubMenu ("Speed" + what, speed);
+            menu.addSeparator();
+            menu.addItem (7, "Back to how it was recorded" + what);
+            menu.addSeparator();
+            menu.addItem (2, "Duplicate" + what);
+            menu.addItem (4, "Split at playhead" + what);
+            menu.addSeparator();
+            menu.addItem (5, "Ask AI about this");
+            menu.addSeparator();
+            menu.addItem (6, "Delete" + what);
+        }
+        else
+        {
         menu.addItem (1, "Open in piano roll", ! many);
         menu.addSeparator();
         menu.addItem (2, "Duplicate" + what);
@@ -1145,6 +1180,7 @@ private:
         menu.addItem (5, "Ask AI about this");
         menu.addSeparator();
         menu.addItem (6, "Delete" + what);
+        }
 
         // The menu is open for as long as a person leaves it open, and the song does
         // not stand still: the clip can be deleted from a script, or by an answer
@@ -1157,6 +1193,13 @@ private:
             if (! model.instanceFor (clipID).isValid())
                 return;                     // gone while the menu was open
 
+            // The shaping items carry their value in the code, so the same three lines
+            // serve every entry of every submenu and adding a value is adding a value.
+            if (chosen >= 100 && chosen < 300) { shapeSelection (ids::gainDb, (chosen - 100) / 10.0 - 12.0); return; }
+            if (chosen >= 300 && chosen < 400) { shapeSelection (ids::fadeIn,  (chosen - 300) / 100.0); return; }
+            if (chosen >= 400 && chosen < 500) { shapeSelection (ids::fadeOut, (chosen - 400) / 100.0); return; }
+            if (chosen >= 500 && chosen < 800) { shapeSelection (ids::speed,   (chosen - 500) / 100.0); return; }
+
             switch (chosen)
             {
                 case 1: if (runCommand) runCommand ("Piano roll"); break;
@@ -1165,9 +1208,20 @@ private:
                 case 4: if (runCommand) runCommand ("Split clip"); break;
                 case 5: if (runCommand) runCommand ("Ask AI about the region"); break;
                 case 6: deleteSelectedClips(); break;
+                case 7: shapeSelection (ids::gainDb, 0.0);
+                        shapeSelection (ids::fadeIn, 0.0);
+                        shapeSelection (ids::fadeOut, 0.0);
+                        shapeSelection (ids::speed, 1.0);
+                        break;
                 default: break;
             }
         });
+    }
+
+    /** "0.10 s", or "none" for nothing at all, which is what a zero-length fade is. */
+    static String describeSeconds (double seconds)
+    {
+        return seconds <= 0.0 ? String ("none") : String (seconds, 2) + " s";
     }
 
     void showEmptyMenu (Point<int> where)

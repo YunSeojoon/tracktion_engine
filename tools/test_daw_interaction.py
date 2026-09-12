@@ -144,22 +144,26 @@ def check_typing_does_not_play_the_song(exe, folder, report):
                       "space" in (read(folder / "chat-inspector.json").get("draft") or "").lower(),
                       read(folder / "chat-inspector.json").get("draft"))
         # The guard reads the same focus JUCE uses to route key presses, so it is right
-        # in use - but a window that the OS will not make active cannot hold the
-        # keyboard, and under automation here it never does. So the state the guard
-        # exists for cannot be produced from a script on this machine.
+        # in use - but a window the OS will not make active cannot hold the keyboard,
+        # and headless it never does. So the state the guard exists for cannot be
+        # produced from a script on this machine.
+        #
+        # Nor can the script stand in for the key any more, and that is on purpose. The
+        # guard now asks whether the command came from a key press, because a menu item
+        # clicked while a name is selected in the arrangement is not somebody typing and
+        # used to be declined as though it were. A command sent through the UI script is
+        # not a key press either, so running it here would prove nothing about the key.
         if read(folder / "chat-inspector.json").get("typing") is not True:
             report.cannot_check(
-                "space while typing does not start playback",
+                "Space, Return and Home while typing stay out of the music",
                 "this machine will not give the app window the keyboard from a script;"
-                " type in the chat box and press space to see it")
+                " type in the chat box and press each of them to see it")
             return
 
-        session.run([{"command": "Play / Stop"}])
-        time.sleep(0.6)
-        report.expect("space while typing does not start playback",
-                      transport(folder)["playing"] is False, transport(folder)["playing"])
-        report.expect("and the words are still there",
-                      "space" in (read(folder / "chat-inspector.json").get("draft") or "").lower())
+        report.cannot_check(
+            "Space, Return and Home while typing stay out of the music",
+            "the app has the keyboard, but a UI-script command is not a key press and"
+            " the guard is deliberately only about key presses")
     finally:
         session.close()
 
@@ -568,6 +572,112 @@ def check_an_effect_can_be_opened_from_the_chain(exe, folder, report):
         session.close()
 
 
+def check_every_target_has_a_menu_and_opening_it_changes_nothing(exe, folder, report):
+    """B1: the targets that had no menu, and the one whose menu was the wrong menu.
+
+    A channel header, an effect in a mixer chain and an audio clip are all things a
+    person points at and right-clicks, and until now the first two answered with
+    nothing and the third answered with a pattern clip's menu - "Open in piano roll"
+    on a recording. What every one of them has to have in common is that opening the
+    menu is not itself an edit: a mis-aimed right-click must cost nothing.
+
+    These drive real right-button MouseEvents into the components. What they cannot
+    prove is that Windows delivers the click, which stays a person's job."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+    try:
+        prepare_song(session)
+        state = session.settled()
+        insert_id = state["mixer"]["inserts"][0]["id"]
+
+        # An effect to point at. Added through the project file rather than through the
+        # menu being tested, so the check does not depend on the thing it is checking.
+        def add_a_reverb(live):
+            live["mixer"]["inserts"][0].setdefault("effects", []).append(
+                {"id": "a-reverb-to-point-at", "type": "reverb", "bypass": False, "wet": 1.0})
+
+        apply_change(project, add_a_reverb)
+        time.sleep(0.8)
+        state = session.settled()
+        effects = state["mixer"]["inserts"][0].get("effects", [])
+        report.expect("there is an effect in the chain to point at", len(effects) == 1, effects)
+
+        # An audio clip to point at, on its own lane.
+        sample = folder / "a-sound.wav"
+        write_a_quiet_wav(sample)
+        lanes = len(state["playlist"]["lanes"])
+        session.run([{"audio": [lanes - 1, str(sample), 0.0]}])
+        time.sleep(0.8)
+        state = session.settled()
+        # Audio placements are their own list beside the pattern clips, which is the
+        # whole reason they need their own menu.
+        audio_clips = state["playlist"].get("audio", [])
+        report.expect("there is an audio clip to point at", len(audio_clips) >= 1,
+                      len(audio_clips))
+
+        clips_before = len(state["playlist"]["clips"])
+        notes_before = len(state["patterns"][0].get("sequences", []))
+        revision = read(folder / "sync-status.json")["revision"]
+
+        def right_click(what, name):
+            # The app refuses an action it cannot carry out, and Session.run turns that
+            # refusal into an exception - so "it was answered" is the absence of one,
+            # not a truthy return value. An earlier version of this checked that run()
+            # returned something, which it always does.
+            try:
+                session.run([what])
+                answered, why = True, ""
+            except RuntimeError as refused:
+                answered, why = False, str(refused)
+
+            time.sleep(0.5)
+            session.run([{"dismiss_menus": True}])
+            time.sleep(0.3)
+            report.expect("right-clicking " + name + " is answered", answered, why)
+            report.expect("and opening " + name + "'s menu changed nothing",
+                          read(folder / "sync-status.json")["revision"] == revision,
+                          read(folder / "sync-status.json")["revision"])
+
+        right_click({"right_click": ["channel", 0]}, "a channel header")
+        right_click({"right_click": ["effect", insert_id, 0]}, "an effect in the chain")
+        right_click({"right_click": ["effect", insert_id, -1]}, "the empty part of a chain")
+
+        if audio_clips:
+            start = audio_clips[0]["start"]
+            session.run([{"ruler": ["right-click", start + 0.25, start + 0.25, lanes - 1]}])
+            time.sleep(0.5)
+            session.run([{"dismiss_menus": True}])
+            time.sleep(0.3)
+            report.expect("and opening an audio clip's menu changed nothing",
+                          read(folder / "sync-status.json")["revision"] == revision,
+                          read(folder / "sync-status.json")["revision"])
+
+        after = session.settled()
+        report.expect("no clip went anywhere",
+                      len(after["playlist"]["clips"]) == clips_before
+                      and len(after["playlist"].get("audio", [])) == len(audio_clips),
+                      (clips_before, len(after["playlist"]["clips"])))
+        report.expect("and no pattern did either",
+                      len(after["patterns"][0].get("sequences", [])) == notes_before)
+
+        report.cannot_check("that the menus read right and land under the pointer",
+                            "where a menu appears and how it reads are seen, not measured")
+    finally:
+        session.close()
+
+
+def write_a_quiet_wav(path):
+    """A second of silence at 44.1k, written by hand so the check needs no fixtures."""
+    import struct
+    frames = 44100
+    data = bytes(2 * frames)          # silence, two bytes a frame
+    header = (b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt "
+              + struct.pack("<IHHIIHH", 16, 1, 1, 44100, 88200, 2, 16)
+              + b"data" + struct.pack("<I", len(data)))
+    path.write_bytes(header + data)
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -613,6 +723,9 @@ def run(exe, output):
     print()
     print("Erase and Split are chosen, not stumbled into")
     check_erase_and_split_are_chosen_not_stumbled_into(exe, output / "destructive", report)
+    print()
+    print("every target answers a right-click, and answering costs nothing")
+    check_every_target_has_a_menu_and_opening_it_changes_nothing(exe, output / "targets", report)
 
     print()
     if report.unchecked:
