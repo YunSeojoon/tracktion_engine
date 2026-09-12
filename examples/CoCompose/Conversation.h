@@ -47,6 +47,13 @@ struct ChatMessage
     var proposalSummary, proposalDiff;
     String proposalProblem;   // why a suggested change could not even be worked out
 
+    /** Who answered. A conversation can outlive the bridge that started it - a person
+        stops one and starts another with a different model - so an answer says which
+        one produced it rather than leaving the reader to assume it was whichever is
+        connected now. An answer from before a switch stays labelled with the model that
+        wrote it. */
+    String answeredByProvider, answeredByModel;
+
     static String fromName (From f)
     {
         switch (f)
@@ -151,13 +158,22 @@ public:
             }
     }
 
-    void finishStreaming (const String& requestID, const String& finalText = {})
+    void finishStreaming (const String& requestID, const String& finalText = {},
+                          const String& provider = {}, const String& model = {})
     {
         for (auto& message : entries)
             if (message.streaming && message.requestID == requestID)
             {
                 if (finalText.isNotEmpty())
                     message.text = finalText;
+
+                // Recorded against the answer, not against the conversation: a person
+                // can stop one bridge and start another mid-conversation, and this
+                // answer was written by whichever was asked. Reading it off whatever is
+                // connected now would relabel yesterday's answers every time the model
+                // changed.
+                message.answeredByProvider = provider;
+                message.answeredByModel = model;
                 message.streaming = false;
                 save();
                 return;
@@ -271,6 +287,8 @@ private:
                                { "proposal", message.proposalSummary },
                                { "proposal_diff", message.proposalDiff },
                                { "proposal_problem", message.proposalProblem },
+                               { "answered_by", object ({ { "provider", message.answeredByProvider },
+                                                          { "model", message.answeredByModel } }) },
                                { "attachments", attached } }));
         }
 
@@ -320,6 +338,8 @@ private:
                 message.proposalSummary = entry["proposal"];
                 message.proposalDiff = entry["proposal_diff"];
                 message.proposalProblem = entry["proposal_problem"].toString();
+                message.answeredByProvider = entry["answered_by"]["provider"].toString();
+                message.answeredByModel = entry["answered_by"]["model"].toString();
                 // An answer that was still arriving when the app closed is not still
                 // arriving now. It is kept, marked finished, rather than left pending
                 // for something that will never write to it again.

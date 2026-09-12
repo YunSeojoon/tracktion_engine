@@ -1409,14 +1409,17 @@ private:
                 break;
 
             case live::ChatBridge::Update::What::finished:
-                conversation->finishStreaming (update.requestID, update.text);
+                conversation->finishStreaming (update.requestID, update.text,
+                                               update.provider, update.model);
                 considerSuggestedChange (update.requestID, update.change);
-                say ("The assistant answered.");
+                say ("The assistant answered" + (update.model.isNotEmpty()
+                                                   ? " (" + update.model + ")." : "."));
                 break;
 
             case live::ChatBridge::Update::What::failed:
                 conversation->finishStreaming (update.requestID,
-                                               "(no answer: " + update.errorCode + " " + update.text + ")");
+                                               "(no answer: " + update.errorCode + " " + update.text + ")",
+                                               update.provider, update.model);
                 say ("The assistant could not answer: " + update.text);
                 break;
 

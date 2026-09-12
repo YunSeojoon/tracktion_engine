@@ -103,6 +103,13 @@ public:
             nobody at this point - it is exactly what the bridge sent - and the app puts
             it through the same checks a script's would face before keeping it. */
         var change;
+
+        /** Who produced this answer. A bridge can be stopped and another started with a
+            different model half way through a conversation, and an answer already in
+            flight belongs to the one that was asked. Without this the older answer
+            arrives and is read as the new model's, which is the kind of wrong that
+            cannot be spotted afterwards. */
+        String provider, model;
     };
 
     /** Called on the message thread, often. Reads whatever the bridge has written and
@@ -145,7 +152,8 @@ public:
             pending.clear();
             return { Update::What::failed, failed, reply["message"].toString(),
                      reply.getProperty ("code", "IO_ERROR").toString(),
-                     static_cast<bool> (reply.getProperty ("retryable", false)) };
+                     static_cast<bool> (reply.getProperty ("retryable", false)), var(),
+                     reply["provider"].toString(), reply["model"].toString() };
         }
 
         const auto whole = reply["text"].toString();
@@ -164,7 +172,8 @@ public:
         {
             const auto done = pending;
             pending.clear();
-            return { Update::What::finished, done, whole, {}, false, reply["change"] };
+            return { Update::What::finished, done, whole, {}, false, reply["change"],
+                     reply["provider"].toString(), reply["model"].toString() };
         }
 
         return {};

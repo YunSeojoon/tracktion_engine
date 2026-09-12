@@ -423,6 +423,10 @@ class Echo:
     """No network. Says what it was given, and says that it is not a model."""
 
     name = "echo (no model, plumbing only)"
+    kind = "echo"
+    model = ""
+    capabilities = {"suggests_changes": False, "hears_audio": False, "runs_locally": True,
+                    "is_a_model": False}
 
     def answer(self, request, on_text):
         # The whole prompt, not a summary of it: the point of this bridge is to show
@@ -438,6 +442,10 @@ class Echo:
 
 class OpenAIChat:
     """One provider, over plain HTTPS. No SDK, so nothing is hidden behind a wrapper."""
+
+    kind = "openai"
+    capabilities = {"suggests_changes": True, "hears_audio": False, "runs_locally": False,
+                    "is_a_model": True}
 
     def __init__(self, model, key):
         self.model = model
@@ -477,6 +485,10 @@ class Ollama:
     It streams, because a local model on ordinary hardware is slow enough that watching
     the answer appear is the difference between working and hung.
     """
+
+    kind = "ollama"
+    capabilities = {"suggests_changes": True, "hears_audio": False, "runs_locally": True,
+                    "is_a_model": True}
 
     def __init__(self, model, host):
         self.model = model
@@ -557,9 +569,17 @@ class Liveness:
     a heartbeat that has stopped as a bridge that has stopped.
     """
 
-    def __init__(self, state_file, name):
+    def __init__(self, state_file, name, provider=None, model=None, capabilities=None):
         self.state_file = state_file
         self.name = name
+        # Who is actually on the other end. A person who cannot see this cannot tell a
+        # local model from a hosted one, or a working connection from a bridge that is
+        # up but pointed at nothing - and those need different things done about them.
+        self.provider = provider
+        self.model = model
+        # What this connection can do, stated rather than assumed. A bridge that cannot
+        # hear audio should say so, so the app is not left offering to send it some.
+        self.capabilities = capabilities or {}
         self.instance = str(uuid.uuid4())
         self.busy_with = None
         self.stop = threading.Event()
@@ -569,6 +589,9 @@ class Liveness:
         atomic_write(self.state_file, {
             "ready": ready,
             "name": self.name,
+            "provider": self.provider,
+            "model": self.model,
+            "capabilities": self.capabilities,
             "instance": self.instance,
             "heartbeat_ms": int(time.time() * 1000),
             "heartbeat_interval_ms": int(HEARTBEAT_SECONDS * 1000),
@@ -621,7 +644,10 @@ def serve(project, provider, once=False):
     state_file = folder / "chat-bridge.json"
 
     answered = set()
-    alive = Liveness(state_file, provider.name)
+    alive = Liveness(state_file, provider.name,
+                     provider=getattr(provider, "kind", ""),
+                     model=getattr(provider, "model", ""),
+                     capabilities=getattr(provider, "capabilities", {}))
 
     with alive:
         print("bridge ready:", provider.name)
@@ -657,7 +683,8 @@ def serve(project, provider, once=False):
                     "request_id": request_id, "status": "error", "code": "IO_ERROR",
                     "message": "The bridge stopped while this answer was arriving. "
                                "Nothing was changed. Ask again if you want to.",
-                    "retryable": True, "provider": provider.name})
+                    "retryable": True, "provider": getattr(provider, "kind", ""),
+                                          "model": getattr(provider, "model", "")})
                 print("interrupted earlier, not resent:", request_id[:8])
                 if once:
                     return
@@ -671,7 +698,8 @@ def serve(project, provider, once=False):
                 if read(cancel_file).get("request_id") == _id:
                     raise KeyboardInterrupt
                 atomic_write(reply_file, {"request_id": _id, "status": "streaming",
-                                          "text": so_far, "provider": provider.name})
+                                          "text": so_far, "provider": getattr(provider, "kind", ""),
+                                          "model": getattr(provider, "model", "")})
 
             try:
                 text = provider.answer(request, stream)
@@ -691,7 +719,9 @@ def serve(project, provider, once=False):
                 reply = {"request_id": request_id, "status": "ok",
                          "project_id": request.get("project_id"),
                          "conversation_id": request.get("conversation_id"),
-                         "text": text, "provider": provider.name}
+                         "text": text,
+                         "provider": getattr(provider, "kind", ""),
+                         "model": getattr(provider, "model", "")}
                 if change:
                     reply["change"] = change
 
@@ -700,7 +730,8 @@ def serve(project, provider, once=False):
             except KeyboardInterrupt:
                 atomic_write(reply_file, {"request_id": request_id, "status": "error",
                                           "code": "CANCELLED", "message": "cancelled",
-                                          "retryable": True, "provider": provider.name})
+                                          "retryable": True, "provider": getattr(provider, "kind", ""),
+                                          "model": getattr(provider, "model", "")})
                 print("cancelled")
             except urllib.error.HTTPError as error:
                 detail = error.read().decode("utf-8", "replace")[:300]
@@ -710,12 +741,14 @@ def serve(project, provider, once=False):
                                           "code": code,
                                           "message": "HTTP %d: %s" % (error.code, detail),
                                           "retryable": error.code in (429, 500, 502, 503),
-                                          "provider": provider.name})
+                                          "provider": getattr(provider, "kind", ""),
+                                          "model": getattr(provider, "model", "")})
                 print("failed: HTTP", error.code)
             except (urllib.error.URLError, TimeoutError, OSError) as error:
                 atomic_write(reply_file, {"request_id": request_id, "status": "error",
                                           "code": "IO_ERROR", "message": str(error),
-                                          "retryable": True, "provider": provider.name})
+                                          "retryable": True, "provider": getattr(provider, "kind", ""),
+                                          "model": getattr(provider, "model", "")})
                 print("failed:", error)
 
             alive.busy_with = None
