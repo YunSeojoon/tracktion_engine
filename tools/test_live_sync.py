@@ -18,6 +18,10 @@ from xml.etree import ElementTree
 
 from cocompose import (Conflict, apply_change, atomic_write, control, current, read,
                        submit, wait_for)
+# The same wait, not a second one. This file had its own copy that gave up quietly
+# after thirty seconds and returned False to callers that ignored it, which is how a
+# blocked run kept arriving as a failed check somewhere else.
+from test_plugin_compatibility import AppAlreadyRunning, wait_for_no_running_app
 
 LEGACY_SESSION = Path(__file__).resolve().parents[1] / "tests/cocompose/legacy-schema1.tracktionedit"
 
@@ -32,22 +36,7 @@ def equivalent(a, b):
     return a == b
 
 
-def wait_for_no_running_app(timeout=30):
-    """Waits for the last CoCompose to finish leaving before the next one starts."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            listed = subprocess.run(["tasklist", "/FI", "IMAGENAME eq CoCompose.exe", "/NH"],
-                                    capture_output=True, text=True, timeout=20).stdout
-        except (OSError, subprocess.SubprocessError):
-            return True
 
-        if not any(line.lower().startswith("cocompose.exe") for line in listed.splitlines()):
-            return True
-
-        time.sleep(0.25)
-
-    return False
 
 
 def copy_when_readable(source, destination, attempts=20):
@@ -395,6 +384,7 @@ def run(exe, folder):
         checks.append(check_external_agent_session(exe, folder))
         checks.append(check_every_menu_command(exe, folder))
         checks.append(check_survives_the_rough_edges(exe, folder))
+        checks.append(check_a_request_sent_the_moment_the_app_answers_is_not_lost(exe, folder))
         checks.append(check_render_output_is_never_lost(exe, folder))
         checks.append(check_render_boundaries(exe, folder))
         checks.append(check_recording_and_recovery(exe, folder))
@@ -1446,6 +1436,79 @@ def check_every_menu_command(exe, folder):
             process.wait(timeout=10)
 
     return "Every menu command runs against a real project without an error"
+
+
+def check_a_request_sent_the_moment_the_app_answers_is_not_lost(exe, folder):
+    """The app used to swallow a control request that arrived while it was starting.
+
+    It noted the whole of control.json as "already seen" the moment it opened, so a
+    caller that waited for the new session - correctly, the way this suite does - and
+    sent at once had its request read as a leftover from the run before. Nothing
+    answered it, and forty-five seconds later the caller reported a hang that was
+    really a request nobody read. One run in three of this suite ended that way, and
+    the timeout said nothing that could tell a busy app from a lost request.
+
+    So this aims at the window rather than waiting to fall into it: the request goes
+    out the instant sync-status.json names a session that is not the last one, which
+    is the earliest a caller can know the app is there, and that is done a few times
+    over because the window is small.
+    """
+    sub = folder / "startup-control"
+    sub.mkdir()
+    project = sub / "project.json"
+    script = sub / "ui-script.json"
+    atomic_write(script, [])
+
+    startup = subprocess.STARTUPINFO()
+    startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startup.wShowWindow = 0
+
+    # A leftover from a run that is not this one, asking the app to quit. It must not be
+    # carried out - and it must be answered, because being answered is the whole point:
+    # the app judges a request by the session it names, not by whether it happened to be
+    # on disk at startup. An app that decides by arrival cannot tell this from a request
+    # that arrived a millisecond ago, which is the bug.
+    leftover = "left-over-from-another-run"
+    atomic_write(sub / "control.json", {"id": leftover, "action": "quit",
+                                        "session_id": "a-session-that-has-gone", "revision": 0})
+
+    previous = None
+    for attempt in range(3):
+        process = subprocess.Popen([str(exe), "--project", str(project), "--headless",
+                                    "--ui-script", str(script)], startupinfo=startup)
+        try:
+            wait_for(lambda: (sub / "sync-status.json").exists()
+                             and read(sub / "sync-status.json")["session_id"] != previous,
+                     timeout=60, what="attempt %d to name its session" % (attempt + 1))
+            previous = read(sub / "sync-status.json")["session_id"]
+
+            assert process.poll() is None,                 "the app carried out a quit left behind by another run"
+
+            if attempt == 0:
+                # Deterministic, unlike the race below: the leftover is read and refused
+                # on the ground that it names a session that is not this one. An app that
+                # marked whatever was on disk as already-seen answers nothing here, and
+                # that silence is what a live request used to disappear into.
+                answered = wait_for(
+                    lambda: (read(sub / "control-status.json")
+                             if read(sub / "control-status.json").get("id") == leftover else None),
+                    timeout=30,
+                    what="the app to answer a request left by another run")
+                assert answered["error"],                     "a request naming a session that has gone was accepted: %s" % answered
+                assert "session" in answered["error"].lower(), answered["error"]
+
+            # No pause. The point is to be as early as a caller can be.
+            control(project, "stop", timeout=25)
+        finally:
+            if process.poll() is None:
+                try:
+                    control(project, "quit", timeout=25)
+                    process.wait(timeout=15)
+                except (OSError, RuntimeError, TimeoutError, subprocess.TimeoutExpired):
+                    process.terminate()
+                    process.wait(timeout=10)
+
+    return "A request sent the moment the app names itself is answered, not swallowed"
 
 
 def check_survives_the_rough_edges(exe, folder):

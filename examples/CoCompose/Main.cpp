@@ -141,7 +141,21 @@ public:
         workspace.setMidiLearnHandlers ([this] (const String& source, const String& plugin, const String& parameter)
                                         { startMidiLearn (source, plugin, parameter); },
                                         [this] { cancelMidiLearn(); });
-        lastControl = project.source.getSiblingFile ("control.json").loadFileAsString();
+        // Nothing is marked as already-seen here, on purpose.
+        //
+        // This line used to note the contents of control.json so a request left by the
+        // run before would not be carried out now. It swallowed live ones too: the app
+        // writes its status before it reaches this line, so a caller that waits for the
+        // new session - correctly - and sends at once had its request read as a leftover
+        // and never answered, then reported a hang that was really a request nobody
+        // read. Remembering the id instead of the contents only narrowed the window: if
+        // the request on disk *is* the live one, its id is what gets ignored.
+        //
+        // There is no window to narrow, because the question was the wrong one. What
+        // separates a leftover from a live request is not when it was written but who it
+        // is addressed to, and every request names a session. A leftover names a session
+        // that has gone and is refused below on exactly that ground; the refusal lands in
+        // control-status.json where nobody is waiting for it, which costs nothing.
         applyTransportMode();
 
         if (project.recoveredFrom.isNotEmpty())
@@ -474,6 +488,26 @@ public:
 
     bool perform (const InvocationInfo& invocation) override
     {
+        // Three commands answer to a key with nothing held down - Space, Return and
+        // Home - and a bare key belongs to whatever a person is typing into. Only Space
+        // was guarded, so Return in the middle of a question to the assistant opened the
+        // piano roll and Home jumped the playhead instead of going to the start of the
+        // line. It is the same rule for all three, so it is written once.
+        //
+        // Only for a key press. A menu item clicked with a name still selected in the
+        // arrangement is not somebody typing, and the older per-command guard turned
+        // that into a command that quietly did nothing.
+        if (invocation.invocationMethod == InvocationInfo::fromKeyPress && someoneIsTyping())
+            switch (invocation.commandID)
+            {
+                case commands::playStop:
+                case commands::openPianoRoll:
+                case commands::returnToStart:
+                    return true;   // handled, by declining: a space in a box is a space
+                default:
+                    break;
+            }
+
         const auto panelIndex = static_cast<int> (invocation.commandID) - commands::togglePanelBase;
         if (panelIndex >= 0 && panelIndex < live::numPanels)
         {
@@ -487,13 +521,6 @@ public:
         switch (invocation.commandID)
         {
             case commands::playStop:
-                // Space in a text box is a space. Someone typing a question to the
-                // assistant, or renaming a channel, is not asking for the song to
-                // start, and a transport key that fires anyway makes the app feel like
-                // it is fighting you.
-                if (someoneIsTyping())
-                    return true;      // handled, by declining: a space in a box is a space
-
                 if (startPlayback || project.edit->getTransport().isRecording())
                 {
                     stopTransport();
@@ -774,6 +801,7 @@ private:
         int revision = 0;
         File before, after;
         String problem;
+        StringArray beforeNotes, afterNotes;   // what each half actually played
     };
 
     bool renderWasBusy = false;
@@ -1135,42 +1163,78 @@ private:
         if (! suggested.isObject())
             return;
 
-        // Where it may act comes from what was attached to the question, not from the
-        // reply, so a suggestion cannot widen its own reach by asking to.
         auto scoped = suggested.clone();
         auto* fields = scoped.getDynamicObject();
         if (fields == nullptr)
             return;
+
+        // Everything that decides reach is removed from the reply before anything else
+        // looks at it. The old code claimed to do this and did not: it overwrote the
+        // pattern and channel only when a notes attachment existed, so a question about
+        // a mixer insert left the model's own pattern and channel in place and a reply
+        // naming real note ids could edit notes nobody attached. A comment saying the
+        // right thing is not the same as code doing it.
+        for (const auto* field : { "pattern", "channel", "allowed_notes", "allowed_inserts",
+                                   "base_revision", "request_id" })
+            fields->removeProperty (field);
+
+        String pattern, channel;
+        Array<var> allowedNotes, allowedInserts;
+        auto askedAtRevision = project.revision;
+        auto foundTheQuestion = false;
 
         for (const auto& message : conversation->messages())
         {
             if (message.requestID != requestID || message.from != live::ChatMessage::From::person)
                 continue;
 
-            Array<var> allowedNotes, allowedInserts;
+            foundTheQuestion = true;
+
+            // The music as it was when the question was asked, not as it is now. Using
+            // the current revision made every late answer look fresh, which is the
+            // whole of what the staleness check exists to catch: ask at 7, edit a note
+            // yourself, and the answer to the old question would overwrite it.
+            askedAtRevision = message.revision;
 
             for (const auto& attachment : message.attachments)
             {
-                if (attachment.kind == live::Attachment::Kind::notes)
-                {
-                    fields->setProperty ("pattern", attachment.patternID);
-                    fields->setProperty ("channel", attachment.noteChannelID);
-
-                    for (const auto& noteID : attachment.noteIDs)
-                        allowedNotes.add (noteID);
-                }
-                else if (attachment.kind == live::Attachment::Kind::insert)
+                if (attachment.kind == live::Attachment::Kind::insert)
                 {
                     allowedInserts.add (attachment.insertID);
+                    continue;
                 }
+
+                if (attachment.kind != live::Attachment::Kind::notes)
+                    continue;
+
+                // One part at a time. Two notes attachments from different patterns
+                // used to merge their ids under whichever pattern came last, which
+                // allowed a note in one pattern to be changed while claiming to be in
+                // another.
+                if (pattern.isEmpty())
+                {
+                    pattern = attachment.patternID;
+                    channel = attachment.noteChannelID;
+                }
+
+                if (attachment.patternID != pattern || attachment.noteChannelID != channel)
+                    continue;
+
+                for (const auto& noteID : attachment.noteIDs)
+                    allowedNotes.add (noteID);
             }
 
-            fields->setProperty ("allowed_notes", allowedNotes);
-            fields->setProperty ("allowed_inserts", allowedInserts);
             break;
         }
 
-        fields->setProperty ("base_revision", project.revision);
+        if (! foundTheQuestion)
+            return;
+
+        fields->setProperty ("pattern", pattern);
+        fields->setProperty ("channel", channel);
+        fields->setProperty ("allowed_notes", allowedNotes);
+        fields->setProperty ("allowed_inserts", allowedInserts);
+        fields->setProperty ("base_revision", askedAtRevision);
 
         const auto answer = ask ("create_proposal", scoped);
 
@@ -1442,6 +1506,11 @@ private:
                              + workspace.noteEditorHeading() + ":"
                              + workspace.arrangementTool() + ":"
                              + String (notes != nullptr ? notes->all().size() : 0) + ":"
+                             // The count alone does not move when the strength does, and
+                             // a packet that stops being rewritten is a packet that lies.
+                             // Third time this has come up here: whatever the file says,
+                             // put it in the key.
+                             + (notes != nullptr ? live::strengthName (notes->strength()) : String()) + ":"
                              + String (workspace.playlistGrid().laneHeight) + ":"
                              + String (project.revision);
 
@@ -1769,7 +1838,14 @@ private:
         const te::TimeRange range { timeline.toTime (te::BeatPosition::fromBeats (fromBeat)),
                                     timeline.toTime (te::BeatPosition::fromBeats (toBeat)) };
 
-        if (! exporter.startPreview (preview.before, range, project.revision, {}))
+        // An adjustment that changes nothing, on purpose. It is what makes the copy
+        // re-derive its engine clips - the same step the second half takes - so the two
+        // halves are built by one path and the only difference between them is the
+        // proposal. Passing nothing here left A rendered from whatever clips the live
+        // edit happened to be holding and B from freshly derived ones, which is two
+        // different renders of two different things wearing the label of an A/B.
+        if (! exporter.startPreview (preview.before, range, project.revision,
+                                     [] (ValueTree&) {}))
         {
             preview = {};
             return false;
@@ -1784,9 +1860,9 @@ private:
         them rather than by when they were made - and so a stale one, left from before
         an edit, is visibly not the file a fresh render would produce.
 
-        MD5 rather than a stronger digest on purpose: this distinguishes files, it does
-        not seal them. Nobody is being kept out; the release artefacts, which are a
-        different problem, use SHA-256. */
+        A plain hash of the bytes rather than a digest from another module, on purpose:
+        this distinguishes files, it does not seal them. Nobody is being kept out, and
+        the release artefacts - a different problem - still use SHA-256. */
     static String fingerprintOf (const File& file)
     {
         if (! file.existsAsFile())
@@ -1816,12 +1892,20 @@ private:
 
     void writePreviewStatus (bool running)
     {
-        const auto describe = [this] (const File& file)
+        const auto describe = [this] (const File& file, const StringArray& played)
         {
+            Array<var> notes;
+            for (const auto& note : played)
+                notes.add (note);
+
+            // The fingerprint identifies a file; the notes say what was in it. The two
+            // are separate because renders are not bit-stable, so only the notes can
+            // prove the change reached the audio.
             return live::object ({ { "path", file.getFullPathName() },
                                    { "exists", file.existsAsFile() },
                                    { "fingerprint", fingerprintOf (file) },
-                                   { "bytes", file.existsAsFile() ? file.getSize() : 0 } });
+                                   { "bytes", file.existsAsFile() ? file.getSize() : 0 },
+                                   { "notes", notes } });
         };
 
         live::atomicWrite (project.source.getSiblingFile ("preview-status.json"),
@@ -1837,8 +1921,8 @@ private:
                                          "Whether these sound right is not something this "
                                          "app or a model can report." },
                                { "limits", preview.problem },
-                               { "before", describe (preview.before) },
-                               { "after", describe (preview.after) } }), false));
+                               { "before", describe (preview.before, preview.beforeNotes) },
+                               { "after", describe (preview.after, preview.afterNotes) } }), false));
     }
 
     /** A render runs on its own thread; this picks up the result and reports it,
@@ -1862,6 +1946,7 @@ private:
 
                 if (preview.stage == Preview::Stage::renderingBefore)
                 {
+                    preview.beforeNotes = result->notes;
                     auto* proposal = toolService->proposalFor (preview.proposalID);
                     auto& timeline = project.edit->tempoSequence;
                     const te::TimeRange range { timeline.toTime (te::BeatPosition::fromBeats (preview.fromBeat)),
@@ -1884,6 +1969,7 @@ private:
                     return;
                 }
 
+                preview.afterNotes = result->notes;
                 preview.stage = Preview::Stage::idle;
                 writePreviewStatus (false);
                 say ("A and B are rendered. Listening to them is still your part.");
@@ -2047,6 +2133,7 @@ private:
             if (kind == "guess")     return notes->addGuess (value, project.revision).isNotEmpty();
             if (kind == "request")   return notes->setRequest (value).isNotEmpty();
             if (kind == "accept")    return notes->acceptGuess (value);
+            if (kind == "strength")  { notes->setStrength (live::strengthNamed (value)); return true; }
             if (kind == "remove")    return notes->remove (value);
             return false;
         }

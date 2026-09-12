@@ -82,9 +82,56 @@ def check_an_ab_is_two_files_and_an_untouched_song(exe, folder, report):
         report.expect("both halves were rendered",
                       status["before"]["exists"] and status["after"]["exists"],
                       (status["before"]["exists"], status["after"]["exists"]))
-        report.expect("they are different audio",
-                      status["before"]["fingerprint"] != status["after"]["fingerprint"],
-                      (status["before"]["fingerprint"], status["after"]["fingerprint"]))
+        # "They differ" on its own proved nothing: a review of this check found it passing
+        # on render noise while the preview was rendering the old notes twice. And the
+        # obvious repair - render twice, expect identical bytes - fails too: renders are
+        # not bit-stable on this machine. So the proof is at the level that broke. The
+        # app reports which notes the engine was playing in each half; A has to be the
+        # original pitches, B has to be the proposed ones, and B must not be A.
+        def played(half):
+            return sorted(status[half].get("notes", []))
+
+        # What the engine plays over [0, 8) is every note of every clip that overlaps
+        # it, on every channel, at song positions - not the one pattern this check
+        # happened to inspect. The first version of this expectation modelled a single
+        # part and failed on its own arithmetic (36 notes played, 32 expected). The
+        # region tool is the app's own account of the arrangement, and the engine
+        # derives from the same tree, so the expectation is built from that.
+        region = tool(project, "inspect_region", {"start_beat": 0.0, "end_beat": 8.0})["result"]
+        lifted = {n["id"]: min(127, n["pitch"] + 7) for n in notes[:4]}
+
+        def expectation(with_proposal):
+            out = []
+            for clip in region["clips"]:
+                for part in clip.get("parts", []):
+                    for n in part["notes"]:
+                        pitch = lifted.get(n["id"], n["pitch"]) if with_proposal else n["pitch"]
+                        out.append("%d@%.3f" % (pitch, clip["start_beat"] + n["start_beat"]))
+            return sorted(out)
+
+        original, proposed = expectation(False), expectation(True)
+        report.expect("the expectation covers more than one clip",
+                      len(original) > len(notes), (len(original), len(notes)))
+
+        # When these disagree the useful thing is which notes, not how many: the first
+        # failure of this check reported a count and cost a whole round trip to read.
+        def difference(played_half, expected):
+            from collections import Counter
+            extra = Counter(played_half) - Counter(expected)
+            missing = Counter(expected) - Counter(played_half)
+            return "played-not-expected %s / expected-not-played %s" % (
+                sorted(extra.elements())[:8], sorted(missing.elements())[:8])
+
+        report.expect("A is the music as it is",
+                      played("before") == original,
+                      difference(played("before"), original))
+        report.expect("B is the music as proposed",
+                      played("after") == proposed,
+                      difference(played("after"), proposed))
+        report.expect("and B is not A - the change reached the render, not just the label",
+                      played("after") != played("before"))
+        report.expect("the fingerprints still tell the two files apart",
+                      status["before"]["fingerprint"] != status["after"]["fingerprint"])
         report.expect("neither is empty",
                       status["before"]["bytes"] > 1000 and status["after"]["bytes"] > 1000,
                       (status["before"]["bytes"], status["after"]["bytes"]))

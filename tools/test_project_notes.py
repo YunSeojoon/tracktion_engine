@@ -19,7 +19,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from cocompose import apply_change, read, wait_for
+from cocompose import apply_change, read, tool, wait_for
 from test_plugin_compatibility import Session, prepare_song
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -177,6 +177,85 @@ def check_the_model_is_told_which_is_which(report):
     report.expect("a guess carries the music it was read from", "revision 4" in prompt)
 
 
+def check_asking_for_more_does_not_grant_more(exe, folder, report):
+    """A4: how far to go is a request, not a permission.
+
+    Asking for something bolder says what would be welcome. It says nothing about what
+    may be touched, and the app must not read it as though it did - a person who picks
+    eight notes and asks for something adventurous is asking for an adventurous eight
+    notes. This is the check that would catch a future change wiring strength into
+    scope, which is the mistake the spec names."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+    try:
+        prepare_song(session)
+        state = session.settled()
+        pattern_id = state["patterns"][0]["id"]
+        channel_id = state["channels"][0]["id"]
+
+        part = tool(project, "inspect_pattern",
+                    {"pattern": pattern_id, "channel": channel_id})["result"]
+        notes = [n["id"] for p in part["parts"] for n in p["notes"]]
+        inside, outside = notes[:4], notes[4]
+
+        for strength in ("tidy", "rework", "fresh"):
+            session.run([{"project_note": ["strength", strength]}])
+            time.sleep(0.4)
+            report.expect("the app holds the strength it was set to: " + strength,
+                          read(folder / "chat-inspector.json")["notes"]["strength"] == strength,
+                          read(folder / "chat-inspector.json")["notes"]["strength"])
+
+            revision = read(folder / "sync-status.json")["revision"]
+
+            reaching = tool(project, "create_proposal", {
+                "description": "beyond what was attached",
+                "pattern": pattern_id, "channel": channel_id,
+                "allowed_notes": inside, "base_revision": revision, "keeps": {},
+                "notes": [{"what": "change", "id": outside, "pitch": 64}]})
+            report.expect("at " + strength + ", a note outside the selection is still refused",
+                          reaching["status"] == "error"
+                          and reaching["error"]["code"] == "OUT_OF_SCOPE",
+                          reaching.get("error", {}).get("code", reaching["status"]))
+
+            breaking = tool(project, "create_proposal", {
+                "description": "breaks a promise",
+                "pattern": pattern_id, "channel": channel_id,
+                "allowed_notes": inside, "base_revision": revision,
+                "keeps": {"pitch": True},
+                "notes": [{"what": "change", "id": inside[0], "pitch": 70}]})
+            report.expect("at " + strength + ", a kept condition is still kept",
+                          breaking["status"] == "error"
+                          and breaking["error"]["code"] == "LOCKED",
+                          breaking.get("error", {}).get("code", breaking["status"]))
+
+            report.expect("and none of that touched the music",
+                          read(folder / "sync-status.json")["revision"] == revision)
+    finally:
+        session.close()
+
+
+def check_the_model_is_told_taste_not_reach(report):
+    """The sentence the model gets has to be about taste, or a model reads a bolder
+    setting as a wider licence."""
+    from cocompose_bridge import build_prompt
+
+    prompt = build_prompt({
+        "revision": 5, "message": "surprise me", "attachments": [],
+        "history": {"messages": []},
+        "notes": {"conditions": [], "guesses": [], "request": "surprise me",
+                  "strength": "fresh",
+                  "strength_means": "They want a new idea rather than a variation of this "
+                                    "one. Start from what the music is doing rather than "
+                                    "from these exact notes - still only within what they "
+                                    "attached and whatever they asked you to keep."}})
+
+    report.expect("the model is told how far they want it to go",
+                  "How far they want you to go" in prompt)
+    report.expect("and told plainly that this is not permission",
+                  "not about what you may touch" in prompt)
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -189,6 +268,12 @@ def run(exe, output):
     print()
     print("notes belong to one project")
     check_notes_do_not_move_between_projects(exe, output / "project", report)
+    print()
+    print("asking for more does not grant more")
+    check_asking_for_more_does_not_grant_more(exe, output / "strength", report)
+    print()
+    print("the model is told taste, not reach")
+    check_the_model_is_told_taste_not_reach(report)
     print()
     print("the model is told which is which")
     check_the_model_is_told_which_is_which(report)

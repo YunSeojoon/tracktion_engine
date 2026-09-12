@@ -48,6 +48,7 @@ public:
     void ask (const Outgoing& outgoing)
     {
         pending = outgoing.requestID;
+        pendingProject = outgoing.projectID;
         askedAtMillis = Time::getCurrentTime().toMilliseconds();
         lastSeenReply.clear();
         streamedSoFar.clear();
@@ -117,6 +118,17 @@ public:
         const auto requestID = reply["request_id"].toString();
         if (requestID != pending)
             return {};   // an answer to something else, or to something cancelled
+
+        // A reply that says which project it answers has to say this one. A reply that
+        // does not say is an older bridge and is taken on the request id alone, which
+        // is unique per ask - so this adds a stated check on top of a lucky property,
+        // and never turns an existing bridge away.
+        const auto answersProject = reply["project_id"].toString();
+        if (answersProject.isNotEmpty() && answersProject != pendingProject)
+        {
+            lastSeenReply = contents;
+            return {};
+        }
 
         lastSeenReply = contents;
 
@@ -209,7 +221,7 @@ private:
 
     File folder;
     int64 askedAtMillis = 0;
-    String pending, lastSeenReply, streamedSoFar;
+    String pending, pendingProject, lastSeenReply, streamedSoFar;
     StringArray cancelled;
 };
 

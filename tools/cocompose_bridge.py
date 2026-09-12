@@ -274,6 +274,13 @@ def build_prompt(request):
                          " told, and say so if you are relying on it.")
         parts.append("")
 
+    if known.get("strength_means"):
+        parts.append("How far they want you to go: " + known["strength_means"])
+        parts.append("This is about what they would welcome, not about what you may"
+                     " touch. What you may touch is what they attached, and it does not"
+                     " change with this setting.")
+        parts.append("")
+
     parts.append(describe_attachments(request.get("attachments", [])))
     parts.append("")
     parts.append("Their question: " + request.get("message", ""))
@@ -654,7 +661,13 @@ def serve(project, provider, once=False):
                 else:
                     text, change = parse_change(text)
 
+                # Which project and conversation this answers, copied from the question.
+                # The request id is unique per ask, which already keeps a late answer off
+                # the wrong project; this makes that a stated check rather than a lucky
+                # property of UUIDs.
                 reply = {"request_id": request_id, "status": "ok",
+                         "project_id": request.get("project_id"),
+                         "conversation_id": request.get("conversation_id"),
                          "text": text, "provider": provider.name}
                 if change:
                     reply["change"] = change

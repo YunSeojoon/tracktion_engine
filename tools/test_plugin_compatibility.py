@@ -54,12 +54,22 @@ def running_apps():
             if line.lower().startswith("cocompose.exe")]
 
 
-def wait_for_no_running_app(timeout=30):
+class AppAlreadyRunning(RuntimeError):
+    """Someone else holds the one instance. Not a failing check - a blocked one."""
+
+
+def wait_for_no_running_app(timeout=60):
     """Waits for the last app to finish leaving before starting the next one.
 
     Quitting is asked for and then happens; the process lingers for a moment after the
     check that asked has moved on. Starting into that moment is what produced timeouts
     that looked like hangs.
+
+    Giving up is not silent. This used to return False and every caller dropped it on
+    the floor, so a run that started anyway collided with the app that was still there
+    and reported "CoCompose exited immediately" from inside whichever check happened to
+    be next. That reads as a bug in that check and is nothing of the kind, so what is
+    actually wrong is raised, with the processes that are in the way named.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -67,7 +77,10 @@ def wait_for_no_running_app(timeout=30):
             return True
         time.sleep(0.25)
 
-    return False
+    raise AppAlreadyRunning(
+        "Another CoCompose is still running after %.0fs (pid %s). The app allows one "
+        "instance, so nothing can start until it goes. This is a blocked run, not a "
+        "failed check." % (timeout, ", ".join(running_apps()) or "gone just now"))
 
 
 class Session:
@@ -103,25 +116,88 @@ class Session:
 
         atomic_write(self.script, [])
         self.round = 0
-        self.process = start(self.exe, self.folder, self.script, extra)
 
-        def a_new_app_is_answering():
-            status = read(self.folder / "sync-status.json")
-            return status if status.get("session_id") and status.get("session_id") != was else None
+        # The single-instance lock is a named mutex, and a mutex outlives the process
+        # that held it by however long Windows takes to close its handles - which can be
+        # after the process has already gone from the task list. The app asks for the
+        # lock with a zero timeout, so it does not wait: it decides another copy is
+        # running, hands over its command line and exits at once. Waiting for "no
+        # process" is therefore not enough, and this used to surface as a failure in
+        # whichever check happened to be next.
+        #
+        # So a launch that gives up straight away is retried rather than reported. If it
+        # keeps happening, something really is holding the app and that is said plainly.
+        for attempt in range(4):
+            self.process = start(self.exe, self.folder, self.script, extra)
 
-        try:
-            wait_for(a_new_app_is_answering, timeout=90,
-                     what="a session id other than " + str(was))
-            wait_for(lambda: read(self.folder / "state.json"), timeout=90,
-                     what="the project state")
-        except TimeoutError:
-            if self.process.poll() is not None:
-                raise TimeoutError(
-                    "CoCompose exited immediately - another instance was already "
-                    "running and took the command line") from None
-            raise
+            # Whatever goes wrong from here, the app this launched is not left behind.
+            # It was, once: open() raised before the caller had a Session to close, so
+            # its try/finally never ran, and the orphan held the single instance against
+            # every check that came after. An app nobody owns is the worst thing this
+            # can leave on the machine.
+            try:
+                outcome = self._wait_until_it_answers(was)
+            except BaseException:
+                self._abandon()
+                raise
+
+            if outcome == "ready":
+                return self
+
+            self._abandon()
+
+            if attempt == 3:
+                raise AppAlreadyRunning(
+                    "CoCompose exited as soon as it started, four times over. Another "
+                    "instance holds the single-instance lock, or it is not being "
+                    "released. This is a blocked run, not a failed check.")
+
+            time.sleep(2.0 + attempt)
+            wait_for_no_running_app()
 
         return self
+
+    def _abandon(self):
+        """Ends a process this Session started and is not going to hand back."""
+        if self.process is not None and self.process.poll() is None:
+            self.process.kill()
+            try:
+                self.process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                pass
+        self.process = None
+
+    def _wait_until_it_answers(self, was, timeout=90):
+        """"ready", or "gone" if the app exited before it ever answered.
+
+        Written as a loop rather than two wait_for calls because the interesting case is
+        the app disappearing, and a wait_for would sit out its whole ninety seconds
+        before noticing something that is already true a second in."""
+        deadline = time.monotonic() + timeout
+        answered = False
+
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                return "gone"
+
+            # A file that is not there yet, or is halfway through being replaced, is the
+            # ordinary state of things while an app is starting - not an error. The two
+            # wait_for calls this loop replaced swallowed that for us, and reading
+            # straight was how a launch started raising instead of waiting.
+            try:
+                if not answered:
+                    status = read(self.folder / "sync-status.json")
+                    answered = bool(status.get("session_id")) and status.get("session_id") != was
+                elif read(self.folder / "state.json"):
+                    return "ready"
+            except (FileNotFoundError, ValueError, OSError):
+                pass
+
+            time.sleep(0.25)
+
+        raise TimeoutError(
+            "Waited %.0fs for the app to %s" % (timeout,
+            "write its project state" if answered else "answer with a session id other than " + str(was)))
 
     def close(self):
         quit_app(self.process, self.folder)

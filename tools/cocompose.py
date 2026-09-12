@@ -138,6 +138,18 @@ def submit(project, state):
         raise RuntimeError(error or str(exc)) from exc
 
 
+def app_is_running():
+    """Whether a CoCompose is alive at all - the difference between a busy app and a
+    dead one, which a timeout on its own cannot say."""
+    import subprocess
+    try:
+        listed = subprocess.run(["tasklist", "/FI", "IMAGENAME eq CoCompose.exe"],
+                                capture_output=True, text=True, timeout=20).stdout
+        return "CoCompose.exe" in listed
+    except Exception as why:
+        return "could not tell (%s)" % why
+
+
 def control(project, action, attempts=5, timeout=45):
     """Transport and history commands carry the revision too, so a command sent while
     the app was mid-change is refused. Read again and resend rather than force it."""
@@ -167,6 +179,15 @@ def control(project, action, attempts=5, timeout=45):
             # kind of long enough: the failures looked like hangs and were queues.
             return wait_for(acknowledged, timeout=timeout,
                             what="the answer to control request %s (%s)" % (request_id[:8], action))
+        except TimeoutError as timed_out:
+            # "It never answered" has two opposite causes - a message thread that is
+            # busy, and an app that is no longer there - and the fixes for them have
+            # nothing in common. One of these timed out once in three live-sync runs
+            # and the message said nothing that could tell the two apart, so it now
+            # says which it was.
+            raise TimeoutError("%s; app running: %s; control-status.json now: %s"
+                               % (timed_out, app_is_running(),
+                                  read(folder / "control-status.json"))) from None
         except Conflict:
             if attempt == attempts - 1:
                 raise

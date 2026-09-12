@@ -64,6 +64,58 @@ struct Note
 };
 
 //==============================================================================
+/** How far the assistant is being asked to go.
+
+    This is a request, not a permission, and the difference is the whole point. Asking
+    for a bolder idea says something about what would be welcome; it says nothing about
+    what may be touched. A person who selects eight notes and asks for something
+    adventurous is asking for an adventurous eight notes.
+
+    Nothing in the app reads this to decide what is allowed. Scope comes from the
+    attachment and the conditions come from what was agreed, both checked after the
+    suggestion arrives and regardless of what was asked for. The strength reaches the
+    model as a sentence and stops there - which is why turning it up cannot widen
+    anything, rather than merely being expected not to.
+*/
+enum class Strength { tidy, rework, fresh };
+
+inline String strengthName (Strength strength)
+{
+    switch (strength)
+    {
+        case Strength::rework: return "rework";
+        case Strength::fresh:  return "fresh";
+        default:               return "tidy";
+    }
+}
+
+inline Strength strengthNamed (const String& name)
+{
+    if (name == "rework") return Strength::rework;
+    if (name == "fresh")  return Strength::fresh;
+    return Strength::tidy;
+}
+
+/** What the model is told it means. Deliberately about taste and never about reach. */
+inline String describeStrength (Strength strength)
+{
+    switch (strength)
+    {
+        case Strength::rework:
+            return "They want a real change, not a polish. Reharmonising, a different "
+                   "shape, a different rhythm are all welcome - within what they attached "
+                   "and whatever they asked you to keep.";
+        case Strength::fresh:
+            return "They want a new idea rather than a variation of this one. Start from "
+                   "what the music is doing rather than from these exact notes - still "
+                   "only within what they attached and whatever they asked you to keep.";
+        default:
+            return "They want this tidied rather than rewritten: small corrections, "
+                   "nothing a listener would call a different part.";
+    }
+}
+
+//==============================================================================
 class ProjectNotes
 {
 public:
@@ -74,6 +126,17 @@ public:
     }
 
     const std::vector<Note>& all() const { return entries; }
+
+    /** How far to go, remembered between questions because it is a working preference
+        rather than part of any one request. Never consulted when deciding what a
+        proposal may touch. */
+    Strength strength() const { return howFar; }
+
+    void setStrength (Strength wanted)
+    {
+        howFar = wanted;
+        save();
+    }
 
     /** A person's decision. The only way a condition is created. */
     String addCondition (const String& text)
@@ -146,7 +209,9 @@ public:
 
         return object ({ { "conditions", conditions },
                          { "guesses", guesses },
-                         { "request", request } });
+                         { "request", request },
+                         { "strength", strengthName (howFar) },
+                         { "strength_means", describeStrength (howFar) } });
     }
 
     var asJson() const { return snapshot(); }
@@ -181,7 +246,8 @@ private:
                                { "about_revision", note.aboutRevision },
                                { "promoted_from", note.promotedFrom } }));
 
-        return object ({ { "schema", 1 }, { "project_id", projectID }, { "notes", out } });
+        return object ({ { "schema", 1 }, { "project_id", projectID },
+                         { "strength", strengthName (howFar) }, { "notes", out } });
     }
 
     void load()
@@ -198,6 +264,8 @@ private:
         // like, and the copy must not inherit decisions made about the original.
         if (stored["project_id"].toString() != projectID)
             return;
+
+        howFar = strengthNamed (stored["strength"].toString());
 
         if (auto* saved = stored["notes"].getArray())
             for (const auto& entry : *saved)
@@ -225,6 +293,7 @@ private:
 
     File file;
     String projectID;
+    Strength howFar = Strength::tidy;
     std::vector<Note> entries;
 };
 

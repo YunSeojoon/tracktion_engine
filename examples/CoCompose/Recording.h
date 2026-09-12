@@ -241,6 +241,13 @@ public:
         String message;
         int revision = 0;
         bool complete = false;
+
+        /** The notes the engine actually rendered, as "pitch@beat" for every MIDI note
+            whose clip overlaps the range, sorted. This is what a check compares - not
+            the audio, which is not bit-stable from one render to the next on ordinary
+            hardware, so "the files differ" proves nothing and "the files match" proves
+            nothing either. What can be proved is which notes the copy was playing. */
+        StringArray notes;
     };
 
     /** Busy until the result has been collected, not just until the thread stops. The
@@ -353,6 +360,21 @@ public:
         if (renderEdit == nullptr)
             return false;
 
+        // The engine clips in the copy are derived from the project tree, and they were
+        // derived before `adjust` ran - so without this step a preview rendered the old
+        // notes with a new label on the file. A review of the check that was meant to
+        // catch that found it passing on render noise: two renders of identical music
+        // do not always hash the same, so "the files differ" proved nothing. A model
+        // wrapper on the copy re-derives the clips from the adjusted tree, here, on the
+        // message thread, before the worker touches it.
+        if (adjust != nullptr)
+        {
+            Model derived (*renderEdit);
+            derived.render();
+        }
+
+        renderedNotes = notesPlayedBy (*renderEdit, range);
+
         // The channels are what a stem is per, and the copy has no model wrapper, so
         // the plan is made here where the live model is safe to read.
         plannedStems.clear();
@@ -372,6 +394,31 @@ public:
         return true;
     }
 
+    /** Every MIDI note the engine would play in `range`, from the clips as they stand in
+        `edit` - the copy, after any adjustment and re-derivation. Read here, on the
+        message thread, before the worker starts; the worker reports it back unchanged. */
+    static StringArray notesPlayedBy (te::Edit& edit, te::TimeRange range)
+    {
+        StringArray out;
+
+        for (auto* track : te::getAudioTracks (edit))
+            for (auto* base : track->getClips())
+            {
+                auto* clip = dynamic_cast<te::MidiClip*> (base);
+                if (clip == nullptr || ! clip->getPosition().time.overlaps (range))
+                    continue;
+
+                const auto clipStart = edit.tempoSequence.toBeats (clip->getPosition().time.getStart()).inBeats();
+
+                for (auto* note : clip->getSequence().getNotes())
+                    out.add (String (note->getNoteNumber()) + "@"
+                             + String (clipStart + note->getStartBeat().inBeats(), 3));
+            }
+
+        out.sort (false);
+        return out;
+    }
+
     /** The whole arrangement, or at least a bar of it. */
     te::TimeRange arrangementRange() const
     {
@@ -388,6 +435,7 @@ private:
     {
         Result outcome;
         outcome.revision = startedAtRevision;
+        outcome.notes = renderedNotes;
 
         auto* rendering = renderEdit.get();
 
@@ -605,6 +653,7 @@ private:
     std::unique_ptr<te::Edit> renderEdit;
     Array<PlannedStem> plannedStems;
     te::TimeRange renderRange;
+    StringArray renderedNotes;
     int startedAtRevision = 0;
     bool stems = false, finished = false;
     Result result;

@@ -411,11 +411,21 @@ private:
                                + " and the project is now at " + String (revision)
                                + "; read it again and make a new one", true);
 
-        // What it may touch comes from the attachment, not from the proposal: a caller
-        // cannot widen its own scope by asking nicely.
+        // Scope is whatever the caller says it is. That is not a hole; it is the
+        // division of labour. This service trusts its caller - the app, or a script a
+        // person chose to run - and the app is where scope is derived from what was
+        // attached and a model's reply is stripped of any scope it tried to bring. An
+        // earlier comment here said a caller "cannot widen its own scope", which was
+        // true of the app and false of this function, and a review found the gap
+        // between the two.
         proposal.patternID = arguments["pattern"].toString();
         proposal.channelID = arguments["channel"].toString();
 
+        // An empty list means nothing may be touched, not everything. It used to mean
+        // "any note of this channel's part", so a question with no notes attached -
+        // about a mixer insert, say - produced a proposal that could rewrite the part.
+        // "No permission" and "the whole part" have to be different values, and the
+        // caller says which by listing the notes it was given.
         if (arguments["allowed_notes"].isArray())
             for (const auto& id : *arguments["allowed_notes"].getArray())
                 proposal.allowedNotes.add (id.toString());
@@ -433,6 +443,13 @@ private:
 
         if (arguments["notes"].isArray() && ! arguments["notes"].getArray()->isEmpty())
         {
+            // No pattern and channel at all means no notes were attached. Saying "no
+            // such part" would be true and beside the point: the part is not missing,
+            // the permission is.
+            if (proposal.patternID.isEmpty() || proposal.channelID.isEmpty())
+                throw ToolError (tools::errors::outOfScope,
+                                 "No notes were attached, so none may be changed");
+
             if (! sequence.isValid())
                 throw ToolError (tools::errors::notFound,
                                  "No part for that channel in that pattern");
@@ -509,7 +526,7 @@ private:
                 throw ToolError (tools::errors::notFound,
                                  "A note this would change is no longer there: " + change.noteID);
 
-            if (! proposal.allowedNotes.isEmpty() && ! proposal.allowedNotes.contains (change.noteID))
+            if (! proposal.allowedNotes.contains (change.noteID))
                 throw ToolError (tools::errors::outOfScope,
                                  "That note was not part of what was attached");
         }
@@ -532,10 +549,12 @@ private:
             {
                 ValueTree note (ids::NOTE);
                 note.setProperty (ids::uid, Uuid().toString(), nullptr);
-                note.setProperty (ids::pitch, change.pitch.value_or (60), nullptr);
-                note.setProperty (ids::start, change.startBeat.value_or (0.0), nullptr);
-                note.setProperty (ids::length, change.lengthBeats.value_or (1.0), nullptr);
-                note.setProperty (ids::velocity, change.velocity.value_or (100), nullptr);
+                // Filled in when the change was read and checked, not now: a default
+                // decided at the last moment is a value nothing has verified.
+                note.setProperty (ids::pitch, *change.pitch, nullptr);
+                note.setProperty (ids::start, *change.startBeat, nullptr);
+                note.setProperty (ids::length, *change.lengthBeats, nullptr);
+                note.setProperty (ids::velocity, *change.velocity, nullptr);
                 sequence.appendChild (note, &undo);
                 continue;
             }
@@ -571,6 +590,14 @@ private:
     {
         NoteChange change;
         const auto what = entry.getProperty ("what", "change").toString();
+
+        // An unrecognised verb used to be treated as "change", so a typo - or a model
+        // inventing "move" - silently became an edit of something. A word this service
+        // does not know is a request it does not understand.
+        if (what != "add" && what != "remove" && what != "change")
+            throw ToolError (tools::errors::invalidArgument,
+                             "A note change's \"what\" must be add, remove or change, not \"" + what + "\"");
+
         change.what = what == "add" ? NoteChange::What::add
                     : what == "remove" ? NoteChange::What::remove
                                        : NoteChange::What::change;
@@ -582,7 +609,7 @@ private:
             if (! note.isValid())
                 throw ToolError (tools::errors::notFound, "No such note: " + change.noteID);
 
-            if (! proposal.allowedNotes.isEmpty() && ! proposal.allowedNotes.contains (change.noteID))
+            if (! proposal.allowedNotes.contains (change.noteID))
                 throw ToolError (tools::errors::outOfScope,
                                  "Note " + change.noteID + " was not part of what was attached");
 
@@ -594,7 +621,7 @@ private:
 
         if (entry.hasProperty ("pitch"))
         {
-            const auto pitch = static_cast<int> (entry["pitch"]);
+            const auto pitch = wholeNumber (entry, "pitch");
             if (pitch < 0 || pitch > 127)
                 throw ToolError (tools::errors::invalidArgument,
                                  "pitch must be a MIDI note number from 0 to 127");
@@ -603,7 +630,7 @@ private:
 
         if (entry.hasProperty ("velocity"))
         {
-            const auto velocity = static_cast<int> (entry["velocity"]);
+            const auto velocity = wholeNumber (entry, "velocity");
             if (velocity < 1 || velocity > 127)
                 throw ToolError (tools::errors::invalidArgument, "velocity must be from 1 to 127");
             change.velocity = velocity;
@@ -611,7 +638,7 @@ private:
 
         if (entry.hasProperty ("start_beat"))
         {
-            const auto start = static_cast<double> (entry["start_beat"]);
+            const auto start = number (entry, "start_beat");
             if (start < 0.0)
                 throw ToolError (tools::errors::invalidArgument, "start_beat cannot be negative");
             change.startBeat = start;
@@ -619,14 +646,29 @@ private:
 
         if (entry.hasProperty ("length_beats"))
         {
-            const auto length = static_cast<double> (entry["length_beats"]);
+            const auto length = number (entry, "length_beats");
             if (length <= 0.0)
                 throw ToolError (tools::errors::invalidArgument, "length_beats must be above zero");
             change.lengthBeats = length;
         }
 
-        // A note must stay inside the pattern it belongs to, or it would not be heard.
         const auto patternLength = static_cast<double> (model.patternFor (proposal.patternID)[ids::length]);
+
+        // What an added note is gets decided once, here, and everything downstream reads
+        // it from the change rather than filling in its own idea. The two ends used to
+        // disagree: validation treated a missing length as zero and let it through, and
+        // applying treated it as one beat, so a note a third longer than its own pattern
+        // could be approved on the strength of a length nobody was going to use.
+        if (change.what == NoteChange::What::add)
+        {
+            if (! change.pitch)       change.pitch = 60;
+            if (! change.velocity)    change.velocity = 100;
+            if (! change.startBeat)   change.startBeat = 0.0;
+            if (! change.lengthBeats) change.lengthBeats = patternLength > 0.0
+                                                            ? std::min (1.0, patternLength) : 1.0;
+        }
+
+        // A note must stay inside the pattern it belongs to, or it would not be heard.
         const auto start = change.startBeat.value_or (change.wasStart);
         const auto length = change.lengthBeats.value_or (change.wasLength);
 
@@ -659,7 +701,7 @@ private:
         if (! entry.hasProperty ("value"))
             throw ToolError (tools::errors::invalidArgument, "A parameter change needs a value");
 
-        const auto value = static_cast<double> (entry["value"]);
+        const auto value = number (entry, "value");
         if (value < 0.0 || value > 1.0)
             throw ToolError (tools::errors::invalidArgument,
                              "A parameter value is normalised, from 0 to 1");
@@ -672,6 +714,38 @@ private:
         change.value = value;
         change.wasValue = parameter->valueRange.convertTo0to1 (parameter->getCurrentExplicitValue());
         return change;
+    }
+
+    /** A whole number from a field, or a refusal. static_cast<int> on a var turns
+        "abc" into 0 and 60.7 into 60, both of which are inside the MIDI range and
+        neither of which is what anybody sent. A pitch that arrives as a string or a
+        fraction is a request that was not understood. */
+    static int wholeNumber (const var& entry, const char* field)
+    {
+        const auto value = entry[field];
+
+        if (value.isInt() || value.isInt64())
+            return static_cast<int> (value);
+
+        if (value.isDouble())
+        {
+            const auto asDouble = static_cast<double> (value);
+            if (std::abs (asDouble - std::round (asDouble)) < 1.0e-9)
+                return static_cast<int> (std::round (asDouble));
+        }
+
+        throw ToolError (tools::errors::invalidArgument,
+                         String (field) + " must be a whole number, not " + JSON::toString (value, true));
+    }
+
+    static double number (const var& entry, const char* field)
+    {
+        const auto value = entry[field];
+        if (value.isInt() || value.isInt64() || value.isDouble())
+            return static_cast<double> (value);
+
+        throw ToolError (tools::errors::invalidArgument,
+                         String (field) + " must be a number, not " + JSON::toString (value, true));
     }
 
     /** Measures the proposal against what the person said must not change. Saying it
@@ -727,6 +801,8 @@ private:
                 fields->setProperty ("start_beat", change.startBeat.value_or (0.0));
                 fields->setProperty ("length_beats", change.lengthBeats.value_or (1.0));
                 fields->setProperty ("velocity", change.velocity.value_or (100));
+                // Same values the apply will use: the diff is a promise about what
+                // pressing the button does, so it cannot be computed differently.
             }
             else
             {
