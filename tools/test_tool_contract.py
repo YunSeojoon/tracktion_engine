@@ -114,7 +114,7 @@ def run(exe, output):
                           "note.pitch", "note.start_beat", "note.length_beats",
                           "note.velocity", "note.add", "note.remove",
                           "parameter.value",
-                          "clip.start_beat", "clip.lane"]),
+                          "clip.start_beat", "clip.lane", "clip.copy", "clip.remove"]),
                       caps["result"]["writes"])
         report.expect("audio is declared unavailable rather than left unsaid",
                       caps["result"]["audio"]["can_send_audio"] is False)

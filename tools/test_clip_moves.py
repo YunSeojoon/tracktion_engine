@@ -1,10 +1,11 @@
-"""B5, the first kind: a proposal that moves a placement.
+"""B5: a proposal that moves, copies or takes out a placement.
 
 A clip is a reference to a pattern, so moving one moves where that music is heard
-without copying or altering the music itself. That is why it is the first arrangement
-edit to open: nothing here can damage a pattern, and a comparison can include it,
-because a placement is in the project tree the way a note is and not inside a plugin
-the way a parameter is.
+without copying or altering the music itself, and taking one out removes where it is
+played rather than the music. That is why these are the arrangement edits to open
+first: nothing here can damage a pattern, and a comparison can include them, because a
+placement is in the project tree the way a note is and not inside a plugin the way a
+parameter is.
 
 What this holds to is the same contract every other write kind is held to. Scope comes
 from what was attached and not from what was asked for. A comparison includes it, so a
@@ -187,12 +188,124 @@ def check_a_clip_can_be_moved_only_where_it_was_offered(exe, folder, report):
         session.close()
 
 
+def check_a_clip_can_be_copied_and_taken_out(exe, folder, report):
+    """B5: the other two things that can be done to a placement.
+
+    A copy points at the same pattern, so it is one part played twice rather than two
+    parts that happen to match - editing either edits both, which is what a placement
+    is for and what makes copying safe to offer. Taking one out removes where the music
+    is played and not the music, which is why one undo is enough to bring it back."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        pattern_id = prepare_song(session)
+        state = session.settled()
+        channel_id = state["channels"][0]["id"]
+        clip = next(c for c in clips(state) if c["pattern"] == pattern_id)
+        revision = read(folder / "sync-status.json")["revision"]
+        scoped = {"description": "AI: again, over here", "base_revision": revision,
+                  "allowed_clips": [clip["id"]]}
+
+        homeless = tool(project, "create_proposal",
+                        dict(scoped, clips=[{"what": "copy", "id": clip["id"]}]))
+        report.expect("a copy has to say where it goes",
+                      homeless["status"] == "error"
+                      and homeless["error"]["code"] == "INVALID_ARGUMENT",
+                      homeless.get("error", {}))
+
+        contradictory = tool(project, "create_proposal",
+                             dict(scoped, clips=[{"what": "remove", "id": clip["id"],
+                                                  "start_beat": 8.0}]))
+        report.expect("a removal that also says where to is refused, not half-obeyed",
+                      contradictory["status"] == "error"
+                      and contradictory["error"]["code"] == "INVALID_ARGUMENT",
+                      contradictory.get("error", {}))
+
+        invented = tool(project, "create_proposal",
+                        dict(scoped, clips=[{"what": "reverse", "id": clip["id"],
+                                             "start_beat": 8.0}]))
+        report.expect("a verb the service does not know is refused",
+                      invented["status"] == "error"
+                      and invented["error"]["code"] == "INVALID_ARGUMENT",
+                      invented.get("error", {}))
+
+        # A copy, eight beats along.
+        made = tool(project, "create_proposal",
+                    dict(scoped, clips=[{"what": "copy", "id": clip["id"], "start_beat": 40.0}]))
+        report.expect("a copy inside what was attached is offered", made["status"] == "ok",
+                      made.get("error", {}).get("message", ""))
+        if made["status"] != "ok":
+            return
+
+        report.expect("the proposal counts it as an addition, not a move",
+                      (made["result"]["proposal"]["clips_added"],
+                       made["result"]["proposal"]["clips_moved"]) == (1, 0),
+                      made["result"]["proposal"])
+
+        how_many = len(clips(state))
+        tool(project, "apply_proposal", {"proposal": made["result"]["proposal"]["id"]})
+        after = session.settled()
+        report.expect("there is one more placement", len(clips(after)) == how_many + 1,
+                      (how_many, len(clips(after))))
+
+        copy = next((c for c in clips(after) if c["start"] == 40.0), None)
+        report.expect("the copy is where the proposal put it", copy is not None)
+        report.expect("and it points at the same pattern, so it is one part played twice",
+                      copy and copy["pattern"] == clip["pattern"],
+                      copy and (copy["pattern"], clip["pattern"]))
+        report.expect("the original is still there", any(c["id"] == clip["id"] for c in clips(after)))
+
+        control(project, "undo")
+        time.sleep(1.0)
+        report.expect("one undo takes the copy back out",
+                      len(clips(session.settled())) == how_many)
+
+        # And taking one out.
+        revision = read(folder / "sync-status.json")["revision"]
+        removal = tool(project, "create_proposal", {
+            "description": "AI: drop this one", "base_revision": revision,
+            "allowed_clips": [clip["id"]],
+            "clips": [{"what": "remove", "id": clip["id"]}]})
+        report.expect("a removal inside what was attached is offered",
+                      removal["status"] == "ok", removal.get("error", {}).get("message", ""))
+        if removal["status"] != "ok":
+            return
+
+        report.expect("its diff says remove and carries no destination",
+                      removal["result"]["diff"]["clips"][0]["what"] == "remove"
+                      and "start_beat" not in removal["result"]["diff"]["clips"][0],
+                      removal["result"]["diff"]["clips"][0])
+
+        tool(project, "apply_proposal", {"proposal": removal["result"]["proposal"]["id"]})
+        gone = session.settled()
+        report.expect("the placement is gone",
+                      not any(c["id"] == clip["id"] for c in clips(gone)))
+
+        part = tool(project, "inspect_pattern",
+                    {"pattern": pattern_id, "channel": channel_id})["result"]
+        report.expect("but the pattern it played is not - removing where music is played "
+                      "is not deleting the music",
+                      len([n for p in part["parts"] for n in p["notes"]]) > 0)
+
+        control(project, "undo")
+        time.sleep(1.0)
+        report.expect("and one undo puts the placement back",
+                      any(c["id"] == clip["id"] for c in clips(session.settled())))
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
 
     print("a clip moves only where it was offered, and you hear it first")
     check_a_clip_can_be_moved_only_where_it_was_offered(exe, output / "moves", report)
+    print()
+    print("a clip can be copied and taken out, and the music survives both")
+    check_a_clip_can_be_copied_and_taken_out(exe, output / "copies", report)
 
     print()
     if report.unchecked:

@@ -514,9 +514,11 @@
         "notes_added",
         "notes_removed",
         "parameters_changed",
-        "clips_moved",
         "placements",
-        "keeps"
+        "keeps",
+        "clips_moved",
+        "clips_added",
+        "clips_removed"
       ],
       "properties": {
         "id": {
@@ -575,6 +577,14 @@
               "type": "boolean"
             }
           }
+        },
+        "clips_added": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "clips_removed": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -727,11 +737,17 @@
           "items": {
             "type": "object",
             "required": [
-              "id",
-              "start_beat",
-              "lane"
+              "what",
+              "id"
             ],
             "properties": {
+              "what": {
+                "enum": [
+                  "move",
+                  "copy",
+                  "remove"
+                ]
+              },
               "id": {
                 "$ref": "#/$defs/stableId"
               },
@@ -765,7 +781,8 @@
                   }
                 }
               }
-            }
+            },
+            "description": "A placement moved, copied or taken out. A removal has no destination, so it carries no start_beat and no lane - saying where a clip goes when it is going nowhere would be a request that contradicts itself."
           }
         }
       }

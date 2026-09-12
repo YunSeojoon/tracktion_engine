@@ -56,13 +56,26 @@ struct NoteChange
     it. A clip outside that is refused the same way a note outside an attachment is. */
 struct ClipChange
 {
-    String clipID;
+    enum class What { move, copy, remove };
+
+    What what = What::move;
+    String clipID;              // the placement being moved, copied or taken out
     std::optional<double> startBeat;
     std::optional<String> laneID;
 
     // What they are now, so a person sees both sides before deciding.
     double wasStart = 0.0;
     String wasLane;
+
+    static String whatName (What w)
+    {
+        switch (w)
+        {
+            case What::copy:   return "copy";
+            case What::remove: return "remove";
+            default:           return "move";
+        }
+    }
 };
 
 struct ParameterChange
@@ -209,19 +222,41 @@ struct Proposal
         if (! instances.isValid())
             return 0;
 
-        auto moved = 0;
+        auto done = 0;
 
         for (const auto& change : clips)
-            for (auto clip : instances)
-                if (Model::uidOf (clip) == change.clipID)
+            for (int i = instances.getNumChildren(); --i >= 0;)
+            {
+                auto clip = instances.getChild (i);
+                if (Model::uidOf (clip) != change.clipID)
+                    continue;
+
+                if (change.what == ClipChange::What::remove)
+                {
+                    instances.removeChild (i, nullptr);
+                }
+                else if (change.what == ClipChange::What::copy)
+                {
+                    // A copy of the placement, not of the music: the new clip points at
+                    // the same pattern, so the two are the same part played twice and
+                    // editing either edits both - which is what a placement is for.
+                    auto copy = clip.createCopy();
+                    copy.setProperty (ids::uid, Uuid().toString(), nullptr);
+                    if (change.startBeat) copy.setProperty (ids::start, *change.startBeat, nullptr);
+                    if (change.laneID)    copy.setProperty (ids::lane, *change.laneID, nullptr);
+                    instances.appendChild (copy, nullptr);
+                }
+                else
                 {
                     if (change.startBeat) clip.setProperty (ids::start, *change.startBeat, nullptr);
                     if (change.laneID)    clip.setProperty (ids::lane, *change.laneID, nullptr);
-                    ++moved;
-                    break;
                 }
 
-        return moved;
+                ++done;
+                break;
+            }
+
+        return done;
     }
 
     /** The other half, on a copy's plugins rather than a copy's tree.
@@ -253,6 +288,15 @@ struct Proposal
         return set;
     }
 
+    int countClips (ClipChange::What what) const
+    {
+        auto n = 0;
+        for (const auto& change : clips)
+            if (change.what == what)
+                ++n;
+        return n;
+    }
+
     var summary() const
     {
         int changed = 0, added = 0, removed = 0;
@@ -272,7 +316,9 @@ struct Proposal
                          { "notes_added", added },
                          { "notes_removed", removed },
                          { "parameters_changed", static_cast<int> (parameters.size()) },
-                         { "clips_moved", static_cast<int> (clips.size()) },
+                         { "clips_moved", countClips (ClipChange::What::move) },
+                         { "clips_added", countClips (ClipChange::What::copy) },
+                         { "clips_removed", countClips (ClipChange::What::remove) },
                          { "placements", placements },
                          { "keeps", keeps.toJson() } });
     }

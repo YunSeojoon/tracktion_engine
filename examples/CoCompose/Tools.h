@@ -141,7 +141,7 @@ public:
                                   // a kind listed here is one a model will try, and
                                   // offering something that cannot be previewed means
                                   // offering a change nobody can hear before taking it.
-                                  "clip.start_beat", "clip.lane" })
+                                  "clip.start_beat", "clip.lane", "clip.copy", "clip.remove" })
             writeKinds.add (name);
 
         return object ({
@@ -151,10 +151,11 @@ public:
             { "tools", readTools },
             { "writes", writeKinds },
             { "notes", "A proposal is checked when it is made and again when it is applied. "
-                       "Applying one is a single undo. A clip can be moved along the song "
-                       "or to another lane, within a region that was attached; adding, "
-                       "removing or duplicating clips, and anything to do with effects or "
-                       "routing, are not proposable in this build." },
+                       "Applying one is a single undo. Within a region that was attached "
+                       "a clip can be moved along the song or to another lane, copied to "
+                       "another place, or taken out; a copy points at the same pattern, so "
+                       "the two are one part played twice. Effects and routing are not "
+                       "proposable in this build." },
             { "units", object ({ { "time", "quarter-note beats, ranges are [start_beat, end_beat)" },
                                  { "pitch", "MIDI note number, 0-127" },
                                  { "velocity", "1-127" },
@@ -587,11 +588,29 @@ private:
         // Placements are in the tree, so they go into the same transaction the notes
         // did and come back with them on one Undo.
         for (const auto& change : proposal.clips)
-            if (auto clip = model.placementFor (change.clipID); clip.isValid())
+        {
+            auto clip = model.placementFor (change.clipID);
+            if (! clip.isValid())
+                continue;
+
+            if (change.what == ClipChange::What::remove)
+            {
+                model.instances().removeChild (clip, &undo);
+            }
+            else if (change.what == ClipChange::What::copy)
+            {
+                auto copy = clip.createCopy();
+                copy.setProperty (ids::uid, Uuid().toString(), nullptr);
+                if (change.startBeat) copy.setProperty (ids::start, *change.startBeat, nullptr);
+                if (change.laneID)    copy.setProperty (ids::lane, *change.laneID, nullptr);
+                model.instances().appendChild (copy, &undo);
+            }
+            else
             {
                 if (change.startBeat) clip.setProperty (ids::start, *change.startBeat, &undo);
                 if (change.laneID)    clip.setProperty (ids::lane, *change.laneID, &undo);
             }
+        }
 
         // A parameter's playback value does not live in the tree, so setting it would
         // fall outside the transaction the notes went into and the one Undo the person
@@ -619,6 +638,15 @@ private:
     {
         ClipChange change;
         change.clipID = entry["id"].toString();
+
+        const auto what = entry.getProperty ("what", "move").toString();
+        if (what != "move" && what != "copy" && what != "remove")
+            throw ToolError (tools::errors::invalidArgument,
+                             "A clip change's \"what\" must be move, copy or remove, not \"" + what + "\"");
+
+        change.what = what == "copy" ? ClipChange::What::copy
+                    : what == "remove" ? ClipChange::What::remove
+                                       : ClipChange::What::move;
 
         if (! proposal.allowedClips.contains (change.clipID))
             throw ToolError (tools::errors::outOfScope,
@@ -655,6 +683,23 @@ private:
 
             change.laneID = lane;
         }
+
+        if (change.what == ClipChange::What::remove)
+        {
+            // Taking a placement out is not a move to nowhere. Saying where as well
+            // would be a request that contradicts itself, and quietly ignoring half of
+            // it is how a caller ends up believing something it did not get.
+            if (change.startBeat || change.laneID)
+                throw ToolError (tools::errors::invalidArgument,
+                                 "Removing a clip does not take a start_beat or a lane");
+
+            return change;
+        }
+
+        if (change.what == ClipChange::What::copy && ! change.startBeat)
+            throw ToolError (tools::errors::invalidArgument,
+                             "A copy has to say where it goes, or it would land on top of "
+                             "the clip it came from");
 
         if (! change.startBeat && ! change.laneID)
             throw ToolError (tools::errors::invalidArgument,
@@ -893,11 +938,22 @@ private:
         Array<var> parameters;
         Array<var> clips;
         for (const auto& change : proposal.clips)
-            clips.add (object ({ { "id", change.clipID },
-                                 { "start_beat", object ({ { "was", change.wasStart },
-                                                           { "now", change.startBeat.value_or (change.wasStart) } }) },
-                                 { "lane", object ({ { "was", change.wasLane },
-                                                     { "now", change.laneID.value_or (change.wasLane) } }) } }));
+        {
+            auto entry = object ({ { "what", ClipChange::whatName (change.what) },
+                                   { "id", change.clipID } });
+
+            if (change.what != ClipChange::What::remove)
+            {
+                entry.getDynamicObject()->setProperty ("start_beat",
+                    object ({ { "was", change.wasStart },
+                              { "now", change.startBeat.value_or (change.wasStart) } }));
+                entry.getDynamicObject()->setProperty ("lane",
+                    object ({ { "was", change.wasLane },
+                              { "now", change.laneID.value_or (change.wasLane) } }));
+            }
+
+            clips.add (entry);
+        }
 
         for (const auto& change : proposal.parameters)
             parameters.add (object ({ { "owner", change.ownerID },
