@@ -62,7 +62,7 @@ Browser on the left, Channel Rack above the Mixer in the centre, Pattern picker 
 
 The Channel Rack carries a sixteenth-note step grid for the selected pattern: click or drag across it to write notes at the channel's step pitch, and the button beside the insert number sets that pitch and the step length. Four things open the note editor: double-clicking a clip in the Playlist, `Enter` with a clip selected, `Open in the piano roll` in a clip's menu, and `Piano roll` in the Channel Rack. The first three follow the music — if the selected channel has no part in the pattern being opened, one the pattern does play is shown instead, so a drum clip does not present the bass's empty grid. Opening is not an edit: no revision, no undo. The editor's first line says which pattern, which channel, and in how many places that pattern is played (`played in 2 places, and editing changes all of them`), and it keeps saying it while the window is open. Select and Draw are separate tools and **only Draw writes notes**; in Select, dragging empty grid is a rubber-band selection rather than a note plus a selection. Drag a note to move it, drag its right edge to resize, Alt-drag for velocity, and use `Ctrl+D` to duplicate, `Q` to quantise and `Delete` to remove. Right-clicking a note opens a menu — semitone and octave up and down, quantise, ask the AI about it, delete — rather than deleting it where it stands. Clicking the keyboard previews through the channel's real instrument, and a held preview stops if the window loses the keyboard rather than sounding forever.
 
-The Playlist is a bar grid with one row per lane. Drag a pattern from the picker onto a lane to place it. It has four tools — Select, Draw, Erase and Split — and **Select is the default**: clicking an empty spot drops the selected pattern only when Draw is chosen, and dragging empty space is a selection. Erase and Split act on the clip they are pointed at the moment they are clicked, which is safe precisely because choosing them is a deliberate act, and the cursor changes with the tool so you can see which one you are holding before you press. The toolbar box and the empty-grid menu set each other, so they cannot disagree. Drag a clip to move it between lanes and bars, drag its right edge to resize, Ctrl-drag to copy, hold Alt to suspend snapping while you drag, and double-click a clip to open its notes — it used to split there, which `Ctrl+E` and the clip menu still do. Alt means velocity in the note editor and snap-off here; the two windows differ on purpose rather than by oversight. `Ctrl+E` splits at the playhead, `Ctrl+R` duplicates, `Ctrl+U` detaches, `Delete` removes. Right-clicking a clip opens a menu — open in the piano roll, duplicate, make unique, split, ask the AI, delete — instead of deleting it outright; right-clicking inside a selection keeps the selection and one command covers all of it in one undo, and right-clicking outside one moves to what was pointed at. Menus exist for pattern clips, notes, the empty grid, the channel header, an effect in a mixer chain and audio clips, and knobs and faders have a value menu of their own; lane headers do not have one yet. Opening a menu is not an edit anywhere: a mis-aimed right-click moves no clip, no note, and no revision.
+The Playlist is a bar grid with one row per lane. Drag a pattern from the picker onto a lane to place it. It has four tools — Select, Draw, Erase and Split — and **Select is the default**: clicking an empty spot drops the selected pattern only when Draw is chosen, and dragging empty space is a selection. Erase and Split act on the clip they are pointed at the moment they are clicked, which is safe precisely because choosing them is a deliberate act, and the cursor changes with the tool so you can see which one you are holding before you press. The toolbar box and the empty-grid menu set each other, so they cannot disagree. Drag a clip to move it between lanes and bars, drag its right edge to resize, Ctrl-drag to copy, hold Alt to suspend snapping while you drag, and double-click a clip to open its notes — it used to split there, which `Ctrl+E` and the clip menu still do. Alt means velocity in the note editor and snap-off here; the two windows differ on purpose rather than by oversight. `Ctrl+E` splits at the playhead, `Ctrl+R` duplicates, `Ctrl+U` detaches, `Delete` removes. Right-clicking a clip opens a menu — open in the piano roll, duplicate, make unique, split, ask the AI, delete — instead of deleting it outright; right-clicking inside a selection keeps the selection and one command covers all of it in one undo, and right-clicking outside one moves to what was pointed at. Menus exist for pattern clips, notes, the empty grid, the channel header, an effect in a mixer chain and audio clips, and knobs and faders have a value menu of their own, and a lane header has one as well — rename, mute, taller, shorter, ask about that part, add and remove a lane — where the right-click used to fall through to the empty grid's offer to place a pattern at a beat the pointer was not over. Opening a menu is not an edit anywhere: a mis-aimed right-click moves no clip, no note, and no revision.
 
 The ruler does three things. Left-click seeks to where you clicked, at a free position rather than the editing grid, and dragging shows where the playhead would land and seeks once when you let go. Dragging a loop handle moves that end of the loop and nothing else. Shift-drag marks a stretch of time, which is neither the loop nor a set of clips but a third thing meaning "this part of the song" — it is drawn in its own colour, and it is what the chat attaches when nothing else is picked out. Marking a range and selecting clips clear each other. Seeking touches the transport only: it moves no revision and spends no undo. Both grids share one wheel contract: scroll for vertical, Shift-scroll for horizontal, Ctrl-scroll to zoom **about the pointer**, so what you were looking at stays where it was. Over the Playlist's lane names, Ctrl-scroll changes how tall the lanes are instead (16 to 96 pixels, clamped rather than obeyed) — the pointer is on the thing being resized, which is the rest of the contract's rule too. Lane height lives in the view and not in the project: it is how somebody is looking at the music, so changing it moves no revision, and a check confirms that. `Fit whole song`, `Fit selection` and `Back to previous zoom` are in the View menu, and `Piano roll` is in Edit; all four are still callable by name (`--ui-script`'s `{"command": "Fit whole song"}`). The middle button pans, and dragging a clip or a selection box scrolls the view when the pointer nears an edge — without that a clip cannot be moved further than one windowful and a selection stops at the border.
 
@@ -127,8 +127,23 @@ check the plumbing. The panel names whichever provider is listening, so an echo 
 cannot be mistaken for a real one. The bridge writes a heartbeat every couple of seconds,
 including while a provider call is in flight, so a bridge that was killed rather than
 closed is seen as gone instead of believed: a question left waiting on one ends, says so,
-and comes back into the box with its text intact. A bridge restarted in a folder where a
-question is still sitting does not ask it again — the reply beside the request is the
+and comes back into the box with its text intact. That heartbeat now says what the bridge
+is rather than only that it is there — the provider, the model, and what the connection can
+do (`suggests_changes`, `hears_audio`, `runs_locally`, `is_a_model`), each provider stating
+its own rather than anything being inferred from a name, since a local model and a hosted
+one, and a working connection and a bridge that is up but pointed at nothing, need
+different things done about them. There is no screen for that list yet; it is in
+`chat-bridge.json`. An answer keeps the provider and model that wrote it, in the
+conversation and through a restart: the bridge was already sending the provider and the app
+was throwing it away, so stopping one bridge and starting another mid-conversation left a
+transcript where the older answers looked like the new model's, which is the kind of wrong
+that cannot be spotted afterwards. A question also remembers which bridge it went to, and
+if that is replaced before the answer arrives the question is handed back the way it is when
+a bridge stops — the words return to the box and the transcript says the model changed and
+that nothing in the music changed — because the app used to check only whether *a* bridge
+was connected, so a question asked of one model could be answered by whichever started next.
+An older bridge that does not name itself is not called an impostor for it. A bridge
+restarted in a folder where a question is still sitting does not ask it again — the reply beside the request is the
 record and outlives the process — and an answer cut off mid-stream is reported rather than
 quietly retried, since whether the provider did the work and charged for it cannot be known
 from here. The connection is verified end to end against a model
@@ -189,39 +204,84 @@ because what was rendered was a copy. The status file carries each file's finger
 (FNV-1a over the bytes — it tells two renders apart, it does not seal them; the release
 artefacts still use SHA-256), the revision it came from and the beats it covers, so a
 preview left over from before an edit is visibly not what a fresh render would produce.
-A proposal that also moves mixer parameters is previewed for its notes only and says so,
-because a comparison that quietly left half the change out would be worse than none. And
-the file says `heard: false` and why: making a file is not listening to it, and whether
-the change sounds better is not something this app or a model with no ears can report.
-`python tools/test_preview.py` checks everything around that judgement and prints the
-judgement itself under `FOR A PERSON`. Both halves are now derived the same way — only
-the second one used to re-derive its clips from the adjusted copy, so "as it is" was
-rendered from whatever the live edit happened to be holding — and the check compares the
-notes the engine would play rather than the file bytes: renders on this machine are not
-bit-deterministic, two renders of the same music do not always hash the same, so "the
-files differ" was passing on noise while the preview rendered the old notes twice. The
-proof a preview offers is at the level of those notes, not of bytes. There is no button
-for this yet.
+Both the notes and the mixer parameters of a proposal go onto the copy. A parameter is not
+in the project tree — it lives inside the plugin — and the copy's plugins are real
+plugins, reached the way the live ones are, so the second half is applied there and thrown
+away with the copy; the knob does not move until Apply. Before, both halves carried the
+mixer as it stands while Apply moved it: a proposal taking a reverb from a third to fully
+wet rendered at RMS 0.027728 and 0.027702, a tenth of a percent apart, which is two
+renders of the same thing drifting — because that is what they were. The same proposal now
+gives 0.027704 and 0.042880. The `limits` line is set only when something genuinely could
+not be included — a change whose plugin has gone — rather than whenever a proposal has any
+parameters at all. The status file also says `changes_places` and `places_in_this_stretch`:
+how many placements a note change reaches, and how many of them this comparison covered,
+because editing a shared pattern is heard everywhere it is played while a preview renders
+one stretch. And the file says `heard: false` and why: making a file is not listening to
+it, and whether the change sounds better is not something this app or a model with no ears
+can report. `python tools/test_preview.py` checks everything around that judgement and
+prints the judgement itself under `FOR A PERSON`. Both halves are derived the same way —
+only the second one used to re-derive its clips from the adjusted copy, so "as it is" was
+rendered from whatever the live edit happened to be holding. The audio comparisons are
+against a tolerance rather than a hash: renders on this machine are not bit-deterministic,
+two renders of the same music do not always hash the same, so a check demanding identical
+bytes would fail on drift and one demanding only difference would pass on it. The reverb
+move is about fifty times the drift. There is no button for this yet.
 
-What is known about a project is kept in three kinds that never merge. A condition is a
+A proposal is also shelved as it is offered, in `candidates.json` beside the project
+(`examples/CoCompose/Candidates.h`), so "go back to the second one" has something to point
+at — until now a proposal lived in memory for as long as the app did, and the model does
+not have the earlier one either, so what came back was a fourth version described as the
+second. A candidate keeps the diff verbatim as it was produced, the revision it was worked
+out against, whether it was adopted, and the fingerprints of the two files it was compared
+with — fingerprints rather than paths, since a preview writes the same two files every
+time. Adopting one leaves the others alone, because taking the second of three is not
+rejecting the first and the third. Discarding one removes a record of an offer and no
+music: if it had been adopted the notes stay where they are and Undo is still how to take
+them back, and Undo does not un-offer anything either. A copied project folder starts with
+an empty shelf, the rule the notes already follow. Each question carries the last five
+alternatives to the model, oldest first, numbered the way a person counts them and with the
+adopted one marked — five because a model given forty picks from forty — alongside a plain
+statement that naming one is not permission to touch what it touched. Scope still comes
+only from what is attached, and every check that enforces that is unchanged.
+
+What is known about a project is kept in four kinds that never merge. A condition is a
 person's rule ("keep the drums as they are"). A guess is the assistant's reading ("this
 sounds like D minor"), which carries who said it and which revision it was read from. A
-request is what is being asked right now and expires with the answer. A guess never
+request is what is being asked right now and expires with the answer. A todo is work that
+has not been done ("rewrite this fill") and is deliberately not a condition, because an
+assistant that reads it as a rule will defend the fill it was asked to replace; marking one
+done leaves it on the list, since a list that erases finished work cannot answer "did we
+ever fix that", but a finished one is not put to the model. A guess never
 becomes a rule on its own: only a person promotes one, and the guess stays where it was,
-because what was read and what was agreed are different facts. The prompt labels all
-three, since a model shown its own earlier guess unlabelled reads it as something it was
-told. None of it is music — writing a note moves no revision and enters no undo history,
+because what was read and what was agreed are different facts. The prompt labels them,
+since a model shown its own earlier guess unlabelled reads it as something it was
+told. A note can also be about a place: pinned to a stretch of beats, tied to a clip, or
+neither, and it says which — "the drop is too early" is about a moment and stays there
+when a clip is dragged past it, "rewrite this fill" is about a clip and follows it, and
+there is no way to guess which is meant. A tied note moves when its clip moves, and when a
+clip is deleted the note says its link is broken (`gone:` in front of the clip id) and
+keeps where the clip used to be rather than being re-aimed at whatever is nearest; the
+words that go to the model say the same. None of it is music — writing a note moves no
+revision and enters no undo history,
 because somebody undoing an edit is undoing an edit, not forgetting a decision. Notes
 live in `notes.json` beside the project and belong to a project id, so a copied folder
 inherits nothing. `--ui-script`'s `{"project_note": ["condition"|"guess"|"request"|
-"accept"|"remove", text or id]}` is the only way in so far; `chat-inspector.json` reports
+"accept"|"remove"|"todo"|"done", text or id]}`, plus `todo_at` with a beat range and
+`todo_on` with a clip id, is the only way in so far; `chat-inspector.json` reports
 what is there.
 
-Two limits remain. The hosted
-`--provider openai` path has still never been exercised from here; only the local ollama
-one has. And a small local model is not reliable at musical judgement — this one read "up
-one tone" as one semitone. The app's promises held either way, which is the point; the
-musical quality of a suggestion is the model's and is not claimed here.
+What is left is a person's, and is recorded as unproven rather than as passing. Whether an
+A/B actually sounds better, and whether the previewed mixer and the applied one sound the
+same. Whether the three alternatives on the shelf are music worth choosing between. That
+two real models both answer usefully through the handover path: only the local ollama model
+has ever been exercised here, the hosted `--provider openai` path has never been called
+from this machine, and the fixture bridges the handover check runs prove the app's
+bookkeeping rather than anybody's musicality. Whether a third-party VST's opaque state
+survives the preview copy — the same snapshot path was checked with a built-in plugin, but
+no scanned VST has been through it. And a small local model is not reliable at musical
+judgement — this one read "up one tone" as one semitone. The app's promises held either
+way, which is the point; the musical quality of a suggestion is the model's and is not
+claimed here.
 
 ## Working from outside
 
@@ -282,6 +342,6 @@ It also supports transpose, clear-notes, place, make-unique, gain, parameter, st
 - [수용 검사 기록](docs/acceptance-2026-09-10.ko.md)
 - [변경 기록](docs/CHANGELOG.md)
 
-The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 28 real-app integration checks passed, the packaged ZIP installs, updates and uninstalls without touching the user's projects (docs/release.ko.md), and every VST3 on the development machine was checked against the real app (docs/compatibility-2026-09-10.ko.md). Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. `python tools/test_ai_chat.py` covers the chat — attachments, a conversation that survives a restart, and proposals being refused, applied and undone — and `python tools/test_tool_contract.py` checks the app's real answers against `docs/ai-tool-contract.schema.json` (it needs the `jsonschema` package). `python tools/test_chat_reliability.py` covers the connection lying about itself — a restart that must not re-ask, an interrupted answer that must not be resent, a dead bridge that must not look alive, a question that must come back, an earlier attachment that must survive in the history, and two regions with identical labels that must read differently — and needs neither a key nor a network, three of the four using a provider spy and the fourth reading what the app writes. `python tools/test_daw_interaction.py` drives the real mouse handlers with real `MouseEvent`s for the ruler gestures, the stop-twice return and right-click opening a menu instead of deleting, and also reads `shortcuts.json` to refuse two commands on one key and checks that lane height clamps and moves no revision; it drives real right-button events into the channel header, an effect slot and an audio clip too, holding each to the same rule — opening a menu is not an edit — because calling the function that opens a menu says the menu exists and nothing about whether right-clicking reaches it; where a menu appears and how it reads is left as a person's job. One thing it cannot produce on this machine is a script-owned keyboard focus, so "Space, Return and Home while typing do not run DAW commands" is printed under `NOT CHECKED HERE` rather than counted as a pass — a headless window never gets OS keyboard focus, so type in the chat box and press them to see it. `python tools/test_proposal_boundaries.py` holds the lines a proposal must not cross: a late reply that cannot overwrite what the person changed meanwhile, a reply that cannot name its own scope, a reply with nothing attached that changes nothing, an empty allowed list read as none rather than all, an added note that has to fit the pattern it is added to, an unknown verb and a non-number refused, and a reply for another project ignored. The fourth review's own reproduction tool, `tools/review_proposal_repro.py`, is kept as well and now answers `STALE_REVISION`, `OUT_OF_SCOPE` and a 0.5-beat note in a 0.5-beat pattern where it used to reproduce the bugs. `python tools/test_preview.py` covers the A/B — two real files, different audio, each saying which revision and which beats it came from, and a song that did not move — with the listening itself printed under `FOR A PERSON`, and `python tools/test_project_notes.py` covers the notes: a guess that is not a rule, a promotion that keeps both, a decision that survives a restart while a finished request does not, and a copied project that inherits nothing. A timeout in these checks now says how long it waited out of how long it was allowed, what it was waiting for, and whether it was swallowing an exception the whole time; three timing assumptions in the checks themselves and two app bugs have been fixed. The second of those was the intermittent one: a control request sent the moment a new session answered was marked already-seen while the app was still starting, which cost roughly one live-sync run in three and arrived as a hang that had not happened. What separates a leftover request from a live one is which session it names, so that is what decides now. The harness also stops lying about being blocked — the wait for a free single instance used to give up silently and every caller ignored it, so another copy of the app holding the lock surfaced as a failing check somewhere unrelated; it now raises and names the process in the way, `Session.open` retries a launch the single-instance mutex refused (the mutex can outlive the process that held it), and a failed launch leaves no app behind. Those suites were last run together on one binary, sha256 `347ba03c794f209f04ae8cbb8c1807df6cfc4ecd47d99ff20727eec32f5c70fd`, run sequentially with nothing else holding the app and the same hash before and after: tool contract, proposal boundaries, project notes, chat, chat reliability, connection, DAW interaction and preview all report `FAILURES: none` (261 individual ok lines) and live-sync passes its 28. CI runs only when someone asks it to (`gh workflow run cocompose-windows.yml --ref ai-editor`); a push does not trigger it. Details are in the work log. Third-party VST3 compatibility is recorded per plugin for the development machine; listening to the output is a person's judgement and is not claimed. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
+The earlier DemoRunner remains available in `examples/DemoRunner`; CoCompose is now the editor entry point. Windows Release built with MSVC 19.44.35223, and all 28 real-app integration checks passed, the packaged ZIP installs, updates and uninstalls without touching the user's projects (docs/release.ko.md), and every VST3 on the development machine was checked against the real app (docs/compatibility-2026-09-10.ko.md). Run `python tools/test_live_sync.py` with other CoCompose instances closed to repeat them in a new test folder. `python tools/test_ai_chat.py` covers the chat — attachments, a conversation that survives a restart, and proposals being refused, applied and undone — and `python tools/test_tool_contract.py` checks the app's real answers against `docs/ai-tool-contract.schema.json` (it needs the `jsonschema` package). `python tools/test_chat_reliability.py` covers the connection lying about itself — a restart that must not re-ask, an interrupted answer that must not be resent, a dead bridge that must not look alive, a question that must come back, an earlier attachment that must survive in the history, and two regions with identical labels that must read differently — and needs neither a key nor a network, three of the four using a provider spy and the fourth reading what the app writes. `python tools/test_daw_interaction.py` drives the real mouse handlers with real `MouseEvent`s for the ruler gestures, the stop-twice return and right-click opening a menu instead of deleting, and also reads `shortcuts.json` to refuse two commands on one key and checks that lane height clamps and moves no revision; it drives real right-button events into the channel header, an effect slot and an audio clip too, holding each to the same rule — opening a menu is not an edit — because calling the function that opens a menu says the menu exists and nothing about whether right-clicking reaches it; where a menu appears and how it reads is left as a person's job. One thing it cannot produce on this machine is a script-owned keyboard focus, so "Space, Return and Home while typing do not run DAW commands" is printed under `NOT CHECKED HERE` rather than counted as a pass — a headless window never gets OS keyboard focus, so type in the chat box and press them to see it. `python tools/test_proposal_boundaries.py` holds the lines a proposal must not cross: a late reply that cannot overwrite what the person changed meanwhile, a reply that cannot name its own scope, a reply with nothing attached that changes nothing, an empty allowed list read as none rather than all, an added note that has to fit the pattern it is added to, an unknown verb and a non-number refused, and a reply for another project ignored. The fourth review's own reproduction tool, `tools/review_proposal_repro.py`, is kept as well and now answers `STALE_REVISION`, `OUT_OF_SCOPE` and a 0.5-beat note in a 0.5-beat pattern where it used to reproduce the bugs. `python tools/test_preview.py` covers the A/B — two real files, different audio, each saying which revision and which beats it came from, and a song that did not move — with the listening itself printed under `FOR A PERSON`, and `python tools/test_project_notes.py` covers the notes: a guess that is not a rule, a promotion that keeps both, a decision that survives a restart while a finished request does not, and a copied project that inherits nothing. A timeout in these checks now says how long it waited out of how long it was allowed, what it was waiting for, and whether it was swallowing an exception the whole time; three timing assumptions in the checks themselves and two app bugs have been fixed. The second of those was the intermittent one: a control request sent the moment a new session answered was marked already-seen while the app was still starting, which cost roughly one live-sync run in three and arrived as a hang that had not happened. What separates a leftover request from a live one is which session it names, so that is what decides now. The harness also stops lying about being blocked — the wait for a free single instance used to give up silently and every caller ignored it, so another copy of the app holding the lock surfaced as a failing check somewhere unrelated; it now raises and names the process in the way, `Session.open` retries a launch the single-instance mutex refused (the mutex can outlive the process that held it), and a failed launch leaves no app behind. `python tools/test_candidates.py` covers the shelf — three answers leaving three candidates, adopting the second without disturbing the first and third, discarding one without touching adopted music, an Undo that takes back music without un-offering anything, a shelf and conversation that survive a restart, a copied project that starts empty, and the numbered list that goes out with a question saying plainly that naming one is not permission. `python tools/test_model_handover.py` covers a model being swapped: the conversation id, the person's written decisions and the shelf carry over while authorship does not, an answer written before the handover stays labelled with the model that wrote it, a question still in flight comes back into the box with the music untouched, and everything the app writes is read and failed on anything resembling a key or a header that would carry one — the app never speaks to a provider, so that check is about nothing having picked one up from elsewhere. It runs fixture bridges, not two real models. Those suites were last run together on one binary, sha256 `90eac9cfa140788c6146c2f45bc1dce2a0a93c5538959589c1a949f6af208037`, run sequentially with nothing else holding the app and the same hash before and after: tool contract, proposal boundaries, project notes, candidates, model handover, chat, chat reliability, connection, DAW interaction and preview all report `FAILURES: none` (435 individual ok lines) and live-sync passes its 28. Earlier totals of 261 and 284 were undercounts: the run recorder was truncating each suite's record at 45 lines, which never affected a `FAILURES` verdict but did affect the counts read off it. The truncation is gone, and the 403, 407, 417 and 430 quoted between then and now are checks actually being added. CI runs only when someone asks it to (`gh workflow run cocompose-windows.yml --ref ai-editor`); a push does not trigger it. Details are in the work log. Third-party VST3 compatibility is recorded per plugin for the development machine; listening to the output is a person's judgement and is not claimed. Graph changes may briefly interrupt playback before it resumes on the next UI tick; live sync does not guarantee gapless audio.
 
 Keep upstream license notices intact. Tracktion Engine and JUCE have separate licenses; see the upstream README and JUCE license files.
