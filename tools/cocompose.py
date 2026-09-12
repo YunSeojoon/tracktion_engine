@@ -41,17 +41,34 @@ def atomic_write(path, value):
         temporary.unlink(missing_ok=True)
 
 
-def wait_for(check, timeout=12):
-    deadline = time.monotonic() + timeout
+def wait_for(check, timeout=12, what=""):
+    """Waits for `check` to return something truthy.
+
+    The message on failure says what was being waited for and for how long, because
+    "no acknowledgement" on its own sent this project chasing three wrong explanations:
+    the elapsed time alone would have ruled out two of them immediately. A swallowed
+    exception is reported too - a check that spent the whole wait raising PermissionError
+    is a different fault from one that kept returning nothing.
+    """
+    started = time.monotonic()
+    deadline = started + timeout
+    swallowed = None
+
     while time.monotonic() < deadline:
         try:
             result = check()
             if result:
                 return result
-        except (FileNotFoundError, json.JSONDecodeError, PermissionError):
-            pass
+        except (FileNotFoundError, json.JSONDecodeError, PermissionError) as problem:
+            swallowed = problem
         time.sleep(0.1)
-    raise TimeoutError("No acknowledgement from CoCompose; check sync-status.json")
+
+    waited = time.monotonic() - started
+    raise TimeoutError("Waited %.1fs of %.1fs for %s and it never arrived%s"
+                       % (waited, timeout, what or "an acknowledgement from CoCompose",
+                          "" if swallowed is None
+                          else "; last problem reading it was %s: %s"
+                               % (type(swallowed).__name__, swallowed)))
 
 
 def current(project):
@@ -121,7 +138,7 @@ def submit(project, state):
         raise RuntimeError(error or str(exc)) from exc
 
 
-def control(project, action, attempts=5):
+def control(project, action, attempts=5, timeout=45):
     """Transport and history commands carry the revision too, so a command sent while
     the app was mid-change is refused. Read again and resend rather than force it."""
     folder = Path(project).parent
@@ -143,7 +160,13 @@ def control(project, action, attempts=5):
             return response
 
         try:
-            return wait_for(acknowledged)
+            # Generous on purpose. The app answers a control command from its message
+            # thread, and that thread is not always free: reopening a saved session
+            # loads plugins, and a quit arriving during that waits its turn. Twelve
+            # seconds - the default - was long enough almost always, which is the worst
+            # kind of long enough: the failures looked like hangs and were queues.
+            return wait_for(acknowledged, timeout=timeout,
+                            what="the answer to control request %s (%s)" % (request_id[:8], action))
         except Conflict:
             if attempt == attempts - 1:
                 raise

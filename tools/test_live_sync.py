@@ -32,6 +32,24 @@ def equivalent(a, b):
     return a == b
 
 
+def wait_for_no_running_app(timeout=30):
+    """Waits for the last CoCompose to finish leaving before the next one starts."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            listed = subprocess.run(["tasklist", "/FI", "IMAGENAME eq CoCompose.exe", "/NH"],
+                                    capture_output=True, text=True, timeout=20).stdout
+        except (OSError, subprocess.SubprocessError):
+            return True
+
+        if not any(line.lower().startswith("cocompose.exe") for line in listed.splitlines()):
+            return True
+
+        time.sleep(0.25)
+
+    return False
+
+
 def copy_when_readable(source, destination, attempts=20):
     """Copies a file the app is also writing.
 
@@ -127,12 +145,20 @@ def write_report(exe, folder, checks, failure):
 
 
 def run(exe, folder):
+    wait_for_no_running_app()
     folder.mkdir(parents=True, exist_ok=False)
     project = folder / "project.json"
     process = None
     checks = []
 
     def launch(play=False, project_file=None, cwd=None):
+        # The app allows one instance: a second hands its command line to the first and
+        # exits immediately, so it writes no state of its own and every wait afterwards
+        # times out saying "no acknowledgement". That reads as a hang and is really a
+        # collision with a process that has not finished leaving. Quitting is asked for
+        # and then happens, so an app can outlive the check that asked it to go.
+        wait_for_no_running_app()
+
         command = [str(exe), "--project", str(project_file or project), "--headless", "--screenshots"]
         if play:
             command.append("--play")
@@ -529,6 +555,7 @@ def check_pattern_built_in_the_ui(exe, folder):
     startup = subprocess.STARTUPINFO()
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startup.wShowWindow = 0
+    wait_for_no_running_app()
     process = subprocess.Popen([str(exe), "--project", str(project), "--headless",
                                 "--screenshots", "--ui-script", str(script)], startupinfo=startup)
     try:
@@ -576,6 +603,7 @@ def check_pattern_built_in_the_ui(exe, folder):
         assert process.wait(timeout=20) == 0
 
         # And it all has to come back from the saved session.
+        wait_for_no_running_app()
         process = subprocess.Popen([str(exe), "--project", str(project), "--headless"], startupinfo=startup)
         wait_for(lambda: read(sub / "sync-status.json")["session_id"] != first_session, timeout=40)
         reopened = read(sub / "state.json")

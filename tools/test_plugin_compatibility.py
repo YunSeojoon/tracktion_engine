@@ -42,6 +42,34 @@ def quit_app(process, folder):
         process.wait(timeout=20)
 
 
+def running_apps():
+    """The CoCompose processes alive right now, by pid."""
+    try:
+        listed = subprocess.run(["tasklist", "/FI", "IMAGENAME eq CoCompose.exe", "/NH"],
+                                capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    return [line.split()[1] for line in listed.splitlines()
+            if line.lower().startswith("cocompose.exe")]
+
+
+def wait_for_no_running_app(timeout=30):
+    """Waits for the last app to finish leaving before starting the next one.
+
+    Quitting is asked for and then happens; the process lingers for a moment after the
+    check that asked has moved on. Starting into that moment is what produced timeouts
+    that looked like hangs.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not running_apps():
+            return True
+        time.sleep(0.25)
+
+    return False
+
+
 class Session:
     """One run of the app, driven by the UI script, that can be restarted."""
 
@@ -53,10 +81,29 @@ class Session:
         self.process = None
 
     def open(self, extra=()):
+        # The app allows one instance. A second one hands its command line to the first
+        # and exits at once, so it never writes a state.json of its own and the wait
+        # below times out saying "no acknowledgement" - which reads as a hang and is
+        # actually a collision with a process that has not finished leaving yet.
+        #
+        # That is not hypothetical: it is where the intermittent timeouts in this
+        # project came from. A check whose app took an extra moment to exit made the
+        # next check fail at startup, in a different file, for no visible reason.
+        wait_for_no_running_app()
+
         atomic_write(self.script, [])
         self.round = 0
         self.process = start(self.exe, self.folder, self.script, extra)
-        wait_for(lambda: read(self.folder / "state.json"), timeout=90)
+
+        try:
+            wait_for(lambda: read(self.folder / "state.json"), timeout=90)
+        except TimeoutError:
+            if self.process.poll() is not None:
+                raise TimeoutError(
+                    "CoCompose exited immediately - another instance was already "
+                    "running and took the command line") from None
+            raise
+
         return self
 
     def close(self):
