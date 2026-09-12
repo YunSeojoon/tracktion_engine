@@ -802,6 +802,7 @@ private:
         File before, after;
         String problem;
         StringArray beforeNotes, afterNotes;   // what each half actually played
+        int placesChanged = 0, placesHeard = 0;
     };
 
     bool renderWasBusy = false;
@@ -1830,6 +1831,26 @@ private:
         preview.before = project.source.getSiblingFile ("preview-before.wav");
         preview.after = project.source.getSiblingFile ("preview-after.wav");
 
+        // How many places the proposal reaches, and how many of them this comparison
+        // covers. A pattern played three times is edited in all three by one note
+        // change, and a preview renders the stretch it was asked for. The proposal
+        // already says the first number; without the second, a person is left to work
+        // out for themselves whether what they just heard was all of it.
+        preview.placesChanged = 0;
+        preview.placesHeard = 0;
+
+        if (proposal->patternID.isNotEmpty() && ! proposal->notes.empty())
+            for (auto clip : project.model->instances())
+            {
+                if (clip[live::ids::pattern].toString() != proposal->patternID)
+                    continue;
+
+                ++preview.placesChanged;
+
+                const auto start = static_cast<double> (clip[live::ids::start]);
+                if (start < toBeat && start + static_cast<double> (clip[live::ids::length]) > fromBeat)
+                    ++preview.placesHeard;
+            }
 
         auto& timeline = project.edit->tempoSequence;
         const te::TimeRange range { timeline.toTime (te::BeatPosition::fromBeats (fromBeat)),
@@ -1918,6 +1939,14 @@ private:
                                          "Whether these sound right is not something this "
                                          "app or a model can report." },
                                { "limits", preview.problem },
+                               // A note change edits the pattern, so it is heard wherever
+                               // the pattern is placed, and a comparison covers one
+                               // stretch of the song. These two are how a person sees
+                               // that they are listening to one of the three places this
+                               // would change - the difference between what was heard
+                               // and what Apply does.
+                               { "changes_places", preview.placesChanged },
+                               { "places_in_this_stretch", preview.placesHeard },
                                { "before", describe (preview.before, preview.beforeNotes) },
                                { "after", describe (preview.after, preview.afterNotes) } }), false));
     }

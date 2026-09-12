@@ -432,6 +432,95 @@ def check_a_mixed_proposal_is_heard_whole(exe, folder, report):
         session.close()
 
 
+def check_a_shared_pattern_says_how_much_you_heard(exe, folder, report):
+    """B2: one pattern placed twice, a comparison that covers one of them.
+
+    A note change edits the pattern, so it is heard everywhere the pattern is placed -
+    and a preview renders one stretch of the song. Those are different sizes, and a
+    person who listens to eight bars and presses Apply is changing more than they
+    heard. The proposal says how many places share the pattern; the preview has to say
+    how many of them this particular comparison covered, or the number is advice
+    without a scale."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        state = session.settled()
+        pattern_id = state["patterns"][0]["id"]
+        channel_id = state["channels"][0]["id"]
+
+        # A second placement of the same pattern, far enough along that a comparison of
+        # the first eight beats cannot reach it.
+        first = next(c for c in state["playlist"]["clips"] if c["pattern"] == pattern_id)
+        lane = first["lane"]
+        session.run([{"select_pattern": 0}, {"select_lane": 0}, {"place": [0, 64.0]}])
+        time.sleep(0.8)
+        state = session.settled()
+
+        sharing = [c for c in state["playlist"]["clips"] if c["pattern"] == pattern_id]
+        report.expect("the pattern is placed more than once", len(sharing) >= 2,
+                      [(c["start"], c["lane"]) for c in sharing])
+        if len(sharing) < 2:
+            return
+
+        part = tool(project, "inspect_pattern",
+                    {"pattern": pattern_id, "channel": channel_id})["result"]
+        notes = [n for p in part["parts"] for n in p["notes"]]
+        revision = read(folder / "sync-status.json")["revision"]
+
+        made = tool(project, "create_proposal", {
+            "description": "AI: a fifth up, everywhere this plays",
+            "pattern": pattern_id, "channel": channel_id,
+            "allowed_notes": [n["id"] for n in notes[:4]],
+            "base_revision": revision,
+            "notes": [{"what": "change", "id": n["id"], "pitch": min(127, n["pitch"] + 7)}
+                      for n in notes[:4]]})
+        report.expect("a proposal against a shared pattern", made["status"] == "ok",
+                      made.get("error", {}).get("message", ""))
+        if made["status"] != "ok":
+            return
+
+        proposal = made["result"]["proposal"]["id"]
+        report.expect("the proposal says the pattern is shared",
+                      made["result"]["proposal"]["placements"] == len(sharing),
+                      (made["result"]["proposal"]["placements"], len(sharing)))
+
+        (folder / "preview-status.json").unlink(missing_ok=True)
+        session.run([{"preview": [proposal, 0.0, 8.0]}])
+
+        def finished():
+            path = folder / "preview-status.json"
+            status = read(path) if path.exists() else {}
+            return status if status and status.get("running") is False else None
+
+        status = wait_for(finished, timeout=240)
+
+        covered = len([c for c in sharing
+                       if c["start"] < 8.0 and c["start"] + c["length"] > 0.0])
+        report.expect("the comparison says how many places the change reaches",
+                      status.get("changes_places") == len(sharing),
+                      (status.get("changes_places"), len(sharing)))
+        report.expect("and how many of them it actually covered",
+                      status.get("places_in_this_stretch") == covered,
+                      (status.get("places_in_this_stretch"), covered))
+        report.expect("and those two are not the same number here - which is the point",
+                      status.get("changes_places") > status.get("places_in_this_stretch"),
+                      (status.get("changes_places"), status.get("places_in_this_stretch")))
+
+        # Apply, and the far placement moved too - which is what the numbers were for.
+        tool(project, "apply_proposal", {"proposal": proposal})
+        region = tool(project, "inspect_region", {"start_beat": 64.0, "end_beat": 72.0})["result"]
+        far = [n["pitch"] for clip in region["clips"] for p in clip.get("parts", [])
+               for n in p["notes"]]
+        report.expect("applying it changed the placement nobody listened to",
+                      any(pitch in {min(127, n["pitch"] + 7) for n in notes[:4]} for pitch in far),
+                      sorted(set(far))[:8])
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -444,6 +533,9 @@ def run(exe, output):
     print()
     print("notes and a mixer move in one proposal, heard whole")
     check_a_mixed_proposal_is_heard_whole(exe, output / "mixed", report)
+    print()
+    print("a shared pattern, and how much of it you actually heard")
+    check_a_shared_pattern_says_how_much_you_heard(exe, output / "shared", report)
 
     print()
     if report.unchecked:
