@@ -385,8 +385,8 @@ def check_a_clip_can_stop_sharing_its_pattern(exe, folder, report):
                       sorted(status["before"]["notes"]) == sorted(status["after"]["notes"]),
                       (len(status["before"]["notes"]), len(status["after"]["notes"])))
         report.expect("the app says so rather than leaving a listener to wonder",
-                      status["same_music_both_halves"] is True,
-                      status.get("same_music_both_halves"))
+                      status["same_notes_both_halves"] is True,
+                      status.get("same_notes_both_halves"))
 
         # Apply, and the sharing is gone without the music moving.
         before_notes = [n["pitch"] for p in tool(project, "inspect_pattern",

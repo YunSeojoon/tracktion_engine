@@ -2043,14 +2043,18 @@ private:
                                // that they are listening to one of the three places this
                                // would change - the difference between what was heard
                                // and what Apply does.
-                               // A real change can be inaudible. Making a clip unique
-                               // breaks the sharing and leaves the music identical, and a
-                               // person who listens, hears nothing and is told nothing
-                               // reasonably concludes the comparison is broken. Read off
-                               // what each half actually played rather than from the kind
-                               // of change, so it is true of anything that turns out this
-                               // way and not only of the case that prompted it.
-                               { "same_music_both_halves",
+                               // A real change can leave the notes alone. Making a clip
+                               // unique breaks the sharing and plays exactly the same
+                               // music; adding a reverb plays the same notes and sounds
+                               // different. So this says the one thing the app actually
+                               // knows - that both halves played the same notes - and not
+                               // that they sound the same, which it cannot know and which
+                               // an earlier name for this field wrongly implied.
+                               //
+                               // It is still worth saying: a person who hears no
+                               // difference needs to know whether that is the change
+                               // being silent or the comparison being broken.
+                               { "same_notes_both_halves",
                                  ! running && preview.beforeNotes == preview.afterNotes },
                                { "changes_places", preview.placesChanged },
                                { "places_in_this_stretch", preview.placesHeard },
@@ -2091,6 +2095,7 @@ private:
                                                   {
                                                       proposal->applyNotesTo (copy);
                                                       proposal->applyClipsTo (copy);
+                                                      proposal->applyEffectsTo (copy);
                                                   },
                                                   [this, proposal] (live::Model& copy)
                                                   {

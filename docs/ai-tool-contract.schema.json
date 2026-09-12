@@ -519,7 +519,8 @@
         "clips_moved",
         "clips_added",
         "clips_removed",
-        "clips_made_unique"
+        "clips_made_unique",
+        "chain_changes"
       ],
       "properties": {
         "id": {
@@ -590,6 +591,10 @@
         "clips_made_unique": {
           "type": "integer",
           "minimum": 0
+        },
+        "chain_changes": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -599,7 +604,8 @@
       "required": [
         "notes",
         "parameters",
-        "clips"
+        "clips",
+        "chain"
       ],
       "properties": {
         "notes": {
@@ -789,6 +795,79 @@
               }
             },
             "description": "A placement moved, copied, taken out, or given its own copy of the pattern it was sharing. Only a move and a copy have a destination; a removal and a make_unique carry no start_beat and no lane, because saying where a clip goes when it is not going anywhere would be a request that contradicts itself."
+          }
+        },
+        "chain": {
+          "description": "What would change about an insert's chain. Only the fields that apply to each kind are present: an add names a type, a send or unsend names a target, and the rest name the effect.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "what",
+              "insert"
+            ],
+            "properties": {
+              "what": {
+                "enum": [
+                  "add",
+                  "remove",
+                  "move",
+                  "bypass",
+                  "send",
+                  "unsend"
+                ]
+              },
+              "insert": {
+                "$ref": "#/$defs/stableId"
+              },
+              "effect": {
+                "$ref": "#/$defs/stableId"
+              },
+              "type": {
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/stableId"
+              },
+              "name": {
+                "type": "string"
+              },
+              "level": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "position": {
+                "type": "object",
+                "required": [
+                  "was",
+                  "now"
+                ],
+                "properties": {
+                  "was": {
+                    "type": "integer"
+                  },
+                  "now": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "bypassed": {
+                "type": "object",
+                "required": [
+                  "was",
+                  "now"
+                ],
+                "properties": {
+                  "was": {
+                    "type": "boolean"
+                  },
+                  "now": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
           }
         }
       }

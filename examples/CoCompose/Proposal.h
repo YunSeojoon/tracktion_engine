@@ -79,6 +79,47 @@ struct ClipChange
     }
 };
 
+/** Changing an insert's chain: what is on it, in what order, and what it feeds.
+
+    Effects and sends live in the project tree - the plugins on the bus are derived from
+    it - so a preview copy that edits the tree and re-derives builds the real chain, the
+    same way it builds clips. That is what made these the last kinds to open rather than
+    the impossible ones.
+
+    Scope is the insert attachment, which a person makes by attaching a mixer insert.
+    An insert nobody attached is refused however precisely it is named. */
+struct EffectChange
+{
+    enum class What { add, remove, move, bypass, send, unsend };
+
+    What what = What::add;
+    String insertID;        // whose chain
+    String effectID;        // which effect, for remove/move/bypass
+    String effectType;      // which kind, for add
+    String targetID;        // which insert to feed, for send/unsend
+    int toIndex = -1;       // where in the chain, for move and for add
+    bool on = false;        // for bypass
+    double level = 0.0;     // for send
+
+    // What it is now, so a person reads both sides.
+    String wasName;
+    int wasIndex = -1;
+    bool wasBypassed = false;
+
+    static String whatName (What w)
+    {
+        switch (w)
+        {
+            case What::remove: return "remove";
+            case What::move:   return "move";
+            case What::bypass: return "bypass";
+            case What::send:   return "send";
+            case What::unsend: return "unsend";
+            default:           return "add";
+        }
+    }
+};
+
 struct ParameterChange
 {
     String ownerID;     // the channel or insert whose plugin this is
@@ -139,6 +180,7 @@ struct Proposal
     std::vector<NoteChange> notes;
     std::vector<ParameterChange> parameters;
     std::vector<ClipChange> clips;
+    std::vector<EffectChange> effects;
 
     /** How many places in the song this pattern is played. A note change edits the
         pattern, so it is heard everywhere the pattern is placed - and the person has to
@@ -284,6 +326,85 @@ struct Proposal
         return done;
     }
 
+    /** The chain changes, on a detached copy of the tree.
+
+        The plugins on a bus are derived from these, so a copy that is re-derived after
+        this builds the chain this describes - which is why a comparison can include an
+        effect being added, and why it had to before the kind could be offered. */
+    int applyEffectsTo (ValueTree coCompose) const
+    {
+        auto mixer = coCompose.getChildWithName (ids::MIXER);
+        if (! mixer.isValid())
+            return 0;
+
+        auto done = 0;
+
+        for (const auto& change : effects)
+        {
+            ValueTree insert;
+            for (auto one : mixer)
+                if (Model::uidOf (one) == change.insertID)
+                    insert = one;
+
+            if (! insert.isValid())
+                continue;
+
+            if (change.what == EffectChange::What::add)
+            {
+                ValueTree effect (ids::EFFECT);
+                effect.setProperty (ids::uid, Uuid().toString(), nullptr);
+                effect.setProperty (ids::type, change.effectType, nullptr);
+                effect.setProperty (ids::bypass, false, nullptr);
+                effect.setProperty (ids::wet, 1.0, nullptr);
+                insert.appendChild (effect, nullptr);
+                ++done;
+                continue;
+            }
+
+            if (change.what == EffectChange::What::send)
+            {
+                ValueTree send (ids::SEND);
+                send.setProperty (ids::uid, Uuid().toString(), nullptr);
+                send.setProperty (ids::target, change.targetID, nullptr);
+                send.setProperty (ids::level, change.level, nullptr);
+                insert.appendChild (send, nullptr);
+                ++done;
+                continue;
+            }
+
+            for (int i = insert.getNumChildren(); --i >= 0;)
+            {
+                auto child = insert.getChild (i);
+
+                if (change.what == EffectChange::What::unsend)
+                {
+                    if (child.hasType (ids::SEND) && child[ids::target].toString() == change.targetID)
+                    {
+                        insert.removeChild (i, nullptr);
+                        ++done;
+                        break;
+                    }
+                    continue;
+                }
+
+                if (! child.hasType (ids::EFFECT) || Model::uidOf (child) != change.effectID)
+                    continue;
+
+                if (change.what == EffectChange::What::remove)
+                    insert.removeChild (i, nullptr);
+                else if (change.what == EffectChange::What::bypass)
+                    child.setProperty (ids::bypass, change.on, nullptr);
+                else
+                    insert.moveChild (i, change.toIndex, nullptr);
+
+                ++done;
+                break;
+            }
+        }
+
+        return done;
+    }
+
     /** The other half, on a copy's plugins rather than a copy's tree.
 
         `copy` is a model wrapper over the Edit the render will run, so this reaches its
@@ -345,6 +466,7 @@ struct Proposal
                          { "clips_added", countClips (ClipChange::What::copy) },
                          { "clips_removed", countClips (ClipChange::What::remove) },
                          { "clips_made_unique", countClips (ClipChange::What::makeUnique) },
+                         { "chain_changes", static_cast<int> (effects.size()) },
                          { "placements", placements },
                          { "keeps", keeps.toJson() } });
     }

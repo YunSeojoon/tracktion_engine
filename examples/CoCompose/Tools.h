@@ -142,7 +142,9 @@ public:
                                   // offering something that cannot be previewed means
                                   // offering a change nobody can hear before taking it.
                                   "clip.start_beat", "clip.lane", "clip.copy", "clip.remove",
-                                  "clip.make_unique" })
+                                  "clip.make_unique",
+                                  "effect.add", "effect.remove", "effect.move",
+                                  "effect.bypass", "send.add", "send.remove" })
             writeKinds.add (name);
 
         return object ({
@@ -157,8 +159,11 @@ public:
                        "another place, taken out, or given its own copy of the pattern it "
                        "shares. A copy of a clip points at the same pattern, so the two are "
                        "one part played twice; making one unique is the opposite, and on "
-                       "its own it changes nothing anybody can hear. Effects and routing "
-                       "are not proposable in this build." },
+                       "its own it changes nothing anybody can hear. On an insert that was "
+                       "attached, an effect can be added, removed, reordered or bypassed, "
+                       "and a send added or removed; only effects this machine has are "
+                       "accepted, and a send that would feed a signal back into itself is "
+                       "refused." },
             { "units", object ({ { "time", "quarter-note beats, ranges are [start_beat, end_beat)" },
                                  { "pitch", "MIDI note number, 0-127" },
                                  { "velocity", "1-127" },
@@ -484,7 +489,12 @@ private:
             for (const auto& entry : *arguments["clips"].getArray())
                 proposal.clips.push_back (readClipChange (entry, proposal));
 
-        if (proposal.notes.empty() && proposal.parameters.empty() && proposal.clips.empty())
+        if (arguments["chain"].isArray())
+            for (const auto& entry : *arguments["chain"].getArray())
+                proposal.effects.push_back (readEffectChange (entry, proposal));
+
+        if (proposal.notes.empty() && proposal.parameters.empty() && proposal.clips.empty()
+             && proposal.effects.empty())
             throw ToolError (tools::errors::invalidArgument, "A proposal must change something");
 
         checkKeeps (proposal);
@@ -619,6 +629,53 @@ private:
             }
         }
 
+        // Chain changes are tree edits too, so they join the same transaction.
+        for (const auto& change : proposal.effects)
+        {
+            auto insert = model.insertFor (change.insertID);
+            if (! insert.isValid())
+                continue;
+
+            if (change.what == EffectChange::What::add)
+            {
+                model.addEffect (insert, change.effectType, &undo);
+            }
+            else if (change.what == EffectChange::What::send)
+            {
+                model.addSend (insert, change.targetID, change.level, &undo);
+            }
+            else
+            {
+                for (int i = insert.getNumChildren(); --i >= 0;)
+                {
+                    auto child = insert.getChild (i);
+
+                    if (change.what == EffectChange::What::unsend)
+                    {
+                        if (child.hasType (ids::SEND)
+                             && child[ids::target].toString() == change.targetID)
+                        {
+                            insert.removeChild (i, &undo);
+                            break;
+                        }
+                        continue;
+                    }
+
+                    if (! child.hasType (ids::EFFECT) || Model::uidOf (child) != change.effectID)
+                        continue;
+
+                    if (change.what == EffectChange::What::remove)
+                        insert.removeChild (i, &undo);
+                    else if (change.what == EffectChange::What::bypass)
+                        child.setProperty (ids::bypass, change.on, &undo);
+                    else
+                        insert.moveChild (i, change.toIndex, &undo);
+
+                    break;
+                }
+            }
+        }
+
         // A parameter's playback value does not live in the tree, so setting it would
         // fall outside the transaction the notes went into and the one Undo the person
         // is promised would leave it behind. It goes in as an action instead.
@@ -637,6 +694,129 @@ private:
         return object ({ { "applied", true },
                          { "proposal", proposal.summary() },
                          { "undo_description", undo.getUndoDescription() } });
+    }
+
+    /** One change to an insert's chain, checked before it is kept.
+
+        The plugins are derived from the tree, so all of this is a tree edit - but what
+        the tree may say is not everything a caller might ask for. An effect has to be
+        one this machine actually has, a send has to point somewhere that exists and
+        must not close a loop, and an index has to be inside the chain. */
+    EffectChange readEffectChange (const var& entry, const Proposal& proposal) const
+    {
+        EffectChange change;
+        change.insertID = entry["insert"].toString();
+
+        if (! proposal.allowedInserts.contains (change.insertID))
+            throw ToolError (tools::errors::outOfScope,
+                             proposal.allowedInserts.isEmpty()
+                               ? String ("No insert was attached, so no chain may be changed")
+                               : "Insert " + change.insertID + " was not part of what was attached");
+
+        auto insert = model.insertFor (change.insertID);
+        if (! insert.isValid())
+            throw ToolError (tools::errors::notFound, "No such insert: " + change.insertID);
+
+        const auto what = entry["what"].toString();
+        if (what == "add")         change.what = EffectChange::What::add;
+        else if (what == "remove") change.what = EffectChange::What::remove;
+        else if (what == "move")   change.what = EffectChange::What::move;
+        else if (what == "bypass") change.what = EffectChange::What::bypass;
+        else if (what == "send")   change.what = EffectChange::What::send;
+        else if (what == "unsend") change.what = EffectChange::What::unsend;
+        else
+            throw ToolError (tools::errors::invalidArgument,
+                             "A chain change's \"what\" must be add, remove, move, bypass, "
+                             "send or unsend, not \"" + what + "\"");
+
+        // How many effects are on this chain now, which is what an index is measured
+        // against and what a removal is taken from.
+        StringArray onTheChain;
+        for (auto child : insert)
+            if (child.hasType (ids::EFFECT))
+                onTheChain.add (Model::uidOf (child));
+
+        if (change.what == EffectChange::What::add)
+        {
+            change.effectType = entry["type"].toString();
+
+            // Only what is actually here. A model naming a plugin this machine does not
+            // have would otherwise produce a chain with a hole in it, discovered when
+            // somebody presses play.
+            auto known = false;
+            for (const auto& available : model.availableEffects())
+                if (available.first == change.effectType)
+                    known = true;
+
+            if (! known)
+                throw ToolError (tools::errors::notFound,
+                                 "No effect of that kind is installed: " + change.effectType);
+
+            change.wasIndex = onTheChain.size();
+            return change;
+        }
+
+        if (change.what == EffectChange::What::send || change.what == EffectChange::What::unsend)
+        {
+            change.targetID = entry["target"].toString();
+
+            if (! model.insertFor (change.targetID).isValid())
+                throw ToolError (tools::errors::notFound, "No such insert: " + change.targetID);
+
+            if (change.targetID == change.insertID)
+                throw ToolError (tools::errors::invalidArgument, "An insert cannot send to itself");
+
+            if (change.what == EffectChange::What::send)
+            {
+                // A signal that reaches its own input does not get quieter. The app
+                // already refuses this from its own menu; a proposal is refused for the
+                // same reason and by the same test.
+                if (model.wouldFeedBack (change.insertID, change.targetID))
+                    throw ToolError (tools::errors::invalidArgument,
+                                     "That send would feed the signal back into itself");
+
+                change.level = entry.hasProperty ("level") ? number (entry, "level") : 0.25;
+
+                if (change.level < 0.0 || change.level > 1.0)
+                    throw ToolError (tools::errors::invalidArgument,
+                                     "A send level is between 0 and 1");
+            }
+
+            return change;
+        }
+
+        change.effectID = entry["effect"].toString();
+        change.wasIndex = onTheChain.indexOf (change.effectID);
+
+        if (change.wasIndex < 0)
+            throw ToolError (tools::errors::notFound,
+                             "No such effect on that insert: " + change.effectID);
+
+        for (auto child : insert)
+            if (Model::uidOf (child) == change.effectID)
+            {
+                change.wasName = model.effectName (child[ids::type].toString());
+                change.wasBypassed = static_cast<bool> (child[ids::bypass]);
+            }
+
+        if (change.what == EffectChange::What::bypass)
+        {
+            change.on = static_cast<bool> (entry.getProperty ("on", true));
+            return change;
+        }
+
+        if (change.what == EffectChange::What::move)
+        {
+            change.toIndex = wholeNumber (entry, "to");
+
+            if (change.toIndex < 0 || change.toIndex >= onTheChain.size())
+                throw ToolError (tools::errors::invalidArgument,
+                                 "There is no position " + String (change.toIndex)
+                                   + " on that chain; it has " + String (onTheChain.size())
+                                   + " effect(s)");
+        }
+
+        return change;
     }
 
     /** One placement move, checked against what was attached and against the shape of
@@ -987,6 +1167,36 @@ private:
             clips.add (entry);
         }
 
+        Array<var> chain;
+        for (const auto& change : proposal.effects)
+        {
+            auto entry = object ({ { "what", EffectChange::whatName (change.what) },
+                                   { "insert", change.insertID } });
+            auto* fields = entry.getDynamicObject();
+
+            if (change.what == EffectChange::What::add)
+                fields->setProperty ("type", change.effectType);
+            else if (change.what == EffectChange::What::send
+                      || change.what == EffectChange::What::unsend)
+                fields->setProperty ("target", change.targetID);
+            else
+                fields->setProperty ("effect", change.effectID);
+
+            if (change.wasName.isNotEmpty())
+                fields->setProperty ("name", change.wasName);
+
+            if (change.what == EffectChange::What::move)
+                fields->setProperty ("position", object ({ { "was", change.wasIndex },
+                                                           { "now", change.toIndex } }));
+            else if (change.what == EffectChange::What::bypass)
+                fields->setProperty ("bypassed", object ({ { "was", change.wasBypassed },
+                                                           { "now", change.on } }));
+            else if (change.what == EffectChange::What::send)
+                fields->setProperty ("level", change.level);
+
+            chain.add (entry);
+        }
+
         for (const auto& change : proposal.parameters)
             parameters.add (object ({ { "owner", change.ownerID },
                                       { "plugin", change.pluginID },
@@ -994,7 +1204,8 @@ private:
                                       { "was", change.wasValue },
                                       { "now", change.value } }));
 
-        return object ({ { "notes", notes }, { "parameters", parameters }, { "clips", clips } });
+        return object ({ { "notes", notes }, { "parameters", parameters },
+                         { "clips", clips }, { "chain", chain } });
     }
 
     /** A clip, and what is actually played in it.

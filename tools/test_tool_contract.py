@@ -115,7 +115,9 @@ def run(exe, output):
                           "note.velocity", "note.add", "note.remove",
                           "parameter.value",
                           "clip.start_beat", "clip.lane", "clip.copy", "clip.remove",
-                          "clip.make_unique"]),
+                          "clip.make_unique",
+                          "effect.add", "effect.remove", "effect.move", "effect.bypass",
+                          "send.add", "send.remove"]),
                       caps["result"]["writes"])
         report.expect("audio is declared unavailable rather than left unsaid",
                       caps["result"]["audio"]["can_send_audio"] is False)
@@ -247,8 +249,8 @@ def run(exe, output):
         made = tool(project, "get_proposal", {"proposal": pitched["proposal"]["id"]})
         ok, why = valid_against(made["result"]["diff"], "proposalDiff")
         report.expect("and its diff matches the published diff shape", ok, why)
-        report.expect("the diff always names all three kinds, empty or not",
-                      set(made["result"]["diff"]) == {"notes", "parameters", "clips"},
+        report.expect("the diff always names every kind, empty or not",
+                      set(made["result"]["diff"]) == {"notes", "parameters", "clips", "chain"},
                       sorted(made["result"]["diff"]))
 
         levelled = recipes.tidy_velocity(project, pattern=pattern_id, channel=channel_id,
