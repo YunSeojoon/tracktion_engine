@@ -652,6 +652,33 @@ def check_every_target_has_a_menu_and_opening_it_changes_nothing(exe, folder, re
                       len(session.settled()["playlist"]["clips"]) == clips_before,
                       len(session.settled()["playlist"]["clips"]))
 
+        # The knob's own menu offers a number to type and a default to go back to.
+        # Neither happens until something is chosen, and the value must not move by the
+        # menu being opened - which is the one target where opening could plausibly
+        # change something, since the gesture lands on a control that holds a value.
+        gain_before = state["mixer"]["inserts"][0]["gain_db"]
+        right_click({"right_click": ["knob", insert_id]}, "a mixer fader")
+        report.expect("and the fader has not moved",
+                      session.settled()["mixer"]["inserts"][0]["gain_db"] == gain_before,
+                      (gain_before, session.settled()["mixer"]["inserts"][0]["gain_db"]))
+
+        # The note menu, in the piano roll.
+        session.run([{"command": "Piano roll"}])
+        time.sleep(0.5)
+        # A name of its own: "notes_before" is already taken above for a count of
+        # sequences, and reusing it made the later check compare a different thing
+        # against a different thing and fail for no reason anybody could see.
+        def note_count():
+            return len(tool(project, "inspect_pattern",
+                            {"pattern": state["patterns"][0]["id"],
+                             "channel": state["channels"][0]["id"]}
+                            )["result"]["parts"][0]["notes"])
+
+        notes_in_the_part = note_count()
+        right_click({"right_click": ["note", 60, 0.0]}, "the note grid")
+        report.expect("and right-clicking the note grid drew no note",
+                      note_count() == notes_in_the_part, notes_in_the_part)
+
         right_click({"right_click": ["channel", 0]}, "a channel header")
         right_click({"right_click": ["effect", insert_id, 0]}, "an effect in the chain")
         right_click({"right_click": ["effect", insert_id, -1]}, "the empty part of a chain")

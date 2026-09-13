@@ -290,6 +290,272 @@ def check_a_send_cannot_close_a_loop(exe, folder, report):
         session.close()
 
 
+def check_a_send_to_somewhere_already_fed_is_not_a_second_send(exe, folder, report):
+    """review-v5 R1: the comparison and the apply disagreed about an existing send.
+
+    Applying a send to a target this insert already feeds changes the level of the send
+    that is there. The preview copy appended a new one without looking, so a comparison
+    played the signal twice where applying would play it once - heard one thing, got
+    another, which is the failure the whole preview path exists to prevent.
+
+    No check had a place for it, which is why twelve suites passing did not refute it."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        state = session.settled()
+        source = state["mixer"]["inserts"][0]["id"]
+        target = "a-bus"
+
+        def a_bus_and_a_send(live):
+            live["mixer"]["inserts"].append(
+                {"id": target, "index": 2, "name": "A bus", "gain_db": 0.0, "pan": 0.0,
+                 "mute": False, "output": "master", "effects": [], "sends": []})
+            live["mixer"]["inserts"][0]["sends"] = [
+                {"id": "the-one-already-there", "target": target, "level": 0.2}]
+
+        apply_change(project, a_bus_and_a_send)
+        time.sleep(1.0)
+        state = session.settled()
+
+        sends = state["mixer"]["inserts"][0].get("sends", [])
+        report.expect("there is already a send to that bus", len(sends) == 1, sends)
+        if len(sends) != 1:
+            return
+
+        revision = read(folder / "sync-status.json")["revision"]
+        made = tool(project, "create_proposal", {
+            "description": "AI: more of it", "base_revision": revision,
+            "allowed_inserts": [source],
+            "chain": [{"what": "send", "insert": source, "target": target, "level": 0.8}]})
+        report.expect("changing the level of an existing send is offered",
+                      made["status"] == "ok", made.get("error", {}).get("message", ""))
+        if made["status"] != "ok":
+            return
+
+        (folder / "preview-status.json").unlink(missing_ok=True)
+        session.run([{"preview": [made["result"]["proposal"]["id"], 0.0, 8.0]}])
+        heard = wait_for(lambda: (read(folder / "preview-status.json")
+                                  if (folder / "preview-status.json").exists()
+                                  and read(folder / "preview-status.json").get("running") is False
+                                  else None),
+                         timeout=240, what="the comparison to finish")
+        report.expect("a comparison was rendered", heard["after"]["exists"])
+
+        tool(project, "apply_proposal", {"proposal": made["result"]["proposal"]["id"]})
+        applied = session.settled()
+        now = applied["mixer"]["inserts"][0].get("sends", [])
+
+        # This is the whole finding: one send, at the new level, on both sides of the
+        # comparison. Two would mean the copy had been fed twice.
+        report.expect("applying it leaves one send, not two", len(now) == 1, now)
+        report.expect("and it is the one that was there, at the new level",
+                      len(now) == 1 and abs(now[0]["level"] - 0.8) < 1.0e-6, now)
+    finally:
+        session.close()
+
+
+def check_a_loop_through_a_send_is_refused_too(exe, folder, report):
+    """review-v5 R2: the cycle check followed outputs and ignored sends.
+
+    A send is a path audio travels. With A already sending to B, routing B to A closes
+    a loop out of one output and one send - and neither step looks wrong on its own,
+    which is exactly why the check has to walk both."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        state = session.settled()
+        a = state["mixer"]["inserts"][0]["id"]
+        b = "the-other-one"
+
+        def a_send_from_a_to_b(live):
+            live["mixer"]["inserts"].append(
+                {"id": b, "index": 2, "name": "B", "gain_db": 0.0, "pan": 0.0,
+                 "mute": False, "output": "master", "effects": [], "sends": []})
+            live["mixer"]["inserts"][0]["sends"] = [
+                {"id": "a-to-b", "target": b, "level": 0.3}]
+
+        apply_change(project, a_send_from_a_to_b)
+        time.sleep(1.0)
+        state = session.settled()
+        report.expect("A already sends to B",
+                      any(x["target"] == b for x in state["mixer"]["inserts"][0].get("sends", [])),
+                      state["mixer"]["inserts"][0].get("sends", []))
+
+        revision = read(folder / "sync-status.json")["revision"]
+        closing = tool(project, "create_proposal", {
+            "description": "AI: and back again", "base_revision": revision,
+            "allowed_inserts": [b],
+            "chain": [{"what": "send", "insert": b, "target": a, "level": 0.3}]})
+
+        report.expect("a loop closed through a send is refused",
+                      closing["status"] == "error"
+                      and closing["error"]["code"] == "INVALID_ARGUMENT",
+                      closing.get("error", {}))
+        report.expect("and nothing was routed",
+                      read(folder / "sync-status.json")["revision"] == revision)
+    finally:
+        session.close()
+
+
+def check_one_proposal_cannot_close_a_loop_with_its_own_changes(exe, folder, report):
+    """review-v5 R2, the second half: two changes that are each innocent alone.
+
+    Every chain item was measured against the music as it stands. That is right for one
+    change and wrong for two: a proposal carrying A to B and B to A has each half look
+    fine against a model where the other half has not happened yet, so the loop is
+    assembled by the very write that was supposed to refuse it."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        state = session.settled()
+        a = state["mixer"]["inserts"][0]["id"]
+        b = "second-bus"
+
+        def a_second_bus(live):
+            live["mixer"]["inserts"].append(
+                {"id": b, "index": 2, "name": "B", "gain_db": 0.0, "pan": 0.0,
+                 "mute": False, "output": "master", "effects": [], "sends": []})
+
+        apply_change(project, a_second_bus)
+        time.sleep(1.0)
+        session.settled()
+
+        revision = read(folder / "sync-status.json")["revision"]
+        both = tool(project, "create_proposal", {
+            "description": "AI: round and round", "base_revision": revision,
+            "allowed_inserts": [a, b],
+            "chain": [{"what": "send", "insert": a, "target": b, "level": 0.3},
+                      {"what": "send", "insert": b, "target": a, "level": 0.3}]})
+
+        report.expect("two sends that close a loop between them are refused",
+                      both["status"] == "error"
+                      and both["error"]["code"] == "INVALID_ARGUMENT",
+                      both.get("error", {}))
+        report.expect("and the refusal says it is the changes taken together",
+                      "together" in both.get("error", {}).get("message", ""),
+                      both.get("error", {}).get("message", ""))
+        report.expect("nothing was routed",
+                      read(folder / "sync-status.json")["revision"] == revision)
+
+        # And a pair that does not close a loop is still allowed: a check that refuses
+        # everything would pass the test above and be useless.
+        fine = tool(project, "create_proposal", {
+            "description": "AI: both to the bus", "base_revision": revision,
+            "allowed_inserts": [a, b],
+            "chain": [{"what": "send", "insert": a, "target": b, "level": 0.3},
+                      {"what": "add", "insert": b, "type": "reverb"}]})
+        report.expect("a proposal that does not close a loop is still offered",
+                      fine["status"] == "ok", fine.get("error", {}).get("message", ""))
+
+        if fine["status"] == "ok":
+            tool(project, "apply_proposal", {"proposal": fine["result"]["proposal"]["id"]})
+            after = session.settled()
+            report.expect("applying it routes and adds",
+                          any(x["target"] == b for x in after["mixer"]["inserts"][0].get("sends", []))
+                          and len(chain_of(project, b)) == 1,
+                          (after["mixer"]["inserts"][0].get("sends", []), chain_of(project, b)))
+
+            control(project, "undo")
+            time.sleep(1.0)
+            back = session.settled()
+            report.expect("and one undo takes back both halves",
+                          not back["mixer"]["inserts"][0].get("sends", [])
+                          and chain_of(project, b) == [],
+                          (back["mixer"]["inserts"][0].get("sends", []), chain_of(project, b)))
+    finally:
+        session.close()
+
+
+def check_an_effect_moves_by_its_place_in_the_chain(exe, folder, report):
+    """review-v5 R3: an effect ordinal is not a child index.
+
+    A chain is counted in effects. An insert's children are effects and sends mixed
+    together. Using one for the other put a move at the wrong place whenever a send sat
+    earlier in the list - in the copy and in the song alike, so the comparison agreed
+    with the apply about something that was wrong in both."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        state = session.settled()
+        mine = state["mixer"]["inserts"][0]["id"]
+
+        # A send FIRST, then two effects: the arrangement that made the ordinals lie.
+        def a_send_then_two_effects(live):
+            live["mixer"]["inserts"].append(
+                {"id": "a-bus", "index": 2, "name": "Bus", "gain_db": 0.0, "pan": 0.0,
+                 "mute": False, "output": "master", "effects": [], "sends": []})
+            live["mixer"]["inserts"][0]["sends"] = [
+                {"id": "the-send", "target": "a-bus", "level": 0.2}]
+            live["mixer"]["inserts"][0]["effects"] = [
+                {"id": "the-delay", "type": "delay", "bypass": False, "wet": 1.0},
+                {"id": "the-reverb", "type": "reverb", "bypass": False, "wet": 1.0}]
+
+        apply_change(project, a_send_then_two_effects)
+        time.sleep(1.0)
+        session.settled()
+
+        report.expect("the chain starts as delay then reverb, with a send in the list",
+                      chain_of(project, mine) == ["delay", "reverb"], chain_of(project, mine))
+        if chain_of(project, mine) != ["delay", "reverb"]:
+            return
+
+        revision = read(folder / "sync-status.json")["revision"]
+        made = tool(project, "create_proposal", {
+            "description": "AI: reverb first", "base_revision": revision,
+            "allowed_inserts": [mine],
+            "chain": [{"what": "move", "insert": mine, "effect": "the-reverb", "to": 0}]})
+        report.expect("the move is offered", made["status"] == "ok",
+                      made.get("error", {}).get("message", ""))
+        if made["status"] != "ok":
+            return
+
+        report.expect("the diff promises reverb first",
+                      made["result"]["diff"]["chain"][0]["position"] == {"was": 1, "now": 0},
+                      made["result"]["diff"]["chain"][0])
+
+        tool(project, "apply_proposal", {"proposal": made["result"]["proposal"]["id"]})
+        session.settled()
+        report.expect("and the chain is what the diff promised, send or no send",
+                      chain_of(project, mine) == ["reverb", "delay"], chain_of(project, mine))
+
+        report.expect("the send is still there",
+                      len(session.settled()["mixer"]["inserts"][0].get("sends", [])) == 1,
+                      session.settled()["mixer"]["inserts"][0].get("sends", []))
+
+        control(project, "undo")
+        time.sleep(1.0)
+        session.settled()
+        report.expect("one undo puts the order back",
+                      chain_of(project, mine) == ["delay", "reverb"], chain_of(project, mine))
+
+        # And back the other way, from the order a send still sits in front of.
+        revision = read(folder / "sync-status.json")["revision"]
+        other = tool(project, "create_proposal", {
+            "description": "AI: delay last", "base_revision": revision,
+            "allowed_inserts": [mine],
+            "chain": [{"what": "move", "insert": mine, "effect": "the-delay", "to": 1}]})
+        if other["status"] == "ok":
+            tool(project, "apply_proposal", {"proposal": other["result"]["proposal"]["id"]})
+            session.settled()
+            report.expect("moving the other way lands where it was promised too",
+                          chain_of(project, mine) == ["reverb", "delay"],
+                          chain_of(project, mine))
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -302,6 +568,18 @@ def run(exe, output):
     print()
     print("a send cannot close a loop")
     check_a_send_cannot_close_a_loop(exe, output / "loop", report)
+    print()
+    print("a send to somewhere already fed is the same send, louder")
+    check_a_send_to_somewhere_already_fed_is_not_a_second_send(exe, output / "existing", report)
+    print()
+    print("a loop through a send is refused too")
+    check_a_loop_through_a_send_is_refused_too(exe, output / "sendloop", report)
+    print()
+    print("one proposal cannot close a loop with its own changes")
+    check_one_proposal_cannot_close_a_loop_with_its_own_changes(exe, output / "pairloop", report)
+    print()
+    print("an effect moves by its place in the chain, not among the children")
+    check_an_effect_moves_by_its_place_in_the_chain(exe, output / "ordinals", report)
 
     print()
     if report.unchecked:

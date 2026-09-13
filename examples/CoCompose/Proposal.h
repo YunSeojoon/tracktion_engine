@@ -326,6 +326,26 @@ struct Proposal
         return done;
     }
 
+    /** Where an effect ordinal actually sits among an insert's children.
+
+        A chain is counted in effects - first, second, third - and an insert's children
+        are effects and sends mixed together. Taking one for the other put a move at the
+        wrong place whenever a send sat earlier in the list, and it did so in the copy
+        and in the song alike, so the comparison agreed with the apply about something
+        that was wrong in both. Returns the number of children if the ordinal is past
+        the end, which is the right place for "put it last". */
+    static int childIndexOfEffect (const ValueTree& insert, int effectOrdinal)
+    {
+        auto seen = 0;
+
+        for (int i = 0; i < insert.getNumChildren(); ++i)
+            if (insert.getChild (i).hasType (ids::EFFECT))
+                if (seen++ == effectOrdinal)
+                    return i;
+
+        return insert.getNumChildren();
+    }
+
     /** The chain changes, on a detached copy of the tree.
 
         The plugins on a bus are derived from these, so a copy that is re-derived after
@@ -363,11 +383,30 @@ struct Proposal
 
             if (change.what == EffectChange::What::send)
             {
-                ValueTree send (ids::SEND);
-                send.setProperty (ids::uid, Uuid().toString(), nullptr);
-                send.setProperty (ids::target, change.targetID, nullptr);
-                send.setProperty (ids::level, change.level, nullptr);
-                insert.appendChild (send, nullptr);
+                // Exactly what applying does, including the part that is easy to miss:
+                // a second send to somewhere this insert already feeds is not a second
+                // send, it is the level of the first one changing. Appending without
+                // looking made the comparison play the signal twice where applying
+                // would play it once - the same "heard one thing, got another" this
+                // whole path exists to prevent, reintroduced by me in the copy.
+                auto existing = ValueTree();
+                for (auto child : insert)
+                    if (child.hasType (ids::SEND) && child[ids::target].toString() == change.targetID)
+                        existing = child;
+
+                if (existing.isValid())
+                {
+                    existing.setProperty (ids::level, change.level, nullptr);
+                }
+                else
+                {
+                    ValueTree send (ids::SEND);
+                    send.setProperty (ids::uid, Uuid().toString(), nullptr);
+                    send.setProperty (ids::target, change.targetID, nullptr);
+                    send.setProperty (ids::level, change.level, nullptr);
+                    insert.appendChild (send, nullptr);
+                }
+
                 ++done;
                 continue;
             }
@@ -395,7 +434,7 @@ struct Proposal
                 else if (change.what == EffectChange::What::bypass)
                     child.setProperty (ids::bypass, change.on, nullptr);
                 else
-                    insert.moveChild (i, change.toIndex, nullptr);
+                    insert.moveChild (i, childIndexOfEffect (insert, change.toIndex), nullptr);
 
                 ++done;
                 break;

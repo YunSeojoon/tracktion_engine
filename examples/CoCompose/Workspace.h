@@ -1379,6 +1379,14 @@ public:
         return true;
     }
 
+    /** Right-clicks the fader. Its own menu offers a number to type and a default to
+        go back to, and neither happens until something is chosen. */
+    bool rightClickVolume()
+    {
+        return live::rightClickOn (gain, { (float) gain.getWidth() / 2.0f,
+                                           (float) gain.getHeight() / 2.0f });
+    }
+
     /** Right-clicks the chain where that effect is drawn. A negative index means past
         the last one, which is the gesture that offers "Add effect". */
     bool rightClickChain (int index)
@@ -2810,6 +2818,16 @@ public:
                 && live::rightClickOn (*row, { 8.0f, (float) row->getHeight() / 2.0f });
     }
 
+    /** Right-clicks a mixer strip's volume, which is a knob like any other: the value
+        menu it opens must not move the value by opening. */
+    bool rightClickKnob (const String& insertID)
+    {
+        for (auto* strip : mixer->stripList())
+            if (strip->insertID() == insertID)
+                return strip->rightClickVolume();
+        return false;
+    }
+
     /** The same, on one effect in a mixer strip's chain. */
     bool rightClickEffectSlot (const String& insertID, int index)
     {
@@ -2853,6 +2871,14 @@ public:
     {
         if (auto* editor = pianoRollEditor())
             return editor->clickGrid (pitch, beat);
+        return false;
+    }
+
+    /** The same place, with the other button: the note menu rather than a note. */
+    bool rightClickNoteGrid (int pitch, double beat)
+    {
+        if (auto* editor = pianoRollEditor())
+            return editor->clickGrid (pitch, beat, true);
         return false;
     }
 

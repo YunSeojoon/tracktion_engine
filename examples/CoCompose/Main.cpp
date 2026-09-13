@@ -120,6 +120,13 @@ public:
         workspace.chatPanel().onCancel = [this] { cancelTheQuestion(); };
         workspace.chatPanel().onApply = [this] (const String& proposalID)
                                         { applySuggestedChange (proposalID); };
+        workspace.chatPanel().onPreview = [this] (const String& proposalID)
+                                          { previewFromThePanel (proposalID); };
+        // Picking an earlier suggestion renders it again rather than applying it. Going
+        // back to one is something a person does in order to listen, and an app that
+        // took the choice as "use this" would be deciding for them.
+        workspace.chatPanel().onPickCandidate = [this] (const String& proposalID)
+                                                { previewFromThePanel (proposalID); };
 
         // Target menus reach the same commands the menu bar and the keyboard do, so
         // the three can never mean different things.
@@ -1853,6 +1860,12 @@ private:
         pollControl();
         pollToolRequest();
         followClipsWithNotes();
+
+        // The shelf on screen, beside the suggestion it belongs to. It rebuilds only
+        // when it would look different - a list repopulated every quarter second cannot
+        // be opened, because it closes under the pointer.
+        if (shelf != nullptr)
+            workspace.chatPanel().setCandidates (shelf->snapshot(), project.revision);
         workspace.refresh();
         workspace.store();
         // Some graph rebuilds briefly clear the engine's playing flag. Preserve the
@@ -1904,6 +1917,71 @@ private:
             project.error = e.what();
             say ("I/O error: " + project.error);
         }
+    }
+
+    /** The Preview button. A person pressing it has not been asked for a range and
+        should not be: the proposal knows what it touches, so the stretch to listen to
+        is worked out from that.
+
+        Where the notes are, if it changes notes. Where the clips are, if it moves them.
+        The first eight beats otherwise - a chain change is heard wherever the insert
+        plays, and the beginning is as good a place as any to hear it. */
+    void previewFromThePanel (const String& proposalID)
+    {
+        auto* proposal = toolService->proposalFor (proposalID);
+        if (proposal == nullptr)
+            return;
+
+        auto from = std::numeric_limits<double>::max();
+        auto to = 0.0;
+
+        const auto widen = [&from, &to] (double start, double length)
+        {
+            from = std::min (from, start);
+            to = std::max (to, start + length);
+        };
+
+        for (auto clip : project.model->instances())
+        {
+            const auto start = static_cast<double> (clip[live::ids::start]);
+            const auto length = static_cast<double> (clip[live::ids::length]);
+
+            // A note change is heard everywhere its pattern is played, and a clip change
+            // where that clip is. Both are the same question - which parts of the song
+            // does this reach - so both widen the same range.
+            if (! proposal->notes.empty()
+                 && clip[live::ids::pattern].toString() == proposal->patternID)
+                widen (start, length);
+
+            for (const auto& change : proposal->clips)
+                if (Model::uidOf (clip) == change.clipID)
+                {
+                    widen (start, length);
+                    if (change.startBeat)
+                        widen (*change.startBeat, length);
+                }
+        }
+
+        if (to <= from)
+        {
+            from = 0.0;
+            to = 8.0;
+        }
+
+        // A little either side, so the change is heard in context rather than starting
+        // on top of it, and never before the beginning of the song.
+        from = std::max (0.0, from - 1.0);
+        to = std::min (from + 64.0, to + 1.0);
+
+        if (! startPreview (proposalID, from, to))
+        {
+            workspace.chatPanel().setPreviewState (
+                exporter.isBusy() ? "Something else is rendering; try again in a moment"
+                                  : "That comparison could not be started");
+            return;
+        }
+
+        say ("Rendering both halves. The project keeps playing while you wait.");
     }
 
     /** Starts an A/B: this stretch as it is, and as the proposal would make it.
@@ -2023,6 +2101,16 @@ private:
                                    { "bytes", file.existsAsFile() ? file.getSize() : 0 },
                                    { "notes", notes } });
         };
+
+        // The same words the file carries, in the panel. A person watching the app has
+        // no reason to go looking in a JSON file for whether their comparison is coming.
+        workspace.chatPanel().setPreviewState (
+            preview.stage == Preview::Stage::renderingBefore ? "Rendering it as it is..."
+          : preview.stage == Preview::Stage::renderingAfter  ? "Rendering it as proposed..."
+          : preview.problem.isNotEmpty()                     ? preview.problem
+          : running                                          ? String()
+          : "Both halves are rendered. Listening to them is your part - the files are "
+            "preview-before.wav and preview-after.wav beside the project.");
 
         live::atomicWrite (project.source.getSiblingFile ("preview-status.json"),
                            JSON::toString (live::object ({
@@ -2399,6 +2487,13 @@ private:
 
             if (target == "effect" && what.size() == 3)
                 return workspace.rightClickEffectSlot (what[1].toString(), static_cast<int> (what[2]));
+
+            if (target == "knob")
+                return workspace.rightClickKnob (what[1].toString());
+
+            if (target == "note" && what.size() == 3)
+                return workspace.rightClickNoteGrid (static_cast<int> (what[1]),
+                                                     static_cast<double> (what[2]));
 
             return false;
         }

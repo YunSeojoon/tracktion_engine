@@ -374,17 +374,39 @@ public:
     /** Refuses a routing that would send a signal back into itself. */
     bool wouldFeedBack (const String& fromInsertID, const String& toInsertID) const
     {
+        // Can a signal leaving `to` reach `from` again? That is a question about every
+        // way audio travels, and it used to be asked of only one of them: the walk
+        // followed each insert's output and never looked at its sends. So with A
+        // already sending to B, routing B to A passed a check whose entire job is to
+        // refuse exactly that - the loop was assembled out of one output and one send,
+        // and neither step on its own looked wrong.
+        //
+        // A send is a path. It is walked like one.
         StringArray seen;
-        auto current = toInsertID;
+        StringArray toVisit { toInsertID };
 
-        while (current.isNotEmpty() && current != masterInsert && ! seen.contains (current))
+        while (! toVisit.isEmpty())
         {
+            const auto current = toVisit.strings.getLast();
+            toVisit.remove (toVisit.size() - 1);
+
+            if (current.isEmpty() || current == masterInsert || seen.contains (current))
+                continue;
+
             if (current == fromInsertID)
                 return true;
 
             seen.add (current);
+
             auto insert = insertFor (current);
-            current = insert.isValid() ? insert.getProperty (ids::output, masterInsert).toString() : String();
+            if (! insert.isValid())
+                continue;
+
+            toVisit.add (insert.getProperty (ids::output, masterInsert).toString());
+
+            for (auto child : insert)
+                if (child.hasType (ids::SEND))
+                    toVisit.add (child[ids::target].toString());
         }
 
         return false;

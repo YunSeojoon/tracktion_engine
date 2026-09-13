@@ -493,6 +493,12 @@ private:
             for (const auto& entry : *arguments["chain"].getArray())
                 proposal.effects.push_back (readEffectChange (entry, proposal));
 
+        // Every send this proposal makes, checked together rather than one at a time.
+        // Each item was measured against the music as it stands, which is fine for one
+        // change and wrong for two: a proposal carrying A->B and B->A has each half
+        // look innocent against a model where the other half has not happened yet.
+        refuseIfTheseCloseALoop (proposal);
+
         if (proposal.notes.empty() && proposal.parameters.empty() && proposal.clips.empty()
              && proposal.effects.empty())
             throw ToolError (tools::errors::invalidArgument, "A proposal must change something");
@@ -669,7 +675,8 @@ private:
                     else if (change.what == EffectChange::What::bypass)
                         child.setProperty (ids::bypass, change.on, &undo);
                     else
-                        insert.moveChild (i, change.toIndex, &undo);
+                        insert.moveChild (i, Proposal::childIndexOfEffect (insert, change.toIndex),
+                                          &undo);
 
                     break;
                 }
@@ -694,6 +701,75 @@ private:
         return object ({ { "applied", true },
                          { "proposal", proposal.summary() },
                          { "undo_description", undo.getUndoDescription() } });
+    }
+
+    /** Refuses a proposal whose changes, taken together, close a routing loop.
+
+        Audio leaving an insert travels two ways - the output it is routed to, and every
+        send on it - and a loop can be made of one of each. So the graph is built from
+        the music as it stands, this proposal's sends and unsends are applied to it in
+        the order they were asked for, and then the result is asked the only question
+        that matters: can anything reach itself. */
+    void refuseIfTheseCloseALoop (const Proposal& proposal) const
+    {
+        if (proposal.effects.empty())
+            return;
+
+        // insert id -> everywhere its audio goes.
+        std::map<String, StringArray> goesTo;
+
+        for (auto insert : model.mixer())
+        {
+            const auto id = Model::uidOf (insert);
+            StringArray out { insert.getProperty (ids::output, masterInsert).toString() };
+
+            for (auto child : insert)
+                if (child.hasType (ids::SEND))
+                    out.add (child[ids::target].toString());
+
+            goesTo[id] = out;
+        }
+
+        for (const auto& change : proposal.effects)
+        {
+            if (change.what == EffectChange::What::send)
+                goesTo[change.insertID].addIfNotAlreadyThere (change.targetID);
+            else if (change.what == EffectChange::What::unsend)
+                goesTo[change.insertID].removeString (change.targetID);
+        }
+
+        // Depth-first from each insert this proposal newly feeds from. Only the ones it
+        // touched: a loop that was already in the project is not this proposal's to
+        // refuse, and refusing it here would make an unrelated change impossible.
+        for (const auto& change : proposal.effects)
+        {
+            if (change.what != EffectChange::What::send)
+                continue;
+
+            StringArray seen, toVisit { change.targetID };
+
+            while (! toVisit.isEmpty())
+            {
+                const auto current = toVisit.strings.getLast();
+                toVisit.remove (toVisit.size() - 1);
+
+                if (current.isEmpty() || current == masterInsert || seen.contains (current))
+                    continue;
+
+                if (current == change.insertID)
+                    throw ToolError (tools::errors::invalidArgument,
+                                     "Taken together, the changes in this proposal would feed "
+                                     "the signal from insert " + change.insertID
+                                       + " back into itself");
+
+                seen.add (current);
+
+                const auto found = goesTo.find (current);
+                if (found != goesTo.end())
+                    for (const auto& next : found->second)
+                        toVisit.add (next);
+            }
+        }
     }
 
     /** One change to an insert's chain, checked before it is kept.

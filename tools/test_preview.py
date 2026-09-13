@@ -296,9 +296,28 @@ def check_a_mixer_change_is_in_what_you_hear(exe, folder, report):
         report.expect("and the knob is where the comparison had it",
                       abs(now["value"] - 1.0) < 1.0e-3, now["value"])
 
+        # And now the other direction: a value that lives only inside a plugin has to be
+        # in the next comparison's "as it is" half. A plugin holds its settings and only
+        # writes them into the project now and then, so a copy taken without asking it
+        # to would render the sound as it was before the knob moved - and the person
+        # would be comparing against music that is no longer theirs. This is the same
+        # snapshot path a third-party VST's opaque state travels.
+        (folder / "preview-status.json").unlink(missing_ok=True)
+        session.run([{"preview": [proposal, 0.0, 8.0]}])
+        again = wait_for(finished, timeout=240)
+        report.expect("a second comparison was rendered", again["before"]["exists"])
+
+        wetter = read_wav(folder / "preview-before.wav")
+        report.expect("the next comparison hears the mixer as it now is, not as it was saved",
+                      abs(wetter["rms"] - b["rms"]) < abs(b["rms"]) * 0.05,
+                      (a["rms"], b["rms"], wetter["rms"]))
+
         report.for_a_person("whether the previewed mixer and the applied mixer sound the same",
                             "two renders of the same music are not bit-identical here, so "
                             "the last word is a person's")
+        report.for_a_person("the same with a third-party VST's own saved state",
+                            "the path is the one checked above, but no scanned VST has been "
+                            "through it here; a scan costs half an hour and is not in this suite")
     finally:
         session.close()
 
