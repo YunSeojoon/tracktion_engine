@@ -840,6 +840,38 @@ private:
             });
         }
 
+    public:
+        /** The same as the arrangement: the cursor says which of the two gestures the
+            pointer is on before a person commits to one. This window had no cursor
+            feedback of any kind, not even for the tool. */
+        void mouseMove (const MouseEvent& e) override
+        {
+            setMouseCursor (cursorFor (e.getPosition()));
+        }
+
+        MouseCursor cursorFor (Point<int> position) const
+        {
+            if (position.x < keyboardWidth)
+                return MouseCursor::NormalCursor;
+
+            if (owner.tool == PianoRollEditor::select)
+                if (auto hit = noteAt (position); hit.isValid()
+                      && position.x > noteArea (hit).getRight() - 6)
+                    return MouseCursor::LeftRightResizeCursor;
+
+            return owner.tool == PianoRollEditor::draw ? MouseCursor::CrosshairCursor
+                                                       : MouseCursor::NormalCursor;
+        }
+
+        String cursorNameAt (Point<int> position) const
+        {
+            const auto shown = cursorFor (position);
+            return shown == MouseCursor::LeftRightResizeCursor ? "resize"
+                 : shown == MouseCursor::CrosshairCursor       ? "draw"
+                                                                : "normal";
+        }
+
+    private:
         Rectangle<int> noteArea (ValueTree note) const
         {
             const auto x = keyboardWidth + roundToInt (static_cast<double> (note[ids::start]) * owner.beatWidth());
@@ -1024,6 +1056,22 @@ public:
         const auto x = [this] (double beat) { return (float) (keyboardWidth + roundToInt (beat * beatWidth())); };
 
         return live::dragOn (*grid, { x (fromBeat), y }, { x (toBeat), y }, mods);
+    }
+
+    /** Asks what the cursor would be over a pitch at a beat, the way a check does. */
+    bool cursorIs (int pitch, double beat, const String& expected)
+    {
+        if (grid == nullptr)
+            return false;
+
+        const auto row = (highestNote - jlimit (lowestNote, highestNote, pitch)) * noteHeight;
+        const Point<int> where (keyboardWidth + roundToInt (beat * beatWidth()),
+                                row + noteHeight / 2);
+        const MouseEvent e (Desktop::getInstance().getMainMouseSource(), where.toFloat(),
+                            ModifierKeys(), 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, grid.get(), grid.get(),
+                            Time::getCurrentTime(), where.toFloat(), Time::getCurrentTime(), 1, false);
+        grid->mouseMove (e);
+        return grid->cursorNameAt (where) == expected;
     }
 
     StringArray selectedNotes() const { return selected; }

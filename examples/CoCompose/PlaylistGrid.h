@@ -62,10 +62,7 @@ public:
 
         // A tool that acts on a click has to be visible before the click. The cursor is
         // the only thing a person is already looking at when they are about to press.
-        setMouseCursor (which == erase  ? MouseCursor::PointingHandCursor
-                      : which == split_ ? MouseCursor::IBeamCursor
-                      : which == draw   ? MouseCursor::CrosshairCursor
-                                        : MouseCursor::NormalCursor);
+        setMouseCursor (cursorFor (getMouseXYRelative()));
         repaint();
     }
     Tool getTool() const { return tool; }
@@ -320,6 +317,58 @@ public:
             copySelection();
         captureStarts();
         notify();
+    }
+
+    /** What pressing here would do, said before it is done.
+
+        Moving a clip and changing its length are the same gesture a few pixels apart,
+        and until now nothing said which one the pointer was on. A person found out by
+        doing it. */
+    void mouseMove (const MouseEvent& e) override
+    {
+        setMouseCursor (cursorFor (e.getPosition()));
+    }
+
+    MouseCursor cursorFor (Point<int> position) const
+    {
+        if (position.y < rulerHeight || position.x < laneWidth || curveIndexAt (position.y) >= 0)
+            return MouseCursor::NormalCursor;
+
+        if (tool == select)
+            if (auto hit = clipAt (position); hit.isValid()
+                  && position.x > clipArea (hit).getRight() - 7)
+                return MouseCursor::LeftRightResizeCursor;
+
+        return tool == erase  ? MouseCursor::PointingHandCursor
+             : tool == split_ ? MouseCursor::IBeamCursor
+             : tool == draw   ? MouseCursor::CrosshairCursor
+                              : MouseCursor::NormalCursor;
+    }
+
+    /** The name a check can compare. Names, not numbers, because the point of the
+        cursor is what it tells a person. */
+    String cursorNameAt (Point<int> position) const
+    {
+        const auto shown = cursorFor (position);
+        return shown == MouseCursor::LeftRightResizeCursor ? "resize"
+             : shown == MouseCursor::PointingHandCursor    ? "erase"
+             : shown == MouseCursor::IBeamCursor           ? "split"
+             : shown == MouseCursor::CrosshairCursor       ? "draw"
+                                                            : "normal";
+    }
+
+    /** Asks what the cursor would be over a beat in a lane, the way a check does.
+
+        `nudge` shifts the point sideways in pixels, because the edge that means resize
+        is seven pixels wide however far a beat happens to be. A check that named the
+        edge in beats would be asking a different question at every zoom. */
+    bool cursorIs (double beat, int laneIndex, const String& expected, int nudge = 0)
+    {
+        const Point<int> where (xForBeat (beat) + nudge,
+                                rulerHeight + laneIndex * laneHeight + laneHeight / 2);
+        mouseMove (pointerEvent (where.toFloat(), where.toFloat(),
+                                 ModifierKeys(), false));
+        return cursorNameAt (where) == expected;
     }
 
     void mouseDrag (const MouseEvent& e) override

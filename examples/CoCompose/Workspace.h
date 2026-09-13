@@ -2942,6 +2942,14 @@ public:
         return false;
     }
 
+    /** What the note grid's cursor would be over a pitch at a beat. */
+    bool noteCursorIs (int pitch, double beat, const String& expected)
+    {
+        if (auto* editor = pianoRollEditor())
+            return editor->cursorIs (pitch, beat, expected);
+        return false;
+    }
+
     /** Drags a note across the grid, optionally holding a modifier. */
     bool dragNoteOnGrid (int pitch, double fromBeat, double toBeat, const String& holding)
     {

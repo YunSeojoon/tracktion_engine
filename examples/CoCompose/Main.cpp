@@ -2767,6 +2767,28 @@ private:
 
         // A note dragged across the grid: [pitch, from beat, to beat] and optionally
         // a modifier to hold ("ctrl", "alt", "shift").
+        // What the pointer would say it is about to do, which is the only warning a
+        // person gets before a move turns out to be a resize.
+        // [beat, lane, name] on the arrangement, [pitch, beat, name] on the note grid.
+        if (action.hasProperty ("cursor"))
+        {
+            const auto ask = action["cursor"];
+            return ask.isArray() && ask.size() >= 3
+                    && workspace.playlistGrid().cursorIs (static_cast<double> (ask[0]),
+                                                          static_cast<int> (ask[1]),
+                                                          ask[2].toString(),
+                                                          ask.size() > 3 ? static_cast<int> (ask[3]) : 0);
+        }
+
+        if (action.hasProperty ("note_cursor"))
+        {
+            const auto ask = action["note_cursor"];
+            return ask.isArray() && ask.size() == 3
+                    && workspace.noteCursorIs (static_cast<int> (ask[0]),
+                                               static_cast<double> (ask[1]),
+                                               ask[2].toString());
+        }
+
         if (action.hasProperty ("note_drag"))
         {
             const auto drag = action["note_drag"];

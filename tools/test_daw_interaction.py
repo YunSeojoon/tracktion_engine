@@ -867,6 +867,60 @@ def check_ctrl_drag_copies_in_both_windows(exe, folder, report):
         session.close()
 
 
+def check_the_cursor_says_what_the_press_will_do(exe, folder, report):
+    """W1: "커서와 미리 표시로 결과를 예상할 수 있다".
+
+    Moving a clip and changing its length are the same gesture a few pixels apart. The
+    arrangement changed the cursor for the tool held but not for the edge under the
+    pointer, and the note grid changed it for nothing at all - so in both windows the
+    way to find out which gesture you were on was to make it and look."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        state = session.settled()
+        clip = state["playlist"]["clips"][0]
+        start, length = clip["start"], clip["length"]
+
+        session.run([{"grid_tool": "select"}])
+
+        def asks(action):
+            """The action answers true only when the cursor matches, and the runner
+            turns a false answer into an error - so this is the oracle."""
+            try:
+                session.run([action])
+                return True
+            except Exception:
+                return False
+
+        report.expect("over the middle of a clip the cursor is the ordinary one",
+                      asks({"cursor": [start + length / 2.0, 0, "normal"]}))
+        # Three pixels in from the right edge. The grab zone is seven pixels wide
+        # whatever a beat is worth on screen, so the check says pixels too.
+        report.expect("over a clip's right-hand edge it says resize",
+                      asks({"cursor": [start + length, 0, "resize", -3]}))
+        report.expect("and the tool still speaks where there is no clip",
+                      asks({"grid_tool": "draw"})
+                      and asks({"cursor": [start + length + 4.0, 0, "draw"]}))
+        session.run([{"grid_tool": "select"}])
+
+        # The note grid, which said nothing at all before.
+        session.run([{"select_channel": 0}, {"note": [72, 0.0, 1.0, 100]}])
+        time.sleep(0.8)
+        session.run([{"piano_tool": "select"}])
+        report.expect("a note's right-hand edge says resize too",
+                      asks({"note_cursor": [72, 0.95, "resize"]}))
+        report.expect("and the middle of a note does not",
+                      asks({"note_cursor": [72, 0.4, "normal"]}))
+        report.expect("Draw says so on the note grid as it does on the arrangement",
+                      asks({"piano_tool": "draw"})
+                      and asks({"note_cursor": [90, 4.0, "draw"]}))
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -912,6 +966,9 @@ def run(exe, output):
     print()
     print("Erase and Split are chosen, not stumbled into")
     check_erase_and_split_are_chosen_not_stumbled_into(exe, output / "destructive", report)
+    print()
+    print("the cursor says what the press will do")
+    check_the_cursor_says_what_the_press_will_do(exe, output / "cursor", report)
     print()
     print("Ctrl+drag copies in both windows")
     check_ctrl_drag_copies_in_both_windows(exe, output / "ctrldrag", report)
