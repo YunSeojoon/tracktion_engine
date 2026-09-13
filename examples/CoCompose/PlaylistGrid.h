@@ -1566,6 +1566,11 @@ private:
             if (auto instance = model.placementFor (clipID); instance.isValid())
                 copies.add (Model::uidOf (copyOf (instance, static_cast<double> (instance[ids::start]))));
         selected = copies;
+
+        // The copy and the move that follows it are one gesture, so they are one step.
+        // Leaving them apart meant Ctrl+drag needed two undos: one to put the copies
+        // back where they started, another to make them go away.
+        dragTransactionOpen = true;
     }
 
     void captureStarts()

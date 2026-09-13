@@ -39,10 +39,9 @@ inline bool rightClickOn (Component& target, Point<float> where)
     The stream is the point. A single move makes a drag indistinguishable from a click
     for anything that only goes wrong across several of them, which is how one drag
     being many undo steps went unseen everywhere it happened. */
-inline bool dragOn (Component& target, Point<float> from, Point<float> to)
+inline bool dragOn (Component& target, Point<float> from, Point<float> to,
+                    ModifierKeys mods = ModifierKeys (ModifierKeys::leftButtonModifier))
 {
-    const ModifierKeys mods (ModifierKeys::leftButtonModifier);
-
     auto at = [&] (Point<float> where, bool dragged)
     {
         return MouseEvent (Desktop::getInstance().getMainMouseSource(), where, mods,

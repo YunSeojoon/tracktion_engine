@@ -813,6 +813,60 @@ def check_one_drag_is_one_undo(exe, folder, report):
         session.close()
 
 
+def check_ctrl_drag_copies_in_both_windows(exe, folder, report):
+    """W1: the same modifier doing the same thing in both editing windows.
+
+    Ctrl+drag copies a clip in the arrangement. It did nothing on a note, though Ctrl
+    was free there - so a person who had learned the gesture in one window found it
+    silently ignored in the other. Unlike Alt, which is deliberately different and is
+    written down, this one had no reason: adding it takes no existing behaviour away.
+
+    One Ctrl+drag is also one undo. The copy and the move that follows it are one
+    gesture, and needing two Ctrl+Z to take back one drag is the same fault as the
+    per-move undo steps, wearing a different hat."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        session.settled()
+        session.run([{"select_channel": 0}, {"note": [72, 0.0, 1.0, 100]}])
+        time.sleep(0.8)
+        here = tool(project, "get_selection")["result"]
+
+        def notes():
+            part = tool(project, "inspect_pattern",
+                        {"pattern": here["pattern"], "channel": here["channel"]})["result"]
+            return [n for p in part["parts"] for n in p["notes"]]
+
+        before = notes()
+        report.expect("there is a note to drag", len(before) >= 1, len(before))
+        if not before:
+            return
+
+        session.run([{"piano_tool": "select"},
+                     {"note_drag": [72, 0.0, 4.0, "ctrl"]}])
+        time.sleep(0.8)
+        after = notes()
+        report.expect("Ctrl+drag on a note leaves a copy behind, as it does on a clip",
+                      len(after) == len(before) + 1, (len(before), len(after)))
+        if len(after) != len(before) + 1:
+            return
+
+        report.expect("and the original stayed where it was",
+                      any(abs(n["start_beat"] - before[0]["start_beat"]) < 1.0e-6
+                          for n in after),
+                      [n["start_beat"] for n in after])
+
+        control(project, "undo")
+        time.sleep(1.0)
+        report.expect("and one undo takes the whole gesture back, not half of it",
+                      len(notes()) == len(before), (len(before), len(notes())))
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -858,6 +912,9 @@ def run(exe, output):
     print()
     print("Erase and Split are chosen, not stumbled into")
     check_erase_and_split_are_chosen_not_stumbled_into(exe, output / "destructive", report)
+    print()
+    print("Ctrl+drag copies in both windows")
+    check_ctrl_drag_copies_in_both_windows(exe, output / "ctrldrag", report)
     print()
     print("one drag is one undo")
     check_one_drag_is_one_undo(exe, output / "onedrag", report)

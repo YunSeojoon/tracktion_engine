@@ -263,6 +263,38 @@ private:
         grid->repaint();
     }
 
+    /** Copies the selection where it stands and selects the copies, so the drag that
+        follows carries them away and leaves the originals behind. What Ctrl+drag does
+        in the arrangement, which is where a person will have learned it.
+
+        Returns whether an undo step is now open, so the drag can join it: the copy and
+        the move are one gesture and taking it back should take one Ctrl+Z, not two. */
+    bool copySelectionInPlace()
+    {
+        if (selected.isEmpty())
+            return false;
+
+        auto notes = sequence();
+        StringArray copies;
+
+        undo().beginNewTransaction ("Copy notes");
+        for (const auto& noteID : selected)
+            if (auto note = Model::withID (notes, ids::NOTE, noteID); note.isValid())
+                copies.add (Model::uidOf (model.addNote (notes,
+                                                         static_cast<int> (note[ids::pitch]),
+                                                         static_cast<double> (note[ids::start]),
+                                                         static_cast<double> (note[ids::length]),
+                                                         static_cast<int> (note[ids::velocity]),
+                                                         &undo())));
+
+        if (copies.isEmpty())
+            return false;
+
+        selected = copies;
+        model.renderIfNeeded();
+        return true;
+    }
+
     void duplicateSelection()
     {
         if (selected.isEmpty())
@@ -570,6 +602,14 @@ private:
             dragMode = e.mods.isAltDown() ? velocity
                      : e.x > area.getRight() - 6 ? resize : move;
             dragAnchor = e.getPosition();
+
+            // Ctrl+drag copies, the way it does in the arrangement. It was missing here
+            // and Ctrl was free on a note, so this adds a rule rather than taking one
+            // away - unlike Alt, which means different things in the two windows on
+            // purpose and is written down instead of reconciled.
+            if (e.mods.isCtrlDown() && dragMode == move)
+                dragTransactionOpen = owner.copySelectionInPlace();
+
             captureStarts();
             owner.preview (static_cast<int> (hit[ids::pitch]));
             repaint();
@@ -962,6 +1002,28 @@ public:
         grid->mouseDown (e);
         grid->mouseUp (e);
         return true;
+    }
+
+    /** Drags a note from one beat to another, optionally holding a modifier.
+
+        clickGrid presses and releases in one place, which cannot show anything that
+        needs the pointer to travel - a copy that only happens on the way, or a gesture
+        that should cost one undo however far it goes. */
+    bool dragNote (int pitch, double fromBeat, double toBeat, const String& holding)
+    {
+        if (grid == nullptr)
+            return false;
+
+        auto mods = ModifierKeys (ModifierKeys::leftButtonModifier);
+        if (holding == "ctrl")  mods = mods.withFlags (ModifierKeys::ctrlModifier);
+        if (holding == "alt")   mods = mods.withFlags (ModifierKeys::altModifier);
+        if (holding == "shift") mods = mods.withFlags (ModifierKeys::shiftModifier);
+
+        const auto row = (highestNote - jlimit (lowestNote, highestNote, pitch)) * noteHeight;
+        const auto y = (float) (row + noteHeight / 2);
+        const auto x = [this] (double beat) { return (float) (keyboardWidth + roundToInt (beat * beatWidth())); };
+
+        return live::dragOn (*grid, { x (fromBeat), y }, { x (toBeat), y }, mods);
     }
 
     StringArray selectedNotes() const { return selected; }

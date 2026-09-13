@@ -2942,6 +2942,14 @@ public:
         return false;
     }
 
+    /** Drags a note across the grid, optionally holding a modifier. */
+    bool dragNoteOnGrid (int pitch, double fromBeat, double toBeat, const String& holding)
+    {
+        if (auto* editor = pianoRollEditor())
+            return editor->dragNote (pitch, fromBeat, toBeat, holding);
+        return false;
+    }
+
     /** The same place, with the other button: the note menu rather than a note. */
     bool rightClickNoteGrid (int pitch, double beat)
     {

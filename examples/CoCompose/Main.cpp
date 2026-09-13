@@ -2765,6 +2765,18 @@ private:
         if (action.hasProperty ("piano_tool"))
             return workspace.setNoteTool (action["piano_tool"].toString());
 
+        // A note dragged across the grid: [pitch, from beat, to beat] and optionally
+        // a modifier to hold ("ctrl", "alt", "shift").
+        if (action.hasProperty ("note_drag"))
+        {
+            const auto drag = action["note_drag"];
+            return drag.isArray() && drag.size() >= 3
+                    && workspace.dragNoteOnGrid (static_cast<int> (drag[0]),
+                                                 static_cast<double> (drag[1]),
+                                                 static_cast<double> (drag[2]),
+                                                 drag.size() > 3 ? drag[3].toString() : String());
+        }
+
         if (action.hasProperty ("piano_click"))
         {
             const auto where = action["piano_click"];
