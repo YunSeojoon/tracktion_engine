@@ -2856,6 +2856,21 @@ private:
                                                             static_cast<double> (at[2]));
         }
 
+        // A pointer on an automation row, rather than the shortcut curve_drag takes.
+        // [curve, from beat, from value, to beat, to value] and optionally "bend".
+        if (action.hasProperty ("curve_pointer"))
+        {
+            const auto drag = action["curve_pointer"];
+            return drag.isArray() && drag.size() >= 5
+                    && workspace.playlistGrid().curveGesture (static_cast<int> (drag[0]),
+                                                              static_cast<double> (drag[1]),
+                                                              static_cast<double> (drag[2]),
+                                                              static_cast<double> (drag[3]),
+                                                              static_cast<double> (drag[4]),
+                                                              drag.size() > 5
+                                                                && drag[5].toString() == "bend");
+        }
+
         if (action.hasProperty ("curve_drag"))
         {
             const auto drag = action["curve_drag"];

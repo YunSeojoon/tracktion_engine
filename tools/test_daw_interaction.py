@@ -722,7 +722,8 @@ def check_one_drag_is_one_undo(exe, folder, report):
     """W1: dragging a clip once and taking it back once.
 
     beginNewTransaction sets a flag that makes the next change start a new undo step,
-    and both editing surfaces were calling it inside mouseDrag - once per pointer move.
+    and every drag handler here was calling it inside mouseDrag - once per pointer move.
+    Clips, notes and automation points, three handlers sharing nothing but the mistake.
     So one drag became as many undo steps as moves the pointer sent, and Ctrl+Z walked
     the clip back through every position it had passed through.
 
@@ -753,6 +754,38 @@ def check_one_drag_is_one_undo(exe, folder, report):
         back = next(c for c in session.settled()["playlist"]["clips"] if c["id"] == clip["id"])
         report.expect("and one undo puts it back where it started, not one step of the way",
                       back["start"] == where, (where, now["start"], back["start"]))
+
+        # The same mechanism again on a path that shares none of the code above. An
+        # automation point is moved by a different handler, and the only reason to
+        # believe it behaves is to drive it - the script's own curve_drag calls the
+        # mover directly and so cannot see a fault that needs several moves to appear.
+        target = next(p for p in state["channels"][0]["parameters"]
+                      if p["plugin_name"] == "Volume & Pan Plugin" and p["id"] == "volume")
+        session.run([{"automate": [0, target["plugin_id"], target["id"]]},
+                     {"curve_click": [0, 0.0, 0.2]},
+                     {"curve_click": [0, 8.0, 0.8]}])
+        time.sleep(0.5)
+        placed = session.settled()["automation"]["curves"][0]["points"]
+        report.expect("there is a curve with two points to drag",
+                      len(placed) == 2, placed)
+        if len(placed) != 2:
+            return
+
+        was = placed[1]["time"]
+        session.run([{"curve_pointer": [0, 8.0, 0.8, 16.0, 0.35]}])
+        time.sleep(0.8)
+        dragged = session.settled()["automation"]["curves"][0]["points"][1]
+        report.expect("the automation point moved", abs(dragged["time"] - was) > 0.5,
+                      (was, dragged["time"]))
+        if abs(dragged["time"] - was) <= 0.5:
+            return
+
+        control(project, "undo")
+        time.sleep(1.0)
+        undone = session.settled()["automation"]["curves"][0]["points"][1]
+        report.expect("and one undo puts the point back, not one move of the way",
+                      abs(undone["time"] - was) < 0.01,
+                      (was, dragged["time"], undone["time"]))
     finally:
         session.close()
 

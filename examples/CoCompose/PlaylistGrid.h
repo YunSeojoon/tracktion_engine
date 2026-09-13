@@ -838,6 +838,7 @@ public:
                 selectedPoint = Model::uidOf (segment);
                 bendAnchor = position;
                 bendStart = static_cast<double> (segment.getProperty (ids::curve, 0.0));
+                dragTransactionOpen = false;
                 dragMode = curveShape;
                 notify();
                 return;
@@ -866,6 +867,7 @@ public:
         }
 
         selectedPoint = Model::uidOf (hit);
+        dragTransactionOpen = false;
         dragMode = curvePoint;
         notify();
     }
@@ -881,7 +883,13 @@ public:
             return;
 
         const auto area = curveArea (selectedCurve);
-        undo().beginNewTransaction ("Move automation point");
+
+        if (! dragTransactionOpen)
+        {
+            undo().beginNewTransaction ("Move automation point");
+            dragTransactionOpen = true;
+        }
+
         point.setProperty (ids::time, std::max (0.0, snapped (beatAt (position.x))), &undo());
         point.setProperty (ids::value, valueAt (area, position.y), &undo());
         model.renderIfNeeded();
@@ -920,7 +928,13 @@ public:
             return;
 
         const auto travel = (bendAnchor.y - position.y) / static_cast<double> (std::max (8, curveHeight / 2));
-        undo().beginNewTransaction ("Bend automation curve");
+
+        if (! dragTransactionOpen)
+        {
+            undo().beginNewTransaction ("Bend automation curve");
+            dragTransactionOpen = true;
+        }
+
         point.setProperty (ids::curve, jlimit (-1.0, 1.0, bendStart + travel), &undo());
         model.renderIfNeeded();
         notify();
@@ -1016,6 +1030,7 @@ public:
         selectedPoint = Model::uidOf (segment);
         bendAnchor = positionOf (index, beat, 0.5);
         bendStart = static_cast<double> (segment.getProperty (ids::curve, 0.0));
+        dragTransactionOpen = false;
         bendSegment (bendAnchor.translated (0, -roundToInt (amount * std::max (8, curveHeight / 2))));
         dragMode = none;
         return true;
@@ -1413,48 +1428,77 @@ public:
                                      : rulerHeight + laneIndex * laneHeight + laneHeight / 2;
         const Point<float> down ((float) xForBeat (fromBeat), (float) y);
         const Point<float> up ((float) xForBeat (toBeat), (float) y);
+        const auto dragged = what.endsWith ("drag") || std::abs (toBeat - fromBeat) > 1.0e-9;
 
-        auto event = [this, &mods, &down] (Point<float> where, bool dragged)
-        {
-            return MouseEvent (Desktop::getInstance().getMainMouseSource(), where, mods,
-                               1.0f, 0.0f, 0.0f, 0.0f, 0.0f, this, this,
-                               Time::getCurrentTime(), down, Time::getCurrentTime(),
-                               1, dragged);
-        };
-
-        mouseDown (event (down, false));
-
-        // A real pointer sends a stream of moves, not one. Sending a single drag here
-        // made every check pass over a defect that only shows up across several: one
-        // drag was becoming one undo step per move, and with one move that is one undo
-        // step and looks right.
-        if (what.endsWith ("drag") || std::abs (toBeat - fromBeat) > 1.0e-9)
-        {
-            for (int step = 1; step <= 5; ++step)
-            {
-                const Point<float> along (down.x + (up.x - down.x) * (float) step / 5.0f,
-                                          down.y + (up.y - down.y) * (float) step / 5.0f);
-                mouseDrag (event (along, true));
-            }
-        }
-
-        mouseUp (event (up, what.endsWith ("drag")));
+        sendPointer (down, up, mods, dragged, what.endsWith ("drag"));
 
         // A double-click is a click and then the second one, in that order, which is
         // the order that matters: whatever the first click did has already happened by
         // the time the second arrives.
         if (what == "double-click")
         {
-            mouseDown (event (down, false));
-            mouseDoubleClick (event (down, false));
-            mouseUp (event (down, false));
+            mouseDown (pointerEvent (down, down, mods, false));
+            mouseDoubleClick (pointerEvent (down, down, mods, false));
+            mouseUp (pointerEvent (down, down, mods, false));
         }
 
         return true;
     }
 
+    /** A pointer on an automation row, from one beat and value to another.
+
+        dragCurvePoint and bendCurve exist too, but they call the mover directly and so
+        cannot see anything that only goes wrong across several moves - which is exactly
+        the kind of thing that had gone wrong. This goes in at the top, through
+        mouseDown and a stream of mouseDrags, the way a hand does.
+
+        Holding alt bends the segment instead of moving a point, which is what the
+        modifier does here. */
+    bool curveGesture (int index, double fromBeat, double fromValue,
+                       double toBeat, double toValue, bool bend)
+    {
+        if (! model.automation().getChild (index).isValid())
+            return false;
+
+        const auto mods = bend ? ModifierKeys (ModifierKeys::leftButtonModifier)
+                                     .withFlags (ModifierKeys::altModifier)
+                               : ModifierKeys (ModifierKeys::leftButtonModifier);
+
+        sendPointer (positionOf (index, fromBeat, fromValue).toFloat(),
+                     positionOf (index, toBeat, toValue).toFloat(), mods, true, true);
+        return true;
+    }
+
 private:
     void notify() { if (changed != nullptr) changed(); repaint(); }
+
+    MouseEvent pointerEvent (Point<float> where, Point<float> from,
+                             ModifierKeys mods, bool dragged)
+    {
+        return MouseEvent (Desktop::getInstance().getMainMouseSource(), where, mods,
+                           1.0f, 0.0f, 0.0f, 0.0f, 0.0f, this, this,
+                           Time::getCurrentTime(), from, Time::getCurrentTime(),
+                           1, dragged);
+    }
+
+    /** One press, a stream of moves, one release.
+
+        The stream is the point. A single mouseDrag made every check pass over a defect
+        that only shows across several - one drag was becoming one undo step per move,
+        and with one move that is one undo step and looks right. */
+    void sendPointer (Point<float> down, Point<float> up, ModifierKeys mods,
+                      bool dragged, bool releaseAsDrag)
+    {
+        mouseDown (pointerEvent (down, down, mods, false));
+
+        if (dragged)
+            for (int step = 1; step <= 5; ++step)
+                mouseDrag (pointerEvent ({ down.x + (up.x - down.x) * (float) step / 5.0f,
+                                           down.y + (up.y - down.y) * (float) step / 5.0f },
+                                         down, mods, true));
+
+        mouseUp (pointerEvent (up, down, mods, releaseAsDrag));
+    }
 
     /** Alt suspends snapping for as long as it is held.
 
