@@ -26,6 +26,7 @@ enum
     undo, redo, addChannel, newPattern, placePattern, makeUnique, splitClip, duplicateClip,
     transposeUp, transposeDown,
     metronome, focusNextPanel, scanPlugins, connectAI, audioSettings, savePreset, loadPreset, about,
+    openProject,
     returnToStart, followPlayhead, stopPlayback, openPianoRoll,
     fitWholeSong, fitSelection, restoreZoom,
     togglePanelBase // + panel index
@@ -33,6 +34,18 @@ enum
 }
 
 class Editor;
+
+/** Opens another project folder, by building the work surface again.
+
+    Declared here and defined below the application, because the editor is what asks and
+    the application is what owns the window. It has to be asked rather than done on the
+    spot: the editor would be deleting itself from inside one of its own methods, and an
+    engine cannot be built while the one it replaces is still holding the sound card.
+
+    An empty or new folder is a new project. A folder is the unit here - the session, the
+    state, the conversation and the shelf all live in one - so choosing a folder is the
+    whole of choosing a project, and there is no separate "new" to get wrong. */
+void openProjectFolder (const juce::File& folder);
 
 /** The engine hands incoming MIDI controllers to whichever Edit it believes has focus,
     and the default answer is none, which is why nothing was ever learnable. This app has
@@ -234,6 +247,8 @@ public:
 
         if (index == 0)
         {
+            menu.addCommandItem (&commandManager, commands::openProject);
+            menu.addSeparator();
             for (auto id : { commands::save, commands::saveCopy, commands::collectSamples,
                              commands::exportMix, commands::exportStems, commands::restoreBackup,
                              commands::revealFolder })
@@ -295,7 +310,7 @@ public:
         ids.addArray ({ commands::askAboutRegion, commands::askAboutNotes, commands::askAboutInsert });
         ids.addArray ({ commands::playStop, commands::stopPlayback,
                         commands::returnToStart, commands::followPlayhead,
-                        commands::songMode, commands::save, commands::saveCopy,
+                        commands::songMode, commands::openProject, commands::save, commands::saveCopy,
                         commands::collectSamples, commands::exportMix, commands::exportStems,
                         commands::revealFolder, commands::restoreBackup, commands::quitApp,
                         commands::armChannel, commands::recordToggle, commands::countIn,
@@ -368,6 +383,10 @@ public:
             case commands::save:
                 info.setInfo ("Save now", "Write the session and state.json", "File", 0);
                 info.addDefaultKeypress ('s', ModifierKeys::ctrlModifier);
+                break;
+            case commands::openProject:
+                info.setInfo ("Open project...", "Work on another project folder", "File", 0);
+                info.addDefaultKeypress ('o', ModifierKeys::ctrlModifier);
                 break;
             case commands::saveCopy:
                 info.setInfo ("Save a copy...", "Copy the session into another folder", "File", 0);
@@ -615,6 +634,10 @@ public:
 
             case commands::save:
                 project.save();
+                return true;
+
+            case commands::openProject:
+                openProjectAsync();
                 return true;
 
             case commands::saveCopy:
@@ -1733,6 +1756,36 @@ private:
 
     /** Copies the session and its published state into another folder. The running
         session keeps working on the original folder. */
+    /** Choosing a project. A folder holds the session, the state, the conversation and
+        the shelf, so choosing a folder is the whole of choosing a project - and a folder
+        with nothing in it is a new one, which is why there is no separate New to get
+        wrong or to forget.
+
+        The work is saved first. Somebody who picks the wrong folder and comes back
+        should find what they left. */
+    void openProjectAsync()
+    {
+        project.save();
+
+        chooser = std::make_unique<FileChooser> ("Choose a project folder - an empty one starts a new project",
+                                                 project.source.getParentDirectory());
+        chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectDirectories,
+            [this] (const FileChooser& result)
+            {
+                const auto folder = result.getResult();
+                if (folder == File() || ! folder.isDirectory())
+                    return;
+
+                if (folder == project.source.getParentDirectory())
+                {
+                    say ("That is the project already open.");
+                    return;
+                }
+
+                openProjectFolder (folder);
+            });
+    }
+
     void saveCopyAsync()
     {
         project.save();
@@ -2640,6 +2693,21 @@ private:
             return false;
         }
 
+        if (action.hasProperty ("open_project"))
+        {
+            // The folder, not the dialog. A file chooser is modal and cannot be driven
+            // from here, and it is also the part that cannot go wrong in an interesting
+            // way: what can is everything after it, which is what this drives.
+            const auto folder = File::getCurrentWorkingDirectory()
+                                    .getChildFile (action["open_project"].toString());
+            if (! folder.isDirectory())
+                return false;
+
+            project.save();
+            openProjectFolder (folder);
+            return true;
+        }
+
         if (action.hasProperty ("press"))
         {
             // The button, not the thing behind it. Calling the handler would prove the
@@ -3179,6 +3247,39 @@ public:
     /** One project at a time: the app owns a folder's live-sync files while it is open,
         so a second copy would fight the first over them. Opening another project used
         to do nothing at all, which looked like a failed launch. */
+    /** Builds the work surface again on another folder.
+
+        The old one is taken down first and completely. Its engine is holding the sound
+        card and its project is holding that folder's live-sync files, and a second of
+        either would be two programmes arguing over one thing. Taking it down also means
+        the conversation, the shelf and the notes of the old project go with it, which is
+        right: they belong to that project and the new one has its own. */
+    void switchTo (const File& folder)
+    {
+        if (window == nullptr)
+            return;
+
+        const auto file = folder.getChildFile ("project.json");
+
+        // Down first, then up. setContentOwned would delete the old one for us, but only
+        // after the new one exists, and for a moment there would be two engines.
+        window->clearContentComponent();
+        openedProject = file;
+
+        try
+        {
+            window->setContentOwned (new Editor (file, false, false, File()), true);
+        }
+        catch (const std::exception& e)
+        {
+            // Nothing is open now, which is worse than anything. Back to where we were.
+            file.getSiblingFile ("startup-error.txt").replaceWithText (e.what());
+            AlertWindow::showMessageBoxAsync (MessageBoxIconType::WarningIcon, "Could not open that project",
+                                              String (e.what()) + "\n\nClosing CoCompose.");
+            quit();
+        }
+    }
+
     void anotherInstanceStarted (const String& commandLine) override
     {
         if (window == nullptr)
@@ -3236,5 +3337,18 @@ private:
     std::unique_ptr<Window> window;
     File openedProject;
 };
+
+/** Asked by the editor, done by the application, and never on the spot: the editor is
+    inside one of its own methods when it asks, and the thing being taken down is the
+    editor. Deferring it to the message queue means the asking call has returned long
+    before anything is deleted. */
+void openProjectFolder (const juce::File& folder)
+{
+    juce::MessageManager::callAsync ([folder]
+    {
+        if (auto* app = dynamic_cast<Application*> (juce::JUCEApplication::getInstance()))
+            app->switchTo (folder);
+    });
+}
 
 START_JUCE_APPLICATION (Application)

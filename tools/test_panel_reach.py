@@ -20,7 +20,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from cocompose import atomic_write, read, tool, wait_for
+from cocompose import apply_change, atomic_write, control, read, tool, wait_for
 from test_plugin_compatibility import Session, prepare_song
 from cocompose_bridge import Liveness
 
@@ -290,6 +290,103 @@ def check_the_panel_says_what_it_is_connected_to(exe, folder, report):
         session.close()
 
 
+def check_another_project_can_be_opened_without_leaving_the_app(exe, folder, report):
+    """W0 step 1: choosing a project.
+
+    Without --project the app opens one fixed path in Documents and there was no way to
+    work on anything else: no Open in the File menu, only Save a copy. That stops the
+    milestone's scenario at its first word, and everything after it is untested ground
+    for somebody who cannot get there.
+
+    The dialog is a person's to click. What this drives is everything after it, which is
+    the part that can go wrong in an interesting way: the old work surface comes down
+    with its engine and its hold on the old folder, and a new one goes up - and nothing
+    of the old project comes with it, because the conversation, the shelf and the notes
+    belong to the project they were made in."""
+    first = folder / "first"
+    second = folder / "second"
+    first.mkdir(parents=True, exist_ok=True)
+    second.mkdir(parents=True, exist_ok=True)
+
+    session = Session(exe, first).open()
+
+    try:
+        prepare_song(session)
+        session.settled()
+
+        # Something in the first project that must not follow us.
+        session.run([{"project_note": ["condition", "the first project decided this"]}])
+        time.sleep(0.5)
+        report.expect("the first project has something in it",
+                      len(read(first / "state.json")["patterns"]) >= 1
+                      and any("first project" in n["text"]
+                              for n in (panel(first).get("notes") or {}).get("notes", [])),
+                      (len(read(first / "state.json")["patterns"]),
+                       [n["text"] for n in (panel(first).get("notes") or {}).get("notes", [])]))
+
+        # Fired, not awaited. Session.run waits for the round to be marked finished in
+        # the folder it was sent to, and the thing that marks it is the editor that is
+        # about to be taken down - so waiting here is waiting for a write nobody is left
+        # to make. What the switch happened is read from the new folder instead.
+        atomic_write(first / "ui-script.json",
+                     [{"comment": "switch"}, {"open_project": str(second)}])
+
+        # The new project writes its own files. Waiting for state.json to appear there is
+        # the first thing that can be true only if the switch actually happened.
+        wait_for(lambda: (second / "state.json").exists(), timeout=60,
+                 what="the new project to write its state")
+        wait_for(lambda: read(second / "sync-status.json").get("session_id"), timeout=30,
+                 what="the new project to say who is holding it")
+
+        report.expect("the app is working on the new folder now",
+                      (second / "project.json").exists() and (second / "state.json").exists())
+
+        fresh = read(second / "state.json")
+        report.expect("and it is a new project, not the old one copied",
+                      not any("first project" in n.get("text", "")
+                              for n in (panel(second).get("notes") or {}).get("notes", [])),
+                      [n.get("text") for n in (panel(second).get("notes") or {}).get("notes", [])])
+        report.expect("its conversation is its own",
+                      not read(second / "conversation.json").get("messages")
+                      if (second / "conversation.json").exists() else True)
+
+        # Live sync has to work on the new one - that is the thing the app is for.
+        before = read(second / "sync-status.json")["revision"]
+
+        def rename(live):
+            live["channels"][0]["name"] = "Renamed in the second project"
+
+        apply_change(second / "project.json", rename)
+        time.sleep(1.0)
+        report.expect("live sync is running on the new project",
+                      read(second / "state.json")["channels"][0]["name"]
+                      == "Renamed in the second project",
+                      read(second / "state.json")["channels"][0]["name"])
+        report.expect("and its revision moved",
+                      read(second / "sync-status.json")["revision"] != before)
+
+        # The old folder is nobody's now: the app must not still be writing to it.
+        was = read(first / "sync-status.json")["revision"]
+        time.sleep(1.5)
+        report.expect("the old project was let go, not held open",
+                      read(first / "sync-status.json")["revision"] == was,
+                      (was, read(first / "sync-status.json")["revision"]))
+
+        report.for_a_person("that the folder chooser is easy to find and says what it wants",
+                            "a file dialog is modal; what it looks like and how it reads "
+                            "is seen, not measured")
+    finally:
+        # The session object still points at the first folder, and the app is on the
+        # second. Quitting has to be asked of the project the app is actually holding.
+        try:
+            control(second / "project.json", "quit")
+            if session.process is not None:
+                session.process.wait(timeout=20)
+            session.process = None
+        except Exception:
+            session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -299,6 +396,9 @@ def run(exe, output):
     print()
     print("the panel says what it is connected to")
     check_the_panel_says_what_it_is_connected_to(exe, output / "connection", report)
+    print()
+    print("another project can be opened without leaving the app")
+    check_another_project_can_be_opened_without_leaving_the_app(exe, output / "open", report)
     print()
     print("a stale suggestion says so on screen")
     check_a_stale_suggestion_says_so_on_screen(exe, output / "stale", report)
