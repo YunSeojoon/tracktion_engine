@@ -24,7 +24,7 @@ enum
     revealFolder, restoreBackup, quitApp, armChannel, recordToggle, countIn,
     undo, redo, addChannel, newPattern, placePattern, makeUnique, splitClip, duplicateClip,
     transposeUp, transposeDown,
-    metronome, focusNextPanel, scanPlugins, audioSettings, savePreset, loadPreset, about,
+    metronome, focusNextPanel, scanPlugins, connectAI, audioSettings, savePreset, loadPreset, about,
     returnToStart, followPlayhead, stopPlayback, openPianoRoll,
     fitWholeSong, fitSelection, restoreZoom,
     togglePanelBase // + panel index
@@ -268,7 +268,8 @@ public:
                 menu.addCommandItem (&commandManager, id);
             menu.addSeparator();
             for (auto id : { commands::savePreset, commands::loadPreset,
-                             commands::scanPlugins, commands::audioSettings })
+                             commands::scanPlugins, commands::connectAI,
+                             commands::audioSettings })
                 menu.addCommandItem (&commandManager, id);
         }
         else
@@ -299,6 +300,7 @@ public:
                         commands::transposeUp, commands::transposeDown, commands::openPianoRoll,
                         commands::fitWholeSong, commands::fitSelection, commands::restoreZoom,
                         commands::metronome, commands::focusNextPanel, commands::scanPlugins,
+                        commands::connectAI,
                         commands::audioSettings, commands::savePreset, commands::loadPreset,
                         commands::about });
         for (int panel = 0; panel < live::numPanels; ++panel)
@@ -471,6 +473,9 @@ public:
                 info.setInfo ("Load latest instrument preset",
                               "Put the most recently saved settings on the selected channel", "Tools", 0);
                 info.setActive (project.model->channelFor (workspace.selection.channel()).isValid());
+                break;
+            case commands::connectAI:
+                info.setInfo ("Connect AI", "Start a local AI bridge for this project", "Tools", 0);
                 break;
             case commands::scanPlugins:
                 info.setInfo ("Scan plugins...", "Find installed VST3 plugins", "Tools", 0);
@@ -765,6 +770,10 @@ public:
 
             case commands::scanPlugins:
                 showPluginScanner();
+                return true;
+
+            case commands::connectAI:
+                connectTheAssistant();
                 return true;
 
             case commands::audioSettings:
@@ -1484,12 +1493,7 @@ private:
                              + last.proposalID + ":"
                              + (static_cast<bool> (last.proposalSummary["applied"]) ? "1" : "0");
 
-        auto stated = bridge->connection();
-        const auto note = stated.isObject()
-                            ? (static_cast<bool> (stated["ready"])
-                                 ? "connected: " + stated["name"].toString()
-                                 : "bridge present but not ready")
-                            : String ("no bridge running");
+        const auto note = describeTheConnection();
 
         if (shape == lastConversationShape && note == lastConnectionNote
              && update.what == live::ChatBridge::Update::What::nothing)
@@ -1591,6 +1595,7 @@ private:
                              // and the first time I have put it in the key before being
                              // caught by it: whatever the packet says has to be here.
                              + workspace.chatPanel().buttonShape() + ":"
+                             + describeTheConnection() + ":"
                              + String (project.revision);
 
         if (shape == lastInspectorShape)
@@ -1605,6 +1610,9 @@ private:
         {
             fields->setProperty ("bridge", bridge != nullptr ? bridge->connection() : var());
             fields->setProperty ("bridge_connected", bridge != nullptr && bridge->isConnected());
+            // The line the panel shows, so a check reads the same sentence a person
+            // does rather than reassembling it from the parts and agreeing with itself.
+            fields->setProperty ("connection", describeTheConnection());
             fields->setProperty ("waiting", bridge != nullptr && bridge->isWaiting());
             fields->setProperty ("conversation_id", conversation != nullptr ? conversation->id() : String());
             fields->setProperty ("suggested_notes_drawn", workspace.suggestedNoteCount());
@@ -1921,6 +1929,116 @@ private:
             project.error = e.what();
             say ("I/O error: " + project.error);
         }
+    }
+
+    /** What is on the other end, in one line, including what to do when nothing is.
+
+        It used to say "connected: <name>" or "no bridge running". Neither told a person
+        which model they were talking to, what it could do, or - when nothing answered -
+        what would make it answer. A status line that states a problem and not its
+        remedy leaves somebody looking at the app with nowhere to go. */
+    String describeTheConnection() const
+    {
+        auto stated = bridge->connection();
+
+        if (! stated.isObject())
+            return "No AI connected. Tools > Connect AI, or run tools/cocompose_bridge.py";
+
+        // A bridge that is not answering has either not started yet or has stopped, and
+        // the file cannot tell those apart: both write ready:false. Saying "starting up"
+        // to somebody whose bridge has died is worse than saying nothing, so the line
+        // says the part that is true either way - and the remedy is the same one.
+        if (! bridge->isConnected())
+            return "No AI is answering. Tools > Connect AI to start one";
+
+        const auto model = stated["model"].toString();
+        const auto provider = stated["provider"].toString();
+
+        String line ("Connected: ");
+        line << (model.isNotEmpty() ? model
+                                    : (provider.isNotEmpty() ? provider : stated["name"].toString()));
+
+        if (provider.isNotEmpty() && model.isNotEmpty())
+            line << " (" << provider << ")";
+
+        // What this connection can actually do, from what it said about itself rather
+        // than from what the app assumes every model can do.
+        auto can = stated["capabilities"];
+        if (can.isObject())
+        {
+            StringArray facts;
+
+            if (! static_cast<bool> (can["is_a_model"]))
+                facts.add ("not a model - plumbing only");
+            if (static_cast<bool> (can["runs_locally"]))
+                facts.add ("on this machine");
+            if (! static_cast<bool> (can["hears_audio"]))
+                facts.add ("cannot hear audio");
+
+            if (! facts.isEmpty())
+                line << " - " << facts.joinIntoString (", ");
+        }
+
+        return line;
+    }
+
+    /** Starts a bridge, so connecting is not a thing a person does in a terminal.
+
+        It runs the bridge that ships beside the app and points it at this project. When
+        the pieces are not there - no Python, no script - it says which one is missing
+        rather than failing quietly, because "nothing happened" is the least useful
+        thing an app can do with a button. */
+    void connectTheAssistant()
+    {
+        if (bridge->isConnected())
+        {
+            say ("Already connected: " + describeTheConnection());
+            return;
+        }
+
+        const auto bridgeScript = findTheBridgeScript();
+        if (! bridgeScript.existsAsFile())
+        {
+            say ("Cannot find tools/cocompose_bridge.py beside the app. Start a bridge "
+                 "yourself and it will be picked up.");
+            return;
+        }
+
+        StringArray command { "python", bridgeScript.getFullPathName(),
+                              "--project", project.source.getFullPathName(),
+                              "--provider", "ollama" };
+
+        ChildProcess starting;
+        if (! starting.start (command, 0))
+        {
+            say ("Could not start Python. Install it, or run this yourself: "
+                 + command.joinIntoString (" "));
+            return;
+        }
+
+        // Deliberately not waited on: a bridge runs for as long as the app does, and
+        // the app finds it the same way it finds one somebody started by hand - by its
+        // heartbeat. Nothing here has to know whether that process is still alive.
+        say ("Starting a local AI bridge. The panel will say when it answers.");
+    }
+
+    /** The bridge script, looked for beside the app first and then in the source tree
+        it was built from, so this works from a copied folder and from a checkout. */
+    File findTheBridgeScript() const
+    {
+        const auto here = File::getSpecialLocation (File::currentApplicationFile).getParentDirectory();
+
+        for (auto folder : { here, here.getParentDirectory(),
+                             here.getParentDirectory().getParentDirectory(),
+                             here.getParentDirectory().getParentDirectory().getParentDirectory(),
+                             File::getCurrentWorkingDirectory() })
+        {
+            const auto candidate = folder.getChildFile ("tools").getChildFile ("cocompose_bridge.py");
+            if (candidate.existsAsFile())
+                return candidate;
+        }
+
+        return {};
     }
 
     /** The Preview button. A person pressing it has not been asked for a range and

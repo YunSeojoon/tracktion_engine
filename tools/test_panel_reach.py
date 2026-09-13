@@ -205,12 +205,72 @@ def check_a_stale_suggestion_says_so_on_screen(exe, folder, report):
         session.close()
 
 
+def check_the_panel_says_what_it_is_connected_to(exe, folder, report):
+    """W3: the connection, the model and what to do about it, on screen.
+
+    The line used to read "connected: <name>" or "no bridge running". Neither said which
+    model was answering, what it could do, or - when nothing answered - what would make
+    it answer. A status line that states a problem and not its remedy leaves somebody
+    looking at the app with nowhere to go."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        session.settled()
+
+        nothing = wait_for(lambda: (panel(folder).get("connection")
+                                    if panel(folder).get("connection") else None),
+                           timeout=20, what="the panel to say what it is connected to")
+        report.expect("with nothing listening, the line says so",
+                      "no ai connected" in nothing.lower(), nothing)
+        report.expect("and says what would make it answer",
+                      "connect ai" in nothing.lower() or "bridge" in nothing.lower(), nothing)
+
+        with Liveness(folder / "chat-bridge.json", "fixture bridge",
+                      provider="ollama", model="llama3.1:8b",
+                      capabilities={"suggests_changes": True, "hears_audio": False,
+                                    "runs_locally": True, "is_a_model": True}):
+            connected = wait_for(lambda: (panel(folder).get("connection")
+                                          if "connected:" in (panel(folder).get("connection") or "").lower()
+                                          else None),
+                                 timeout=20, what="the panel to notice the bridge")
+
+            report.expect("it names the model, not just the bridge",
+                          "llama3.1:8b" in connected, connected)
+            report.expect("and which provider it came through",
+                          "ollama" in connected, connected)
+            report.expect("and that it cannot hear audio, which it cannot",
+                          "cannot hear audio" in connected, connected)
+            report.expect("and that it is on this machine",
+                          "on this machine" in connected, connected)
+
+        # It goes away again.
+        gone = wait_for(lambda: (panel(folder).get("connection")
+                                 if "connected:" not in (panel(folder).get("connection") or "").lower()
+                                 else None),
+                        timeout=30, what="the panel to notice the bridge left")
+        # Not "it stopped" and not "it is starting": the file says ready:false in both
+        # cases and the app cannot tell them apart, so it says the part that is true
+        # either way rather than guessing and being confidently wrong half the time.
+        report.expect("when nothing is answering, the line says so and what to do",
+                      "not answering" in gone.lower() or "no ai is answering" in gone.lower(),
+                      gone)
+        report.expect("and does not claim to know whether it is starting or stopped",
+                      "starting up" not in gone.lower(), gone)
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
 
     print("a suggestion can be heard without a script")
     check_a_suggestion_can_be_heard_without_a_script(exe, output / "hear", report)
+    print()
+    print("the panel says what it is connected to")
+    check_the_panel_says_what_it_is_connected_to(exe, output / "connection", report)
     print()
     print("a stale suggestion says so on screen")
     check_a_stale_suggestion_says_so_on_screen(exe, output / "stale", report)
