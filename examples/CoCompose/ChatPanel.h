@@ -70,6 +70,18 @@ public:
         preview.setVisible (false);
         addAndMakeVisible (preview);
 
+        // Hearing the two halves. They appear once there is something to hear and not
+        // before: a button that is there but does nothing teaches a person to distrust
+        // the ones that do.
+        playA.setButtonText ("Play A");
+        playB.setButtonText ("Play B");
+        playA.onClick = [this] { if (onListen) onListen ("before"); };
+        playB.onClick = [this] { if (onListen) onListen ("after"); };
+        playA.setVisible (false);
+        playB.setVisible (false);
+        addAndMakeVisible (playA);
+        addAndMakeVisible (playB);
+
         previewState.setFont (theme::small_());
         previewState.setColour (Label::textColourId, theme::textFaint);
         previewState.setVisible (false);
@@ -181,11 +193,33 @@ public:
     }
 
     std::function<void()> onSend, onCancel;
-    std::function<void (const String&)> onApply, onPreview, onPickCandidate;
+    std::function<void (const String&)> onApply, onPreview, onPickCandidate, onListen;
 
     /** The proposal currently being offered, if any. Empty once it has been applied, so
         the same change cannot be applied twice by pressing the button again. */
     String offeredProposal() const { return offered; }
+
+    /** Whether there are two halves to hear, and which one is playing.
+
+        "Playing A" on the button itself rather than only in a line of text, because a
+        person comparing two nearly identical files is looking at the thing they are
+        about to press, and an A/B where you cannot tell which is which is two sounds
+        and a guess. */
+    void setSomethingToHear (bool ready, const String& whichIsPlaying)
+    {
+        const auto shape = (ready ? "1" : "0") + whichIsPlaying;
+        if (shape == listenShape)
+            return;
+
+        listenShape = shape;
+        playA.setVisible (ready);
+        playB.setVisible (ready);
+        playA.setButtonText (whichIsPlaying == "before" ? "Playing A" : "Play A");
+        playB.setButtonText (whichIsPlaying == "after" ? "Playing B" : "Play B");
+        resized();
+    }
+
+    String listeningShape() const { return listenShape; }
 
     /** The alternatives offered so far, newest last, as a person would count them.
 
@@ -450,6 +484,9 @@ public:
                                                 { "ask", send.isEnabled() },
                                                 { "stop", stop.isEnabled() } }) },
                          { "preview_state", previewState.getText() },
+                         { "listening", object ({ { "offered", playA.isVisible() },
+                                                  { "a", playA.getButtonText() },
+                                                  { "b", playB.getButtonText() } }) },
                          { "candidates_on_screen", shelfOnScreen } });
     }
 
@@ -468,6 +505,8 @@ public:
                     : named == "preview" ? &preview
                     : named == "ask"     ? &send
                     : named == "stop"    ? &stop
+                    : named == "play_a"  ? &playA
+                    : named == "play_b"  ? &playB
                                          : nullptr;
 
         if (which == nullptr || ! which->isVisible() || ! which->isEnabled())
@@ -485,7 +524,8 @@ public:
             << (send.isEnabled() ? "s" : "-")
             << (stop.isEnabled() ? "x" : "-")
             << "|" << previewState.getText()
-            << "|" << candidateShape;
+            << "|" << candidateShape
+            << "|" << listenShape;
         return key;
     }
 
@@ -519,11 +559,21 @@ public:
         if (candidates.isVisible())
             candidates.setBounds (r.removeFromBottom (22).reduced (1));
 
-        if (apply.isVisible())
+        if (apply.isVisible() || playA.isVisible())
         {
             auto row = r.removeFromBottom (24);
-            apply.setBounds (row.removeFromLeft (120).reduced (1));
-            preview.setBounds (row.removeFromLeft (110).reduced (1));
+
+            if (apply.isVisible())
+            {
+                apply.setBounds (row.removeFromLeft (120).reduced (1));
+                preview.setBounds (row.removeFromLeft (110).reduced (1));
+            }
+
+            if (playA.isVisible())
+            {
+                playA.setBounds (row.removeFromLeft (78).reduced (1));
+                playB.setBounds (row.removeFromLeft (78).reduced (1));
+            }
         }
         change.setBounds (r.removeFromBottom (jmin (96, r.getHeight() / 3)).reduced (0, 2));
         connection.setBounds (bottom.removeFromBottom (14));
@@ -662,7 +712,8 @@ private:
     Component cards;
     Viewport viewport;
     TextEditor entry, transcript, change;
-    TextButton inspect, clear, send, stop, apply, preview;
+    TextButton inspect, clear, send, stop, apply, preview, playA, playB;
+    String listenShape;
     Label previewState;
     ComboBox candidates;
     StringArray candidateIDs;

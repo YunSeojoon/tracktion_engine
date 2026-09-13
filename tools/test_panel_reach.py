@@ -145,6 +145,34 @@ def check_a_suggestion_can_be_heard_without_a_script(exe, folder, report):
                             "notes": [{"what": "change", "id": subject["id"],
                                        "pitch": min(127, subject["pitch"] + 7)}]}, asked)
 
+            # Two halves to hear, and a way to hear them. A comparison that leaves two
+            # files and no button finishes in Explorer.
+            hearable = wait_for(lambda: (panel(folder).get("listening")
+                                         if (panel(folder).get("listening") or {}).get("offered")
+                                         else None),
+                                timeout=30, what="the panel to offer both halves")
+            report.expect("both halves can be played from the panel",
+                          hearable["a"] == "Play A" and hearable["b"] == "Play B", hearable)
+
+            # Playing must not happen on top of the music the proposal is about.
+            session.run([{"command": "Play / Stop"}])
+            time.sleep(0.8)
+            session.run([{"press": "play_a"}])
+            time.sleep(0.8)
+
+            now = panel(folder).get("listening") or {}
+            report.expect("the button says which half is playing",
+                          now.get("a") == "Playing A" and now.get("b") == "Play B", now)
+            report.expect("and the song was stopped rather than played over",
+                          read(folder / "sync-status.json")["playing"] is False,
+                          read(folder / "sync-status.json")["playing"])
+
+            session.run([{"press": "play_a"}])
+            time.sleep(0.5)
+            stopped = panel(folder).get("listening") or {}
+            report.expect("pressing it again stops it",
+                          stopped.get("a") == "Play A", stopped)
+
             shelf = wait_for(lambda: (panel(folder).get("candidates_on_screen")
                                       if len(panel(folder).get("candidates_on_screen") or []) >= 2
                                       else None),

@@ -5,6 +5,7 @@
 #include "Theme.h"
 #include "Notes.h"
 #include "Candidates.h"
+#include "Listening.h"
 #include "Tools.h"
 #include "ChatBridge.h"
 #include "LiveProject.h"
@@ -127,6 +128,10 @@ public:
         // took the choice as "use this" would be deciding for them.
         workspace.chatPanel().onPickCandidate = [this] (const String& proposalID)
                                                 { previewFromThePanel (proposalID); };
+        workspace.chatPanel().onListen = [this] (const String& half) { listenToHalf (half); };
+
+        listening = std::make_unique<live::Listening> (engine.getDeviceManager().deviceManager);
+        listening->onFinished = [this] { workspace.chatPanel().setSomethingToHear (true, {}); };
 
         // Target menus reach the same commands the menu bar and the keyboard do, so
         // the three can never mean different things.
@@ -1878,6 +1883,14 @@ private:
         // be opened, because it closes under the pointer.
         if (shelf != nullptr)
             workspace.chatPanel().setCandidates (shelf->snapshot(), project.revision);
+
+        // Two halves to hear, or not. Read from the files rather than from the stage,
+        // so a comparison rendered in an earlier session is still offered when the app
+        // is opened again.
+        if (listening != nullptr)
+            workspace.chatPanel().setSomethingToHear (
+                preview.before.existsAsFile() && preview.after.existsAsFile(),
+                listening->nowPlaying());
         workspace.refresh();
         workspace.store();
         // Some graph rebuilds briefly clear the engine's playing flag. Preserve the
@@ -1929,6 +1942,39 @@ private:
             project.error = e.what();
             say ("I/O error: " + project.error);
         }
+    }
+
+    /** Plays one half of the comparison, or stops it if it is the one playing.
+
+        The song is stopped first. Listening to the proposal over the top of the music
+        it is a proposal about is not listening to the proposal, and an app that let
+        that happen would be handing somebody a judgement they could not make. */
+    void listenToHalf (const String& half)
+    {
+        if (listening == nullptr)
+            return;
+
+        if (listening->nowPlaying() == half)
+        {
+            listening->stop();
+            workspace.chatPanel().setSomethingToHear (true, {});
+            return;
+        }
+
+        stopTransport();
+
+        const auto file = half == "after" ? preview.after : preview.before;
+        const auto problem = listening->play (file, half);
+
+        if (problem.isNotEmpty())
+        {
+            say (problem);
+            workspace.chatPanel().setSomethingToHear (preview.before.existsAsFile(), {});
+            return;
+        }
+
+        workspace.chatPanel().setSomethingToHear (true, half);
+        say (half == "after" ? "Playing it as proposed." : "Playing it as it is.");
     }
 
     /** What is on the other end, in one line, including what to do when nothing is.
@@ -3058,6 +3104,7 @@ private:
     std::unique_ptr<live::Conversation> conversation;
     std::unique_ptr<live::ProjectNotes> notes;
     std::unique_ptr<live::Shelf> shelf;
+    std::unique_ptr<live::Listening> listening;
     std::unique_ptr<live::ChatBridge> bridge;
 
     live::CoComposeLookAndFeel look;
