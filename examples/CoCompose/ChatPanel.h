@@ -61,6 +61,35 @@ public:
         apply.setVisible (false);
         addAndMakeVisible (apply);
 
+        // Listening to a suggestion before taking it was already built and had no way
+        // in: the only caller was the diagnostic script, so the acceptance sheet's
+        // "press Preview" was not a step a person had skipped, it was a step with no
+        // button. This is that button.
+        preview.setButtonText ("Preview A/B");
+        preview.onClick = [this] { if (onPreview && offered.isNotEmpty()) onPreview (offered); };
+        preview.setVisible (false);
+        addAndMakeVisible (preview);
+
+        previewState.setFont (theme::small_());
+        previewState.setColour (Label::textColourId, theme::textFaint);
+        previewState.setVisible (false);
+        addAndMakeVisible (previewState);
+
+        // The alternatives already offered. Asking three times and going back to the
+        // second was a thing the app could do and a person could not reach: the shelf
+        // was written to a file and read by nothing on screen.
+        candidates.setTextWhenNoChoicesAvailable ("no earlier suggestions");
+        candidates.setTextWhenNothingSelected ("earlier suggestions");
+        candidates.onChange = [this]
+        {
+            const auto picked = candidates.getSelectedId() - 1;
+
+            if (isPositiveAndBelow (picked, candidateIDs.size()) && onPickCandidate)
+                onPickCandidate (candidateIDs[picked]);
+        };
+        candidates.setVisible (false);
+        addAndMakeVisible (candidates);
+
         send.setButtonText ("Ask");
         send.onClick = [this] { if (onSend) onSend(); };
         stop.setButtonText ("Stop");
@@ -152,11 +181,76 @@ public:
     }
 
     std::function<void()> onSend, onCancel;
-    std::function<void (const String&)> onApply;
+    std::function<void (const String&)> onApply, onPreview, onPickCandidate;
 
     /** The proposal currently being offered, if any. Empty once it has been applied, so
         the same change cannot be applied twice by pressing the button again. */
     String offeredProposal() const { return offered; }
+
+    /** The alternatives offered so far, newest last, as a person would count them.
+
+        A candidate worked out against music that has since moved cannot simply be
+        applied, and the list says so beside it rather than letting somebody pick one
+        and meet a refusal. "Stale" is not a warning about something that might go
+        wrong; it is a fact about which music the suggestion read. */
+    void setCandidates (const var& shelf, int currentRevision)
+    {
+        Array<var> entries;
+        if (auto* held = shelf["candidates"].getArray())
+            entries = *held;
+
+        StringArray wanted;
+        for (const auto& one : entries)
+            wanted.add (one["id"].toString() + "|" + String (static_cast<int> (one["base_revision"]))
+                          + (static_cast<bool> (one["adopted"]) ? "+" : "-"));
+
+        // Rebuilt only when it would look different, because a combo box that is
+        // repopulated on a timer cannot be opened: the list closes under the pointer.
+        const auto shape = wanted.joinIntoString (",") + "@" + String (currentRevision);
+        if (shape == candidateShape)
+            return;
+
+        candidateShape = shape;
+        candidateIDs.clear();
+        candidates.clear (dontSendNotification);
+
+        auto number = 1;
+        for (const auto& one : entries)
+        {
+            const auto revision = static_cast<int> (one["base_revision"]);
+            auto label = String (number) + ". " + one["description"].toString();
+
+            if (label.trim().endsWith ("."))
+                label += "(no description)";
+
+            if (static_cast<bool> (one["adopted"]))
+                label += "  - taken";
+            else if (revision != currentRevision)
+                label += "  - worked out at revision " + String (revision)
+                           + ", the music is at " + String (currentRevision);
+
+            candidateIDs.add (one["id"].toString());
+            candidates.addItem (label, number++);
+        }
+
+        candidates.setVisible (! candidateIDs.isEmpty());
+        resized();
+    }
+
+    /** What the app knows about the comparison being rendered, in one line a person can
+        read. Empty hides it, because a line that says nothing is a line in the way.
+
+        The wording says what is happening rather than naming a stage: "rendering the
+        second half" is something to wait for, "renderingAfter" is a thing to decode. */
+    void setPreviewState (const String& what)
+    {
+        if (previewState.getText() == what)
+            return;
+
+        previewState.setText (what, dontSendNotification);
+        previewState.setVisible (what.isNotEmpty());
+        resized();
+    }
 
     /** Draws the conversation. Called whenever it changes, including while an answer is
         still arriving, so the text grows as it comes in. */
@@ -244,6 +338,15 @@ public:
         change.setText (changeText, dontSendNotification);
         apply.setVisible (offered.isNotEmpty());
         apply.setEnabled (offered.isNotEmpty() && ! waiting);
+
+        // Listening and taking are offered together: a person who can press Apply can
+        // hear what it would do first, and one without the other is the choice this
+        // panel used to make for them.
+        preview.setVisible (offered.isNotEmpty());
+        preview.setEnabled (offered.isNotEmpty() && ! waiting);
+
+        if (offered.isEmpty())
+            setPreviewState ({});
     }
 
     /** What an attachment would carry, in the form a person can read before it goes
@@ -331,10 +434,59 @@ public:
             cardsOut.add (card);
         }
 
+        // What is actually on screen and reachable with a pointer. A check can drive
+        // the handlers either way; what it cannot otherwise tell is whether a person
+        // has anything to press, which is exactly what was missing.
+        Array<var> shelfOnScreen;
+        for (int i = 0; i < candidates.getNumItems(); ++i)
+            shelfOnScreen.add (candidates.getItemText (i));
+
         return object ({ { "attachments", cardsOut },
                          { "draft", entry.getText() },
                          { "typing", entry.hasKeyboardFocus (true) },
-                         { "offered_proposal", offered } });
+                         { "offered_proposal", offered },
+                         { "buttons", object ({ { "apply", apply.isVisible() && apply.isEnabled() },
+                                                { "preview", preview.isVisible() && preview.isEnabled() },
+                                                { "ask", send.isEnabled() },
+                                                { "stop", stop.isEnabled() } }) },
+                         { "preview_state", previewState.getText() },
+                         { "candidates_on_screen", shelfOnScreen } });
+    }
+
+    /** Everything inspectorState reports that nothing else in the key would move.
+
+        The packet is rewritten only when a key built from what it describes changes, so
+        a field missing from that key stops being reported the moment it matters. Five
+        fields in this app have been caught by that; this one is in the key because of
+        them, not after it. */
+    /** Presses one of the panel's buttons by name, the way a pointer would: a button
+        that is hidden or disabled does nothing and says so, which is the whole point of
+        pressing it rather than calling what it calls. */
+    bool pressButton (const String& named)
+    {
+        auto* which = named == "apply"   ? &apply
+                    : named == "preview" ? &preview
+                    : named == "ask"     ? &send
+                    : named == "stop"    ? &stop
+                                         : nullptr;
+
+        if (which == nullptr || ! which->isVisible() || ! which->isEnabled())
+            return false;
+
+        which->triggerClick();
+        return true;
+    }
+
+    String buttonShape() const
+    {
+        String key;
+        key << (apply.isVisible() && apply.isEnabled() ? "a" : "-")
+            << (preview.isVisible() && preview.isEnabled() ? "p" : "-")
+            << (send.isEnabled() ? "s" : "-")
+            << (stop.isEnabled() ? "x" : "-")
+            << "|" << previewState.getText()
+            << "|" << candidateShape;
+        return key;
     }
 
     String inspectorText() const
@@ -361,8 +513,18 @@ public:
         clear.setBounds (buttons.removeFromLeft (56).reduced (1));
 
         entry.setBounds (bottom.removeFromBottom (48).reduced (0, 2));
+        if (previewState.isVisible())
+            previewState.setBounds (r.removeFromBottom (14));
+
+        if (candidates.isVisible())
+            candidates.setBounds (r.removeFromBottom (22).reduced (1));
+
         if (apply.isVisible())
-            apply.setBounds (r.removeFromBottom (24).removeFromLeft (120).reduced (1));
+        {
+            auto row = r.removeFromBottom (24);
+            apply.setBounds (row.removeFromLeft (120).reduced (1));
+            preview.setBounds (row.removeFromLeft (110).reduced (1));
+        }
         change.setBounds (r.removeFromBottom (jmin (96, r.getHeight() / 3)).reduced (0, 2));
         connection.setBounds (bottom.removeFromBottom (14));
         note.setBounds (bottom.removeFromBottom (14));
@@ -500,7 +662,11 @@ private:
     Component cards;
     Viewport viewport;
     TextEditor entry, transcript, change;
-    TextButton inspect, clear, send, stop, apply;
+    TextButton inspect, clear, send, stop, apply, preview;
+    Label previewState;
+    ComboBox candidates;
+    StringArray candidateIDs;
+    String candidateShape;
     String offered;
     Label note, connection;
 };

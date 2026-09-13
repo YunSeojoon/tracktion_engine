@@ -1587,6 +1587,10 @@ private:
                              // taken and what each was heard with, and none of that
                              // moves the count.
                              + (shelf != nullptr ? shelf->shape() : String()) + ":"
+                             // The panel's own buttons and its preview line. Sixth time,
+                             // and the first time I have put it in the key before being
+                             // caught by it: whatever the packet says has to be here.
+                             + workspace.chatPanel().buttonShape() + ":"
                              + String (project.revision);
 
         if (shape == lastInspectorShape)
@@ -1954,7 +1958,7 @@ private:
                 widen (start, length);
 
             for (const auto& change : proposal->clips)
-                if (Model::uidOf (clip) == change.clipID)
+                if (live::Model::uidOf (clip) == change.clipID)
                 {
                     widen (start, length);
                     if (change.startBeat)
@@ -2470,6 +2474,15 @@ private:
             if (kind == "adopt")   { applySuggestedChange (id); return true; }
             if (kind == "discard") return shelf->discard (id);
             return false;
+        }
+
+        if (action.hasProperty ("press"))
+        {
+            // The button, not the thing behind it. Calling the handler would prove the
+            // work happens and nothing about whether a person has anything to press,
+            // which is the half that was missing.
+            const auto named = action["press"].toString();
+            return workspace.chatPanel().pressButton (named);
         }
 
         if (action.hasProperty ("right_click"))

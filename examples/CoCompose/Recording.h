@@ -319,7 +319,25 @@ public:
             outcome = result;
         }
 
-        waitForThreadToExit (-1);
+        // Bounded, and on purpose. This runs on the message thread, and the worker has
+        // already published its result - what is being waited for is the thread closing
+        // down behind it, which is housekeeping. Waiting without a limit for
+        // housekeeping means that a worker which gets stuck on its way out takes the
+        // whole app with it: no timer, no repaint, no way to press anything, and a
+        // status file frozen mid-render saying it is still going. That is what an
+        // unbounded wait here actually bought, and it was seen.
+        //
+        // If it does not come back in time the Edit is not released here. Letting go of
+        // an Edit a thread may still be inside is worse than holding it: the next render
+        // is refused because this one is still busy, which is true, and says so.
+        if (! waitForThreadToExit (4000))
+        {
+            outcome.complete = false;
+            outcome.message = "The renderer did not finish closing down. Nothing was "
+                              "changed; the next render will be refused until it does.";
+            return outcome;
+        }
+
         renderEdit.reset();
         return outcome;
     }
