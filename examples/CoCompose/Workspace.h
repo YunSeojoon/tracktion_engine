@@ -2590,6 +2590,40 @@ public:
 
     PlaylistGrid& playlistGrid() const { return playlist->getGrid(); }
 
+    /** What is picked out and what will repeat, in words.
+
+        Both were shown only by drawing: a clip lit up, a loop bracket on the ruler.
+        A person who cannot pick those out of the colours had nothing to read, and
+        anyone glancing away and back had to hunt for the highlight again. */
+    String whatIsSelected() const
+    {
+        if (auto* editor = pianoRollEditor(); editor != nullptr && editor->isVisible())
+            if (const auto notes = editor->selectedNotes().size(); notes > 0)
+                return notes == 1 ? "1 note selected"
+                                  : String (notes) + " notes selected";
+
+        if (const auto clips = playlistGrid().selectedClips().size(); clips > 0)
+            return clips == 1 ? "1 clip selected"
+                              : String (clips) + " clips selected";
+
+        return "Nothing selected";
+    }
+
+    /** The loop, in bars a person counts from one, or nothing when it is off. */
+    String loopDescription() const
+    {
+        if (! playlistGrid().loopIsOn())
+            return {};
+
+        const auto range = playlistGrid().loopBeats();
+        if (range.getLength() <= 1.0e-6)
+            return {};
+
+        const auto bar = [] (double beat) { return String (beat / 4.0 + 1.0, 2); };
+        return "Loop " + bar (range.getStart()) + " to " + bar (range.getEnd());
+    }
+
+
     /** Where target menus send the work. The commands already exist - the menus are a
         second way to reach them, not a second implementation of them, which is the
         whole reason a menu item and a keyboard shortcut cannot disagree. */

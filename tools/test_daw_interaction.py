@@ -558,12 +558,17 @@ def check_an_effect_can_be_opened_from_the_chain(exe, folder, report):
                       read(folder / "sync-status.json")["revision"])
 
         # An index past the end is refused rather than opening whatever is nearby. The
-        # script runner reports a refused action as a failed one, so that is the signal.
+        # runner reports a refused action as a failed one, so that is the signal.
+        #
+        # This used to catch TimeoutError, and it passed for the wrong reason: a refused
+        # action never marked its round finished, so the wait ran out and the check read
+        # that as the refusal. It was waiting twenty seconds to be told nothing. The
+        # runner says so now, and a timeout here would mean what a timeout should mean.
         refused = False
         try:
             session.run([{"open_effect": [insert_id, 9]}], timeout=20)
-        except TimeoutError:
-            refused = True
+        except RuntimeError as why:
+            refused = "open_effect" in str(why)
 
         report.expect("a chain position that does not exist opens nothing", refused)
 
@@ -921,6 +926,51 @@ def check_the_cursor_says_what_the_press_will_do(exe, folder, report):
         session.close()
 
 
+def check_the_status_line_says_what_is_picked_out(exe, folder, report):
+    """W2: "선택 대상 ... 루프 범위를 색상만이 아니라 텍스트·형태로도 구분한다".
+
+    What is selected and what will repeat were drawn and never written: a clip lit up,
+    a bracket on the ruler. Somebody who cannot pick those out of the colours had
+    nothing to read, and the line that could have said so was spending itself on
+    "Revision 41 | Edit project.json externally" - a developer's sentence, permanently,
+    in front of somebody writing music. W2 asks whether internal words like revision
+    need to be there; this is the answer."""
+    folder.mkdir(parents=True, exist_ok=True)
+    # --screenshots is what makes the app write down what its labels say. The line is
+    # on screen either way; this is how a check gets to read it.
+    session = Session(exe, folder).open(extra=["--screenshots"])
+
+    try:
+        prepare_song(session)
+        state = session.settled()
+
+        def line():
+            labels = read(folder / "ui-state.json")["labels"]
+            return next((str(l) for l in labels if "Live sync" in str(l)), "")
+
+        time.sleep(1.5)
+        report.expect("the idle line no longer spends itself on internal words",
+                      "Revision" not in line() and "project.json" not in line(), line())
+        report.expect("and the loop says where it is, not only as a bracket",
+                      "Loop" in line(), line())
+
+        clip = state["playlist"]["clips"][0]
+        session.run([{"pick_clip": [0, clip["start"] + 0.5]}])
+        time.sleep(1.5)
+        report.expect("picking a clip is written down, not only drawn",
+                      "1 clip selected" in line(), line())
+
+        # Clicking where there is no clip puts the selection away, and the line has to
+        # say that too - "nothing" is a state a person can be in and wonder about.
+        empty = clip["start"] + clip["length"] + 8.0
+        session.run([{"ruler": ["click", empty, empty, 0]}])
+        time.sleep(1.5)
+        report.expect("and letting it go says so rather than going quiet",
+                      "Nothing selected" in line(), line())
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -966,6 +1016,9 @@ def run(exe, output):
     print()
     print("Erase and Split are chosen, not stumbled into")
     check_erase_and_split_are_chosen_not_stumbled_into(exe, output / "destructive", report)
+    print()
+    print("the status line says what is picked out")
+    check_the_status_line_says_what_is_picked_out(exe, output / "statusline", report)
     print()
     print("the cursor says what the press will do")
     check_the_cursor_says_what_the_press_will_do(exe, output / "cursor", report)

@@ -1185,6 +1185,18 @@ public:
 
     StringArray selectedClips() const { return selected; }
 
+    /** Whether the loop is on, and where it is in beats. Read by the status line so a
+        person can see what will repeat without looking for a bracket on the ruler. */
+    bool loopIsOn() const { return model.edit.getTransport().looping; }
+
+    Range<double> loopBeats() const
+    {
+        const auto range = model.edit.getTransport().getLoopRange();
+        auto& tempo = model.edit.tempoSequence;
+        return { tempo.toBeats (range.getStart()).inBeats(),
+                 tempo.toBeats (range.getEnd()).inBeats() };
+    }
+
     /** Where a beat sits across the grid, for anything outside that needs to scroll to it. */
     int xForBeatPublic (double beat) const { return xForBeat (beat); }
 
@@ -1642,13 +1654,6 @@ private:
                                    te::BeatPosition::fromBeats (std::max (0.0, beat))));
     }
 
-    Range<double> loopBeats() const
-    {
-        const auto range = model.edit.getTransport().getLoopRange();
-        auto& tempo = model.edit.tempoSequence;
-        return { tempo.toBeats (range.getStart()).inBeats(),
-                 tempo.toBeats (range.getEnd()).inBeats() };
-    }
 
     /** -1 for the start handle, 1 for the end, 0 for neither. Within a few pixels, so
         a person aiming at a handle gets the handle and a person aiming at the ruler

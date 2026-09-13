@@ -1984,9 +1984,24 @@ private:
             // The idle line, once whatever was last said has had time to be read. It is
             // not itself a message, so it does not go through say() and does not become
             // the last thing an outside tool sees the app report.
-            status.setText ("Live sync  |  Revision " + String (project.revision)
-                              + "  |  Edit project.json externally; changes appear here automatically",
-                            dontSendNotification);
+        {
+            // What the idle line used to say was "Revision 41 | Edit project.json
+            // externally; changes appear here automatically" - a developer's sentence,
+            // permanently, in front of somebody writing music. Revision matters when
+            // two edits disagree, and the message that says so already carries it.
+            //
+            // What belongs here is what is picked out and what will repeat. Both were
+            // shown only by drawing until now, so there was nothing to read for anyone
+            // who could not pick a highlight out of the colours. "Live sync" stays: it
+            // says the folder is being watched, which is what the app is for.
+            String idle ("Live sync  |  ");
+            idle << workspace.whatIsSelected();
+
+            if (const auto loop = workspace.loopDescription(); loop.isNotEmpty())
+                idle << "  |  " << loop;
+
+            status.setText (idle, dontSendNotification);
+        }
 
         collectRenderResult();
         continuePluginScan();
@@ -2538,9 +2553,16 @@ private:
         if (failure.isNotEmpty())
             scriptError = failure;
 
+        // A failing action stops the script, so the round is over - it simply did not
+        // get all the way. Saying it was unfinished meant a check that asked a question
+        // and got "no" waited out its whole timeout and then could not tell a truthful
+        // no from a hung app. The status below already carries the error; this makes it
+        // arrive instead of never being written again.
+        const auto finished = failure.isNotEmpty() || scriptStep >= script.size();
+
         live::atomicWrite (project.source.getSiblingFile ("ui-script-status.json"), JSON::toString (live::object ({
             { "done", scriptStep }, { "total", script.size() }, { "error", scriptError },
-            { "round", scriptRound }, { "finished", scriptStep >= script.size() } }), false));
+            { "round", scriptRound }, { "finished", finished } }), false));
 
         if (failure.isEmpty())
             ++scriptStep;
