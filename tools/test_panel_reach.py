@@ -178,6 +178,19 @@ def check_a_suggestion_can_be_heard_without_a_script(exe, folder, report):
                                       else None),
                              timeout=20, what="both suggestions to reach the list")
             report.expect("earlier suggestions are on screen, numbered", len(shelf) == 2, shelf)
+
+            # And one can be thrown away. It removes a record of an offer and no music,
+            # which is the whole reason it is safe to put next to the list.
+            before = len(read(folder / "state.json")["patterns"][0].get("sequences", []))
+            session.run([{"press": "forget"}])
+            fewer = wait_for(lambda: (panel(folder).get("candidates_on_screen")
+                                      if len(panel(folder).get("candidates_on_screen") or []) == 1
+                                      else None),
+                             timeout=20, what="the suggestion to leave the list")
+            report.expect("one can be forgotten", len(fewer) == 1, fewer)
+            report.expect("and forgetting it deleted no music",
+                          len(read(folder / "state.json")["patterns"][0].get("sequences", []))
+                          == before)
             report.expect("and each says what it was",
                           all(("up a tone" in s or "up a fifth" in s) for s in shelf), shelf)
 
@@ -387,6 +400,81 @@ def check_another_project_can_be_opened_without_leaving_the_app(exe, folder, rep
             session.close()
 
 
+def check_what_is_known_about_the_project_is_on_screen(exe, folder, report):
+    """W0: the three kinds of note, where the person can see them.
+
+    A condition is a rule they set. A guess is the assistant's reading, and is marked as
+    one, because a guess that reads like a rule is how an assistant ends up defending a
+    key nobody chose. A todo is work not done. All three went to the model and none was
+    on screen, so the one participant who could not see what had been agreed was the one
+    who had agreed to it."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        state = session.settled()
+        clip = state["playlist"]["clips"][0]
+
+        empty = wait_for(lambda: (panel(folder).get("decisions_on_screen")
+                                  if panel(folder).get("decisions_on_screen") else None),
+                         timeout=20, what="the panel to say what is known")
+        report.expect("with nothing decided, it says so rather than showing a blank",
+                      "nothing decided" in empty.lower(), empty[:60])
+
+        session.run([{"project_note": ["condition", "keep the drums as they are"]},
+                     {"project_note": ["guess", "this sounds like D minor"]},
+                     {"project_note": ["todo_on", "rewrite this fill", clip["id"]]}])
+
+        shown = wait_for(lambda: (panel(folder).get("decisions_on_screen")
+                                  if "drums" in (panel(folder).get("decisions_on_screen") or "")
+                                  else None),
+                         timeout=20, what="the notes to reach the screen")
+
+        report.expect("what the person decided is marked as decided",
+                      "DECIDED  keep the drums as they are" in shown, shown)
+        report.expect("what the assistant guessed is marked as a guess",
+                      "guessed  this sounds like D minor" in shown, shown)
+        report.expect("and says which music the guess was read from",
+                      "read at revision" in shown, shown)
+        report.expect("work not done is shown as work not done",
+                      "to do    rewrite this fill" in shown, shown)
+        report.expect("and a note tied to a clip says it follows one",
+                      "follows a clip" in shown, shown)
+
+        # The clip goes. The note has to say it lost its place, on screen, not only in
+        # the file the model reads.
+        def remove(live):
+            live["playlist"]["clips"] = [p for p in live["playlist"]["clips"]
+                                         if p["id"] != clip["id"]]
+
+        apply_change(folder / "project.json", remove)
+        orphaned = wait_for(lambda: (panel(folder).get("decisions_on_screen")
+                                     if "has gone" in (panel(folder).get("decisions_on_screen") or "")
+                                     else None),
+                            timeout=30, what="the panel to notice the clip went")
+        report.expect("a note whose clip was deleted says so where a person can see it",
+                      "the clip this was about has gone" in orphaned, orphaned)
+
+        # How far a suggestion may go, chosen on screen.
+        report.expect("the strength starts where the project left it",
+                      panel(folder).get("strength_on_screen") == "Nudge it",
+                      panel(folder).get("strength_on_screen"))
+
+        session.run([{"project_note": ["strength", "fresh"]}])
+        moved = wait_for(lambda: (panel(folder).get("strength_on_screen")
+                                  if panel(folder).get("strength_on_screen") != "Nudge it"
+                                  else None),
+                         timeout=20, what="the strength to change on screen")
+        report.expect("and follows the project when it changes",
+                      moved == "Something new", moved)
+
+        report.for_a_person("whether the three kinds read as three different things",
+                            "what a label communicates is read, not measured")
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -399,6 +487,9 @@ def run(exe, output):
     print()
     print("another project can be opened without leaving the app")
     check_another_project_can_be_opened_without_leaving_the_app(exe, output / "open", report)
+    print()
+    print("what is known about the project is on screen")
+    check_what_is_known_about_the_project_is_on_screen(exe, output / "notes", report)
     print()
     print("a stale suggestion says so on screen")
     check_a_stale_suggestion_says_so_on_screen(exe, output / "stale", report)

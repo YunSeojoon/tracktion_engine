@@ -142,6 +142,12 @@ public:
         workspace.chatPanel().onPickCandidate = [this] (const String& proposalID)
                                                 { previewFromThePanel (proposalID); };
         workspace.chatPanel().onListen = [this] (const String& half) { listenToHalf (half); };
+        workspace.chatPanel().onDecide = [this] (const String& text)
+                                         { notes->addCondition (text); };
+        workspace.chatPanel().onStrength = [this] (const String& howFar)
+                                           { notes->setStrength (live::strengthNamed (howFar)); };
+        workspace.chatPanel().onForget = [this] (const String& proposalID)
+                                         { shelf->discard (proposalID); };
 
         listening = std::make_unique<live::Listening> (engine.getDeviceManager().deviceManager);
         listening->onFinished = [this] { workspace.chatPanel().setSomethingToHear (true, {}); };
@@ -1936,6 +1942,10 @@ private:
         // be opened, because it closes under the pointer.
         if (shelf != nullptr)
             workspace.chatPanel().setCandidates (shelf->snapshot(), project.revision);
+
+        if (notes != nullptr)
+            workspace.chatPanel().setProjectNotes (notes->asJson(),
+                                                   live::strengthName (notes->strength()));
 
         // Two halves to hear, or not. Read from the files rather than from the stage,
         // so a comparison rendered in an earlier session is still offered when the app

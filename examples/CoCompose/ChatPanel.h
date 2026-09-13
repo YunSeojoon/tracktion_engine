@@ -66,7 +66,11 @@ public:
         // "press Preview" was not a step a person had skipped, it was a step with no
         // button. This is that button.
         preview.setButtonText ("Preview A/B");
-        preview.onClick = [this] { if (onPreview && offered.isNotEmpty()) onPreview (offered); };
+        preview.onClick = [this]
+        {
+            if (onPreview && chosenProposal().isNotEmpty())
+                onPreview (chosenProposal());
+        };
         preview.setVisible (false);
         addAndMakeVisible (preview);
 
@@ -87,20 +91,73 @@ public:
         previewState.setVisible (false);
         addAndMakeVisible (previewState);
 
+        // What the person has decided, what the assistant has guessed, and what is
+        // still to do. All three went to the model and none of them was on screen, so
+        // the one participant who could not see what had been agreed was the one who
+        // agreed to it.
+        decisions.setMultiLine (true, true);
+        decisions.setReadOnly (true);
+        decisions.setCaretVisible (false);
+        decisions.setColour (TextEditor::backgroundColourId, theme::sunken);
+        decisions.setColour (TextEditor::outlineColourId, theme::edge);
+        decisions.setVisible (false);
+        addAndMakeVisible (decisions);
+
+        addCondition.setButtonText ("Decide...");
+        addCondition.onClick = [this] { askForACondition(); };
+        addAndMakeVisible (addCondition);
+
+        // How far a suggestion may go. It is a preference about taste, not about reach,
+        // and the label says so because the two are easy to confuse and only one of them
+        // is safe to widen.
+        strength.addItem ("Nudge it", 1);
+        strength.addItem ("Rework it", 2);
+        strength.addItem ("Something new", 3);
+        strength.setTooltip ("How far a suggestion may go. It does not change what a "
+                             "suggestion is allowed to touch - that is what you attach.");
+        strength.onChange = [this]
+        {
+            if (onStrength)
+                onStrength (strength.getSelectedId() == 3 ? "fresh"
+                          : strength.getSelectedId() == 2 ? "rework"
+                                                          : "tidy");
+        };
+        addAndMakeVisible (strength);
+
         // The alternatives already offered. Asking three times and going back to the
         // second was a thing the app could do and a person could not reach: the shelf
         // was written to a file and read by nothing on screen.
         candidates.setTextWhenNoChoicesAvailable ("no earlier suggestions");
         candidates.setTextWhenNothingSelected ("earlier suggestions");
-        candidates.onChange = [this]
-        {
-            const auto picked = candidates.getSelectedId() - 1;
-
-            if (isPositiveAndBelow (picked, candidateIDs.size()) && onPickCandidate)
-                onPickCandidate (candidateIDs[picked]);
-        };
+        // Choosing from the list chooses; it does not start a render. Picking an
+        // earlier suggestion in order to hear it is two thoughts - which one, and then
+        // listen - and an app that renders on the first of them has decided the second
+        // for you. It also made "pick one and throw it away" start by rendering the
+        // thing you were about to discard.
+        candidates.onChange = [this] { resized(); };
         candidates.setVisible (false);
         addAndMakeVisible (candidates);
+
+        // Throwing one away. It removes a record of an offer and no music at all, which
+        // is why it can sit next to the list without being frightening - but the button
+        // says "Forget" rather than "Delete" because the two would read the same and
+        // only one of them is true.
+        forget.setButtonText ("Forget");
+        forget.setTooltip ("Takes this suggestion off the list. It changes no music: if "
+                           "you already applied it, the notes stay and Ctrl+Z is still "
+                           "how you take them back.");
+        forget.onClick = [this]
+        {
+            // Nothing picked means the most recent one, which is what "forget that" means
+            // when somebody says it out loud. Doing nothing silently is the answer a
+            // person cannot tell from a broken button.
+            const auto which = chosenProposal();
+
+            if (which.isNotEmpty() && onForget)
+                onForget (which);
+        };
+        forget.setVisible (false);
+        addAndMakeVisible (forget);
 
         send.setButtonText ("Ask");
         send.onClick = [this] { if (onSend) onSend(); };
@@ -194,10 +251,94 @@ public:
 
     std::function<void()> onSend, onCancel;
     std::function<void (const String&)> onApply, onPreview, onPickCandidate, onListen;
+    std::function<void (const String&)> onStrength, onDecide, onAcceptGuess, onForget;
 
     /** The proposal currently being offered, if any. Empty once it has been applied, so
         the same change cannot be applied twice by pressing the button again. */
     String offeredProposal() const { return offered; }
+
+    /** Which suggestion the buttons act on: the one picked from the list, or the one
+        just offered when nothing is picked. */
+    String chosenProposal() const
+    {
+        const auto picked = candidates.getSelectedId() - 1;
+
+        if (isPositiveAndBelow (picked, candidateIDs.size()))
+            return candidateIDs[picked];
+
+        return offered;
+    }
+
+    /** What is known about this project, on screen, in the three kinds it is kept in.
+
+        A condition is a rule the person set. A guess is the assistant's reading and is
+        marked as one, because a guess that reads like a rule is how an assistant ends
+        up defending a key nobody chose. A todo is work not yet done. They are laid out
+        in that order and each says which it is, since the whole reason they are stored
+        apart is that collapsing them loses the difference. */
+    void setProjectNotes (const var& kept, const String& howFar)
+    {
+        auto* entries = kept["notes"].getArray();
+        const auto shape = JSON::toString (kept, true) + howFar;
+
+        if (shape == notesShape)
+            return;
+
+        notesShape = shape;
+
+        String text;
+        auto conditions = 0, guesses = 0, todos = 0;
+
+        if (entries != nullptr)
+            for (const auto& one : *entries)
+            {
+                const auto kind = one["kind"].toString();
+
+                if (kind == "condition")
+                {
+                    text << "DECIDED  " << one["text"].toString() << newLine;
+                    ++conditions;
+                }
+                else if (kind == "guess")
+                {
+                    text << "guessed  " << one["text"].toString()
+                         << "   (read at revision " << one["about_revision"].toString() << ")" << newLine;
+                    ++guesses;
+                }
+                else if (kind == "todo")
+                {
+                    text << (static_cast<bool> (one["done"]) ? "done     " : "to do    ")
+                         << one["text"].toString();
+
+                    const auto anchor = one["anchor"].toString();
+                    if (anchor == "time")
+                        text << "   (beats " << one["from_beat"].toString()
+                             << " to " << one["to_beat"].toString() << ")";
+                    else if (anchor == "clip")
+                        text << (one["clip"].toString().startsWith ("gone:")
+                                   ? "   (the clip this was about has gone)"
+                                   : "   (follows a clip)");
+
+                    text << newLine;
+                    ++todos;
+                }
+            }
+
+        if (text.isEmpty())
+            text = "Nothing decided yet. Decide... writes down something a suggestion "
+                   "must respect.";
+
+        decisions.setText (text, dontSendNotification);
+        decisions.setVisible (conditions + guesses + todos > 0 || addCondition.isVisible());
+
+        const auto wanted = howFar == "fresh" ? 3 : howFar == "rework" ? 2 : 1;
+        if (strength.getSelectedId() != wanted)
+            strength.setSelectedId (wanted, dontSendNotification);
+
+        resized();
+    }
+
+    String notesOnScreen() const { return decisions.getText(); }
 
     /** Whether there are two halves to hear, and which one is playing.
 
@@ -268,6 +409,7 @@ public:
         }
 
         candidates.setVisible (! candidateIDs.isEmpty());
+        forget.setVisible (! candidateIDs.isEmpty());
         resized();
     }
 
@@ -376,8 +518,8 @@ public:
         // Listening and taking are offered together: a person who can press Apply can
         // hear what it would do first, and one without the other is the choice this
         // panel used to make for them.
-        preview.setVisible (offered.isNotEmpty());
-        preview.setEnabled (offered.isNotEmpty() && ! waiting);
+        preview.setVisible (offered.isNotEmpty() || ! candidateIDs.isEmpty());
+        preview.setEnabled (chosenProposal().isNotEmpty() && ! waiting);
 
         if (offered.isEmpty())
             setPreviewState ({});
@@ -484,6 +626,8 @@ public:
                                                 { "ask", send.isEnabled() },
                                                 { "stop", stop.isEnabled() } }) },
                          { "preview_state", previewState.getText() },
+                         { "decisions_on_screen", decisions.getText() },
+                         { "strength_on_screen", strength.getText() },
                          { "listening", object ({ { "offered", playA.isVisible() },
                                                   { "a", playA.getButtonText() },
                                                   { "b", playB.getButtonText() } }) },
@@ -507,6 +651,7 @@ public:
                     : named == "stop"    ? &stop
                     : named == "play_a"  ? &playA
                     : named == "play_b"  ? &playB
+                    : named == "forget"  ? &forget
                                          : nullptr;
 
         if (which == nullptr || ! which->isVisible() || ! which->isEnabled())
@@ -525,8 +670,32 @@ public:
             << (stop.isEnabled() ? "x" : "-")
             << "|" << previewState.getText()
             << "|" << candidateShape
-            << "|" << listenShape;
+            << "|" << listenShape
+            << "|" << notesShape;
         return key;
+    }
+
+    /** Writing down something a suggestion has to respect. A condition is the one kind
+        a person creates, which is why this is the only box here that types into. */
+    void askForACondition()
+    {
+        auto* box = new AlertWindow ("Something to keep",
+                                     "What must a suggestion respect? For example: "
+                                     "keep the drums as they are.",
+                                     MessageBoxIconType::NoIcon);
+        box->addTextEditor ("text", {});
+        box->addButton ("Keep it", 1, KeyPress (KeyPress::returnKey));
+        box->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+
+        box->enterModalState (true, ModalCallbackFunction::create (
+            [this, box] (int result)
+            {
+                std::unique_ptr<AlertWindow> owned (box);
+                const auto typed = owned->getTextEditorContents ("text").trim();
+
+                if (result == 1 && typed.isNotEmpty() && onDecide)
+                    onDecide (typed);
+            }), false);
     }
 
     String inspectorText() const
@@ -557,7 +726,20 @@ public:
             previewState.setBounds (r.removeFromBottom (14));
 
         if (candidates.isVisible())
-            candidates.setBounds (r.removeFromBottom (22).reduced (1));
+        {
+            auto row = r.removeFromBottom (22);
+            forget.setBounds (row.removeFromRight (70).reduced (1));
+            candidates.setBounds (row.reduced (1));
+        }
+
+        {
+            auto row = r.removeFromBottom (22);
+            addCondition.setBounds (row.removeFromLeft (86).reduced (1));
+            strength.setBounds (row.removeFromLeft (130).reduced (1));
+        }
+
+        if (decisions.isVisible())
+            decisions.setBounds (r.removeFromBottom (jmin (72, r.getHeight() / 4)).reduced (0, 2));
 
         if (apply.isVisible() || playA.isVisible())
         {
@@ -712,7 +894,10 @@ private:
     Component cards;
     Viewport viewport;
     TextEditor entry, transcript, change;
-    TextButton inspect, clear, send, stop, apply, preview, playA, playB;
+    TextButton inspect, clear, send, stop, apply, preview, playA, playB, addCondition, forget;
+    TextEditor decisions;
+    ComboBox strength;
+    String notesShape;
     String listenShape;
     Label previewState;
     ComboBox candidates;
