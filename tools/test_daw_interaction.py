@@ -786,6 +786,29 @@ def check_one_drag_is_one_undo(exe, folder, report):
         report.expect("and one undo puts the point back, not one move of the way",
                       abs(undone["time"] - was) < 0.01,
                       (was, dragged["time"], undone["time"]))
+
+        # And a fourth, which is not a mouseDrag at all: a Slider tells its owner on
+        # every step of a drag, and the owner was opening an undo step each time. Only
+        # a real pointer sends onDragStart and onDragEnd, so setting the value from the
+        # script would prove nothing about a hand on the fader.
+        insert_id = state["mixer"]["inserts"][0]["id"]
+        level = next(i for i in session.settled()["mixer"]["inserts"]
+                     if i["id"] == insert_id)["gain_db"]
+
+        session.run([{"fader": [insert_id, 0.75, 0.25]}])
+        time.sleep(0.8)
+        pulled = next(i for i in session.settled()["mixer"]["inserts"]
+                      if i["id"] == insert_id)["gain_db"]
+        report.expect("the fader moved", abs(pulled - level) > 1.0, (level, pulled))
+        if abs(pulled - level) <= 1.0:
+            return
+
+        control(project, "undo")
+        time.sleep(1.0)
+        restored = next(i for i in session.settled()["mixer"]["inserts"]
+                        if i["id"] == insert_id)["gain_db"]
+        report.expect("and one undo puts the fader back, not one step of the way",
+                      abs(restored - level) < 0.05, (level, pulled, restored))
     finally:
         session.close()
 

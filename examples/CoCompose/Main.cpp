@@ -2858,6 +2858,16 @@ private:
 
         // A pointer on an automation row, rather than the shortcut curve_drag takes.
         // [curve, from beat, from value, to beat, to value] and optionally "bend".
+        // A hand on a mixer fader: [insert, from, to] as fractions of its travel.
+        if (action.hasProperty ("fader"))
+        {
+            const auto drag = action["fader"];
+            return drag.isArray() && drag.size() == 3
+                    && workspace.dragFader (drag[0].toString(),
+                                            static_cast<double> (drag[1]),
+                                            static_cast<double> (drag[2]));
+        }
+
         if (action.hasProperty ("curve_pointer"))
         {
             const auto drag = action["curve_pointer"];

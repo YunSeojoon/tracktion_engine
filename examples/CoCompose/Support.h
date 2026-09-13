@@ -34,6 +34,33 @@ inline bool rightClickOn (Component& target, Point<float> where)
     return true;
 }
 
+/** Drags across a component: one press, a stream of moves, one release.
+
+    The stream is the point. A single move makes a drag indistinguishable from a click
+    for anything that only goes wrong across several of them, which is how one drag
+    being many undo steps went unseen everywhere it happened. */
+inline bool dragOn (Component& target, Point<float> from, Point<float> to)
+{
+    const ModifierKeys mods (ModifierKeys::leftButtonModifier);
+
+    auto at = [&] (Point<float> where, bool dragged)
+    {
+        return MouseEvent (Desktop::getInstance().getMainMouseSource(), where, mods,
+                           1.0f, 0.0f, 0.0f, 0.0f, 0.0f, &target, &target,
+                           Time::getCurrentTime(), from, Time::getCurrentTime(),
+                           1, dragged);
+    };
+
+    target.mouseDown (at (from, false));
+
+    for (int step = 1; step <= 5; ++step)
+        target.mouseDrag (at ({ from.x + (to.x - from.x) * (float) step / 5.0f,
+                                from.y + (to.y - from.y) * (float) step / 5.0f }, true));
+
+    target.mouseUp (at (to, true));
+    return true;
+}
+
 inline void require (bool condition, const String& error)
 {
     if (! condition) throw std::runtime_error (error.toStdString());

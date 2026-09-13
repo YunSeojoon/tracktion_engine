@@ -321,6 +321,7 @@ public:
         gain.units = " dB";
         gain.setDefaultValue (0.0);
         gain.onValueChange = [this] { write (ids::gainDb, gain.getValue(), "Channel volume"); };
+        dragsAreOneStep (gain);
 
         insert.setSliderStyle (Slider::IncDecButtons);
         insert.setRange (1.0, 256.0, 1.0);
@@ -333,6 +334,7 @@ public:
         pan.setName ("Channel pan");
         pan.setDefaultValue (0.0);
         pan.onValueChange = [this] { write (ids::pan, pan.getValue(), "Channel pan"); };
+        dragsAreOneStep (pan);
 
         instrument.onChange = [this]
         {
@@ -527,6 +529,19 @@ public:
 private:
     ValueTree channel() const { return model.channelFor (id); }
 
+    /** A fader is dragged, and a drag is one thing to take back.
+
+        onValueChange fires on every step of a drag, so beginNewTransaction on each of
+        them made Ctrl+Z crawl the fader back up through every value it passed. The
+        slider says when a drag starts and ends; between those, the writes join the step
+        the first one opened. Changing a value any other way - typing it, the wheel, a
+        default - is not a drag and keeps its own step. */
+    void dragsAreOneStep (Slider& slider)
+    {
+        slider.onDragStart = [this] { holding = true;  dragStepOpen = false; };
+        slider.onDragEnd   = [this] { holding = false; dragStepOpen = false; };
+    }
+
     template <typename Value>
     void write (const Identifier& property, Value value, const String& description)
     {
@@ -534,7 +549,13 @@ private:
             return;
 
         auto& undo = model.edit.getUndoManager();
-        undo.beginNewTransaction (description);
+
+        if (! holding || ! dragStepOpen)
+        {
+            undo.beginNewTransaction (description);
+            dragStepOpen = holding;
+        }
+
         channel().setProperty (property, value, &undo);
         model.renderIfNeeded();
     }
@@ -778,6 +799,7 @@ private:
                stepSettings { "1/16" }, presets { "P" };
     ComboBox instrument;
     ValueSlider gain, pan;
+    bool holding = false, dragStepOpen = false;
     Slider insert;
     StepGrid steps;
     Array<std::pair<String, String>> instruments;
@@ -997,6 +1019,7 @@ public:
             if (master != nullptr) { master->setVolumeDb (static_cast<float> (gain.getValue())); return; }
             write (ids::gainDb, gain.getValue(), "Insert volume");
         };
+        dragsAreOneStep (gain);
 
         pan.setName ("Insert pan");
         pan.setDefaultValue (0.0);
@@ -1008,6 +1031,7 @@ public:
             if (master != nullptr) { master->setPan (static_cast<float> (pan.getValue())); return; }
             write (ids::pan, pan.getValue(), "Insert pan");
         };
+        dragsAreOneStep (pan);
 
         mute.setClickingTogglesState (true);
         mute.onClick = [this]
@@ -1214,11 +1238,30 @@ private:
 
     void notify() { if (changed != nullptr) changed(); }
 
+    /** A fader is dragged, and a drag is one thing to take back.
+
+        onValueChange fires on every step of a drag, so beginNewTransaction on each of
+        them made Ctrl+Z crawl the fader back up through every value it passed. The
+        slider says when a drag starts and ends; between those, the writes join the step
+        the first one opened. Changing a value any other way - typing it, the wheel, a
+        default - is not a drag and keeps its own step. */
+    void dragsAreOneStep (Slider& slider)
+    {
+        slider.onDragStart = [this] { holding = true;  dragStepOpen = false; };
+        slider.onDragEnd   = [this] { holding = false; dragStepOpen = false; };
+    }
+
     template <typename Value>
     void write (const Identifier& property, Value value, const String& description)
     {
         auto& undo = model.edit.getUndoManager();
-        undo.beginNewTransaction (description);
+
+        if (! holding || ! dragStepOpen)
+        {
+            undo.beginNewTransaction (description);
+            dragStepOpen = holding;
+        }
+
         model.insertFor (id).setProperty (property, value, &undo);
         model.renderIfNeeded();
         notify();
@@ -1387,6 +1430,21 @@ public:
                                            (float) gain.getHeight() / 2.0f });
     }
 
+    /** A hand on the fader, given as a fraction of its travel: 0 is the bottom of the
+        slider and 1 the top. setValue would prove nothing here - onDragStart and
+        onDragEnd only arrive from a real pointer, and they are what makes a drag one
+        thing to take back. */
+    bool dragVolume (double from, double to)
+    {
+        const auto y = [this] (double fraction)
+        {
+            return (float) gain.getHeight() * (float) (1.0 - jlimit (0.0, 1.0, fraction));
+        };
+
+        return live::dragOn (gain, { (float) gain.getWidth() / 2.0f, y (from) },
+                                   { (float) gain.getWidth() / 2.0f, y (to) });
+    }
+
     /** Right-clicks the chain where that effect is drawn. A negative index means past
         the last one, which is the gesture that offers "Add effect". */
     bool rightClickChain (int index)
@@ -1551,6 +1609,7 @@ private:
     Label name, feeds;
     Chain chain;
     ValueSlider gain, pan;
+    bool holding = false, dragStepOpen = false;
     TextButton mute { "Mute" }, effects { "FX" }, routing { "> Master" };
     te::LevelMeasurer::Client client;
     te::LevelMeterPlugin* attached = nullptr;
@@ -2825,6 +2884,15 @@ public:
         for (auto* strip : mixer->stripList())
             if (strip->insertID() == insertID)
                 return strip->rightClickVolume();
+        return false;
+    }
+
+    /** Drags a mixer strip's fader, as a fraction of its travel. */
+    bool dragFader (const String& insertID, double from, double to)
+    {
+        for (auto* strip : mixer->stripList())
+            if (strip->insertID() == insertID)
+                return strip->dragVolume (from, to);
         return false;
     }
 
