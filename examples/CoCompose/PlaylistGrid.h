@@ -314,6 +314,7 @@ public:
 
         const auto area = clipArea (hit);
         dragMode = e.x > area.getRight() - 7 ? resize : move;
+        dragTransactionOpen = false;
         dragAnchor = e.getPosition();
         if (e.mods.isCtrlDown() && dragMode == move)
             copySelection();
@@ -407,7 +408,15 @@ public:
         const auto beatDelta = (e.x - dragAnchor.x) / beatWidth();
         const auto laneDelta = (e.y - dragAnchor.y) / laneHeight;
 
-        undo().beginNewTransaction (dragMode == resize ? "Resize clips" : "Move clips");
+        // Once for the drag, not once per mouse event. beginNewTransaction sets a flag
+        // that makes the next change start a new undo step, so calling it on every tick
+        // turned one drag into as many undo steps as the pointer sent moves - Ctrl+Z
+        // walked the clip back through every position it had passed through.
+        if (! dragTransactionOpen)
+        {
+            undo().beginNewTransaction (dragMode == resize ? "Resize clips" : "Move clips");
+            dragTransactionOpen = true;
+        }
 
         for (const auto& start : starts)
         {
@@ -1415,8 +1424,19 @@ public:
 
         mouseDown (event (down, false));
 
+        // A real pointer sends a stream of moves, not one. Sending a single drag here
+        // made every check pass over a defect that only shows up across several: one
+        // drag was becoming one undo step per move, and with one move that is one undo
+        // step and looks right.
         if (what.endsWith ("drag") || std::abs (toBeat - fromBeat) > 1.0e-9)
-            mouseDrag (event (up, true));
+        {
+            for (int step = 1; step <= 5; ++step)
+            {
+                const Point<float> along (down.x + (up.x - down.x) * (float) step / 5.0f,
+                                          down.y + (up.y - down.y) * (float) step / 5.0f);
+                mouseDrag (event (along, true));
+            }
+        }
 
         mouseUp (event (up, what.endsWith ("drag")));
 
@@ -1966,6 +1986,7 @@ private:
     DragMode dragMode = none;
     Tool tool = select;
     bool snapSuspended = false;
+    bool dragTransactionOpen = false;
     Point<int> panAnchor, panStart;
     Point<int> bendAnchor;
     double bendStart = 0.0;

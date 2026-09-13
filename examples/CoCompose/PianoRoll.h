@@ -566,6 +566,7 @@ private:
             }
 
             const auto area = noteArea (hit);
+            dragTransactionOpen = false;
             dragMode = e.mods.isAltDown() ? velocity
                      : e.x > area.getRight() - 6 ? resize : move;
             dragAnchor = e.getPosition();
@@ -598,8 +599,15 @@ private:
             const auto pitchDelta = (dragAnchor.y - e.y) / noteHeight;
             auto notes = owner.sequence();
 
-            owner.undo().beginNewTransaction (dragMode == resize ? "Resize notes"
-                                            : dragMode == velocity ? "Set velocity" : "Move notes");
+            // Once for the drag. See the same note in the arrangement: this sets a
+            // flag that starts a new undo step on the next change, so calling it every
+            // tick made Ctrl+Z walk the note back through every position it passed.
+            if (! dragTransactionOpen)
+            {
+                owner.undo().beginNewTransaction (dragMode == resize ? "Resize notes"
+                                                : dragMode == velocity ? "Set velocity" : "Move notes");
+                dragTransactionOpen = true;
+            }
 
             for (const auto& start : starts)
             {
@@ -835,6 +843,7 @@ private:
         PianoRollEditor& owner;
         Array<Start> starts;
         DragMode dragMode = none;
+        bool dragTransactionOpen = false;
         Point<int> dragAnchor, rubberStart;
         Rectangle<int> rubberBand;
     };

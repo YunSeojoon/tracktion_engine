@@ -19,7 +19,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from cocompose import apply_change, read, tool, wait_for
+from cocompose import apply_change, control, read, tool, wait_for
 from test_plugin_compatibility import Session, prepare_song
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -718,6 +718,45 @@ def write_a_quiet_wav(path):
     path.write_bytes(header + data)
 
 
+def check_one_drag_is_one_undo(exe, folder, report):
+    """W1: dragging a clip once and taking it back once.
+
+    beginNewTransaction sets a flag that makes the next change start a new undo step,
+    and both editing surfaces were calling it inside mouseDrag - once per pointer move.
+    So one drag became as many undo steps as moves the pointer sent, and Ctrl+Z walked
+    the clip back through every position it had passed through.
+
+    No check saw it because the scripted drag sent a single move, and with one move one
+    drag really is one undo step. The gesture sends several now, which is what a hand
+    does."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        state = session.settled()
+        clip = state["playlist"]["clips"][0]
+        where = clip["start"]
+
+        session.run([{"pick_clip": [0, where + 0.5]},
+                     {"ruler": ["drag", where + 0.5, where + 12.5, 0]}])
+        time.sleep(0.8)
+        moved = session.settled()
+        now = next(c for c in moved["playlist"]["clips"] if c["id"] == clip["id"])
+        report.expect("the clip moved", now["start"] != where, (where, now["start"]))
+        if now["start"] == where:
+            return
+
+        control(project, "undo")
+        time.sleep(1.0)
+        back = next(c for c in session.settled()["playlist"]["clips"] if c["id"] == clip["id"])
+        report.expect("and one undo puts it back where it started, not one step of the way",
+                      back["start"] == where, (where, now["start"], back["start"]))
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -763,6 +802,9 @@ def run(exe, output):
     print()
     print("Erase and Split are chosen, not stumbled into")
     check_erase_and_split_are_chosen_not_stumbled_into(exe, output / "destructive", report)
+    print()
+    print("one drag is one undo")
+    check_one_drag_is_one_undo(exe, output / "onedrag", report)
     print()
     print("every target answers a right-click, and answering costs nothing")
     check_every_target_has_a_menu_and_opening_it_changes_nothing(exe, output / "targets", report)
