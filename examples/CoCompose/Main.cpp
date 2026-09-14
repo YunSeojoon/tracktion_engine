@@ -2249,10 +2249,54 @@ private:
                 }
         }
 
+        // A change to an insert - a parameter, an effect, a send - is heard wherever the
+        // channels that play through that insert are playing. Nothing above looks at
+        // those, so an insert-only proposal used to fall through to beats 0 to 8: attach
+        // the insert for an instrument that first comes in at bar nine, change its
+        // reverb, and the comparison renders the opening, where that instrument is
+        // silent. Both halves sound identical and the change cannot be judged.
+        StringArray touchedInserts;
+
+        for (const auto& change : proposal->effects)
+            touchedInserts.addIfNotAlreadyThere (change.insertID);
+
+        for (const auto& change : proposal->parameters)
+            if (project.model->insertFor (change.ownerID).isValid())
+                touchedInserts.addIfNotAlreadyThere (change.ownerID);
+
+        if (! touchedInserts.isEmpty())
+        {
+            StringArray patternsHeard;
+
+            for (auto channel : project.model->channels())
+            {
+                const auto slot = static_cast<int> (channel[live::ids::insert]);
+                const auto through = project.model->insertForSlot (slot);
+
+                if (! through.isValid() || ! touchedInserts.contains (live::Model::uidOf (through)))
+                    continue;
+
+                // Every pattern with anything on that channel. A placement of it is a
+                // stretch of song where this insert has something to carry.
+                for (auto pattern : project.model->patterns())
+                    if (live::Model::findSequence (pattern, live::Model::uidOf (channel)).isValid())
+                        patternsHeard.addIfNotAlreadyThere (live::Model::uidOf (pattern));
+            }
+
+            for (auto clip : project.model->instances())
+                if (patternsHeard.contains (clip[live::ids::pattern].toString()))
+                    widen (static_cast<double> (clip[live::ids::start]),
+                           static_cast<double> (clip[live::ids::length]));
+        }
+
         if (to <= from)
         {
             from = 0.0;
             to = 8.0;
+
+            if (! touchedInserts.isEmpty())
+                say ("Nothing plays through that insert, so the comparison covers the "
+                     "start of the song and both halves will sound the same.");
         }
 
         // A little either side, so the change is heard in context rather than starting
@@ -2759,6 +2803,19 @@ private:
             const auto what = action["open_effect"];
             return what.isArray() && what.size() == 2
                     && workspace.openEffectWindow (what[0].toString(), static_cast<int> (what[1]));
+        }
+
+        // The panel's own range working, for a proposal that did not come through the
+        // conversation. What this drives is which stretch gets compared, not whether the
+        // button reaches it - that is a different check, and it has one.
+        if (action.hasProperty ("preview_panel"))
+        {
+            const auto id = action["preview_panel"].toString();
+            if (toolService->proposalFor (id) == nullptr)
+                return false;
+
+            previewFromThePanel (id);
+            return true;
         }
 
         if (action.hasProperty ("candidate"))

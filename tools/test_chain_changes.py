@@ -556,10 +556,83 @@ def check_an_effect_moves_by_its_place_in_the_chain(exe, folder, report):
         session.close()
 
 
+def check_a_chain_comparison_covers_where_that_insert_plays(exe, folder, report):
+    """review-v6 R3: the comparison has to be where the thing being changed is heard.
+
+    The range the panel works out looks at note changes and clip changes only. A change
+    that touches nothing but an insert - a parameter, an effect, a send - matched neither
+    and fell through to beats 0 to 8. Attach the insert for an instrument that first
+    comes in at bar nine, change its reverb, and the comparison renders the opening,
+    where that instrument is silent: both halves sound the same and there is nothing to
+    judge.
+
+    So the music here starts late on purpose. The comparison has to follow it."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        state = session.settled()
+        mine = state["mixer"]["inserts"][0]["id"]
+
+        # Every clip, not the first one. The fixture places two and moving one left the
+        # other at the beginning - so the insert really was playing there and the range
+        # the app worked out was right. The check was wrong, which is the sort of thing
+        # a check that has never failed hides.
+        def move_them_late(live):
+            for i, late in enumerate(live["playlist"]["clips"]):
+                late["start"] = 64.0 + i * 32.0
+
+        apply_change(project, move_them_late)
+        time.sleep(1.0)
+        moved = session.settled()["playlist"]["clips"]
+        report.expect("the music starts at bar seventeen, not at the beginning",
+                      all(c["start"] >= 64.0 for c in moved), [c["start"] for c in moved])
+        if not all(c["start"] >= 64.0 for c in moved):
+            return
+
+        revision = read(folder / "sync-status.json")["revision"]
+        made = tool(project, "create_proposal",
+                    {"description": "AI: a bit of room", "base_revision": revision,
+                     "allowed_inserts": [mine],
+                     "chain": [{"what": "add", "insert": mine, "type": "reverb"}]})
+        report.expect("there is a chain change to compare", made["status"] == "ok",
+                      made.get("error", {}))
+        if made["status"] != "ok":
+            return
+
+        proposal = made["result"]["proposal"]["id"]
+        (folder / "preview-status.json").unlink(missing_ok=True)
+
+        # The panel's own range working. Naming the beats here would be asking the check
+        # its own answer back; whether the button reaches this is a different question
+        # and has its own check.
+        session.run([{"preview_panel": proposal}])
+        status = wait_for(lambda: (read(folder / "preview-status.json")
+                                   if (folder / "preview-status.json").exists()
+                                   and read(folder / "preview-status.json").get("running") is False
+                                   else None),
+                          timeout=300, what="the comparison to finish")
+
+        report.expect("the comparison covers where that insert is playing, not the "
+                      "silence at the start",
+                      status["end_beat"] > 64.0 and status["start_beat"] >= 32.0,
+                      (status["start_beat"], status["end_beat"]))
+        report.expect("and both halves rendered",
+                      status["before"]["exists"] and status["after"]["exists"],
+                      (status["before"]["exists"], status["after"]["exists"]))
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
 
+    print("a chain comparison covers where that insert plays")
+    check_a_chain_comparison_covers_where_that_insert_plays(exe, output / "chainrange", report)
+    print()
     print("a chain changes only where it was offered, and you hear it first")
     check_a_chain_changes_only_where_it_was_offered(exe, output / "add", report)
     print()
