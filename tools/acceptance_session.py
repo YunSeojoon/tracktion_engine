@@ -273,7 +273,7 @@ def record_sheet(report, folder):
     return "\n".join(lines)
 
 
-def run(exe, output):
+def run(exe, output, rescan=False):
     root = Path(__file__).resolve().parents[1]
     output.mkdir(parents=True, exist_ok=True)
     folder = output / "session"
@@ -286,8 +286,13 @@ def run(exe, output):
     report = {"version": "0.1.0", "commit": commit_of(root),
               "executable_sha256": hashlib.sha256(exe.read_bytes()).hexdigest()}
     try:
-        catalogue = (read(folder / "plugin-scan.json") if (folder / "plugin-scan.json").exists()
-                     else scan(session))
+        # Scanning instantiates every VST3, and a trial plugin answers each one with a
+        # nag window. The output folder is new every run, so the scan is kept beside the
+        # build instead and only redone when asked.
+        cache = root / "build-cocompose" / "plugin-scan-cache.json"
+        if rescan or not cache.exists():
+            atomic_write(cache, scan(session))
+        catalogue = read(cache)
         report["instruments"] = len([p for p in catalogue["found"] if p["instrument"]])
         report["effects"] = len([p for p in catalogue["found"] if not p["instrument"]])
 
@@ -324,5 +329,7 @@ if __name__ == "__main__":
                         default=root / "build-cocompose/CoCompose_artefacts/Release/CoCompose.exe")
     parser.add_argument("--output", type=Path,
                         default=root / "build-cocompose" / ("acceptance-" + uuid.uuid4().hex[:8]))
+    parser.add_argument("--rescan", action="store_true",
+                        help="scan plugins again instead of reusing the last scan")
     args = parser.parse_args()
-    run(args.exe.resolve(), args.output.resolve())
+    run(args.exe.resolve(), args.output.resolve(), args.rescan)

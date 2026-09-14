@@ -562,6 +562,11 @@ private:
 
     File presetFolder() const
     {
+        // A check saves presets too, and they are not the person's to find later.
+        if (const auto elsewhere = SystemStats::getEnvironmentVariable ("COCOMPOSE_PRESETS", {});
+            elsewhere.isNotEmpty())
+            return File (elsewhere);
+
         return File::getSpecialLocation (File::userApplicationDataDirectory)
                  .getChildFile ("CoCompose").getChildFile ("presets");
     }

@@ -6,6 +6,7 @@ from ctypes import wintypes
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -2529,4 +2530,6 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path,
                         default=root / "build-cocompose" / ("live-test-" + uuid.uuid4().hex[:8]))
     args = parser.parse_args()
+    # The presets this check saves stay with its output, not in the person's AppData.
+    os.environ["COCOMPOSE_PRESETS"] = str(args.output.resolve() / "presets")
     run(args.exe.resolve(), args.output.resolve())
