@@ -120,6 +120,7 @@ def record_sheet(report, folder):
         "|---|---|",
         row("앱", "CoCompose " + report["version"]),
         row("커밋", report["commit"][:12]),
+        row("EXE SHA-256", "`%s`" % report.get("executable_sha256", "-")),
         row("오디오 장치", "%s (%s)" % (device.get("name", "-"), device.get("type", "-"))),
         row("샘플레이트 / 버퍼", "%s Hz / %s samples"
             % (device.get("sample_rate", "-"), device.get("buffer_size", "-"))),
@@ -218,6 +219,35 @@ def record_sheet(report, folder):
         "| Undo로 되돌린다 | |",
         "| 앱을 닫고 다음 날 열어 같은 대화를 잇는다 | |",
         "",
+        "### 처음부터 끝까지 - W4의 열 단계",
+        "",
+        "[마일스톤](milestones-workflow-2026-09-13.ko.md) W4의 표를 그대로 따라간다. 진단",
+        "스크립트나 JSON 손편집 없이, 앱만 써서 순서대로 한다. 막히면 그 줄에 어디서",
+        "막혔는지 적고, 그 뒤 단계는 채우지 않는다 - 건너뛴 것은 통과가 아니다.",
+        "",
+        "| 단계 | 통과 조건 | 결과 |",
+        "|---|---|---|",
+        "| 1. EXE 실행·프로젝트 선택 | 개발 도구 없이 작업을 시작한다 | |",
+        "| 2. 악기·샘플 선택 | 로드하고 소리를 듣는다 | |",
+        "| 3. 8마디 작성 | 패턴 배치와 노트 편집을 완료한다 | |",
+        "| 4. 편집·탐색 | 선택/복제/길이/루프/줌/Undo가 예상대로 동작한다 | |",
+        "| 5. 믹서 조절 | 효과와 Send를 편집하고 결과를 듣는다 | |",
+        "| 6. AI 연결·영역 질문 | 화면에서 연결 상태와 첨부 범위를 확인한다 | |",
+        "| 7. 제안 비교 | 원본과 제안을 같은 구간에서 듣는다 | |",
+        "| 8. 채택·Undo | 제안 전체가 적용되고 한 번에 복원된다 | |",
+        "| 9. 저장·WAV 출력 | 파일과 앱의 결과를 확인하고 듣는다 | |",
+        "| 10. 종료·다시 열기 | 음악·패널·프로젝트 대화가 복원된다 | |",
+        "",
+        "배율도 같이 본다. 100%는 기계가 재서 잘리는 글자가 없음을 확인했고, 150%와",
+        "200%, 그리고 작은 창은 보지 않았다. 잘리는 곳과 읽기 어려운 곳을 적는다.",
+        "",
+        "| 배율 | 잘리거나 읽기 어려운 곳 |",
+        "|---|---|",
+        "| 100% | |",
+        "| 150% | |",
+        "| 200% | |",
+        "| 작은 창 | |",
+        "",
         "## 무음이었던 플러그인",
         "",
         "`docs/compatibility-2026-09-10.ko.md`에서 렌더 peak가 0이었던 악기들은 자기 라이브러리를",
@@ -233,7 +263,12 @@ def record_sheet(report, folder):
     lines += ["", "## 판정", "",
               "위 사람 항목이 모두 채워지기 전까지 P2는 완료가 아니다. B6도 마찬가지다 -",
         "\"한 곡을 끝까지\"의 일곱 줄이 비어 있으면 그 단계는 시작되지 않은 것이고,",
-        "기계 검사가 몇 건 통과했는지는 그것을 대신하지 않는다.", ""]
+        "기계 검사가 몇 건 통과했는지는 그것을 대신하지 않는다.",
+        "",
+        "W4도 같다. 열 단계가 비어 있으면 W4는 시작되지 않은 것이다. 회귀 검사는",
+        "이 EXE 해시로 따로 돌리며, 그것이 통과했다는 사실은 열 단계 중 어느 것도",
+        "대신하지 않는다 - 회귀는 고장나지 않았음을 말하고, 열 단계는 쓸 만한지를",
+        "묻는다.", ""]
     return "\n".join(lines)
 
 
@@ -244,7 +279,11 @@ def run(exe, output):
     folder.mkdir(exist_ok=True)
 
     session = Session(exe, folder).open()
-    report = {"version": "0.1.0", "commit": commit_of(root)}
+    # The binary this sheet is about. A record that names only a commit cannot tell a
+    # later build from this one, and the milestone says not to carry an older build's
+    # passes forward as if they were this build's.
+    report = {"version": "0.1.0", "commit": commit_of(root),
+              "executable_sha256": hashlib.sha256(exe.read_bytes()).hexdigest()}
     try:
         catalogue = (read(folder / "plugin-scan.json") if (folder / "plugin-scan.json").exists()
                      else scan(session))
