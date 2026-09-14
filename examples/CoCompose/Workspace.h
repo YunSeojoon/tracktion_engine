@@ -1459,15 +1459,19 @@ public:
         slider and 1 the top. setValue would prove nothing here - onDragStart and
         onDragEnd only arrive from a real pointer, and they are what makes a drag one
         thing to take back. */
-    bool dragVolume (double from, double to)
+    bool dragVolume (double from, double to, const String& modifier = {})
     {
         const auto y = [this] (double fraction)
         {
             return (float) gain.getHeight() * (float) (1.0 - jlimit (0.0, 1.0, fraction));
         };
 
+        auto mods = ModifierKeys (ModifierKeys::leftButtonModifier);
+        if (modifier == "ctrl")
+            mods = mods.withFlags (ModifierKeys::ctrlModifier);
+
         return live::dragOn (gain, { (float) gain.getWidth() / 2.0f, y (from) },
-                                   { (float) gain.getWidth() / 2.0f, y (to) });
+                                   { (float) gain.getWidth() / 2.0f, y (to) }, mods);
     }
 
     /** Right-clicks the chain where that effect is drawn. A negative index means past
@@ -2947,11 +2951,11 @@ public:
     }
 
     /** Drags a mixer strip's fader, as a fraction of its travel. */
-    bool dragFader (const String& insertID, double from, double to)
+    bool dragFader (const String& insertID, double from, double to, const String& modifier = {})
     {
         for (auto* strip : mixer->stripList())
             if (strip->insertID() == insertID)
-                return strip->dragVolume (from, to);
+                return strip->dragVolume (from, to, modifier);
         return false;
     }
 

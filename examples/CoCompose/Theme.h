@@ -325,8 +325,39 @@ public:
     /** How a number should read once typed - "dB", "Hz", or empty. Display only. */
     juce::String units;
 
+    /** What it is, and what it is set to, read once when the pointer arrives.
+
+        Not worked out on every ask. JUCE asks the component under the pointer for its
+        tooltip on a timer, and a string that answers differently each time makes the
+        tooltip window hide and show itself over and over - which is fine until the
+        value is moving by itself. With automation playing it moves every frame, and
+        the app stopped answering anything else. It cost two regression runs to find,
+        because whether it happened at all depended on where the mouse had been left.
+
+        Reading it on the way in also reads better: the number stays still long enough
+        to be read, which is the point of showing it. */
+    void mouseEnter (const juce::MouseEvent& e) override
+    {
+        juce::Slider::mouseEnter (e);
+        sayWhatItIsSetTo();
+    }
+
+    void setExplanation (const juce::String& text)
+    {
+        explanation = text;
+        explained = true;
+        sayWhatItIsSetTo();
+    }
+
     void mouseDown (const juce::MouseEvent& e) override
     {
+        // Holding control makes the drag finer - ten pixels of hand for one pixel of
+        // value - because the useful part of a gain control is a couple of dB wide and
+        // the whole range is sixty-six. Set on the way in and put back on the way out,
+        // so a modifier pressed halfway through a drag does not change it underneath.
+        if (e.mods.isCtrlDown() && ! e.mods.isRightButtonDown())
+            setMouseDragSensitivity (fineSensitivity);
+
         if (! e.mods.isRightButtonDown())
         {
             juce::Slider::mouseDown (e);
@@ -347,7 +378,35 @@ public:
         });
     }
 
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        juce::Slider::mouseUp (e);
+        setMouseDragSensitivity (normalSensitivity);
+        sayWhatItIsSetTo();
+    }
+
 private:
+    static constexpr int normalSensitivity = 250, fineSensitivity = 2500;
+
+    /** Whatever was set as an explanation, then the value and its units. */
+    void sayWhatItIsSetTo()
+    {
+        if (! explained)
+        {
+            explanation = juce::SettableTooltipClient::getTooltip();
+            explained = true;
+        }
+
+        const auto now = juce::String (getValue(), 2) + units;
+
+        setTooltip (explanation.isNotEmpty() ? explanation + ": " + now
+                  : getName().isNotEmpty()   ? getName() + ": " + now
+                                             : now);
+    }
+
+    juce::String explanation;
+    bool explained = false;
+
     void askForANumber()
     {
         auto* box = new juce::AlertWindow (getName().isNotEmpty() ? getName() : "Value",

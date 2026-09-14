@@ -217,9 +217,34 @@ def start_bridge(folder, provider="echo"):
 
 
 def settled_answer(folder, timeout=90):
+    """Waits for the answer, and then for it to stop changing.
+
+    Streaming ending is not the answer being finished. The app reads the change block
+    out of the text and attaches the proposal afterwards, writing the conversation in
+    stages, so a check that stopped at "streaming is false" could read the message
+    before its proposal was there and conclude the model had not written one. It passed
+    on its own and failed under the load of a full run, which is the worst way for a
+    check to be wrong: it looks like the thing it was watching is flaky.
+
+    So this waits for the last message to be the same twice in a row. It says nothing
+    about whether a proposal should be there - that is the caller's question - only that
+    whatever the answer turned out to be, it is done arriving."""
     wait_for(lambda: read(folder / "conversation.json").get("messages"), timeout=timeout)
     wait_for(lambda: not read(folder / "conversation.json")["messages"][-1]["streaming"], timeout=timeout)
-    return read(folder / "conversation.json")
+
+    last = None
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        now = json.dumps(read(folder / "conversation.json")["messages"][-1], sort_keys=True)
+
+        if now == last:
+            return read(folder / "conversation.json")
+
+        last = now
+        time.sleep(0.4)
+
+    raise TimeoutError("the answer never stopped changing")
 
 
 def check_a_conversation_that_continues(exe, folder, report):

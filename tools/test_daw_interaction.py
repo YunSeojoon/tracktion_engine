@@ -1014,6 +1014,83 @@ def check_no_words_are_cut_off(exe, folder, report):
                                 if cut else "nothing is cut there either"))
 
 
+def check_a_fader_can_be_moved_finely(exe, folder, report):
+    """W1: "노브·페이더에 수치 입력, 초기값 복원, 미세 조절을 일관되게 제공하고".
+
+    Typing a number and going back to the default were there; moving a control a little
+    was not. A gain runs from -60 to +6 and the part anybody argues about is a couple of
+    dB wide, so a fader with only one sensitivity is a fader you overshoot.
+
+    The same drag is made twice, once with control held. The second has to move less -
+    that is the whole claim, and it is measurable without deciding how much less is
+    right."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        state = session.settled()
+        insert_id = state["mixer"]["inserts"][0]["id"]
+
+        def level():
+            return next(i for i in session.settled()["mixer"]["inserts"]
+                        if i["id"] == insert_id)["gain_db"]
+
+        start = level()
+        session.run([{"fader": [insert_id, 0.8, 0.5]}])
+        time.sleep(0.6)
+        coarse = abs(level() - start)
+
+        # Back to where it was, then the same distance again with control held.
+        session.run([{"fader": [insert_id, 0.5, 0.8]}])
+        time.sleep(0.6)
+        again = level()
+        session.run([{"fader": [insert_id, 0.8, 0.5, "ctrl"]}])
+        time.sleep(0.6)
+        fine = abs(level() - again)
+
+        report.expect("the plain drag moves the fader", coarse > 1.0, (start, coarse))
+        report.expect("and holding control over the same distance moves it less",
+                      fine < coarse / 2.0, (coarse, fine))
+    finally:
+        session.close()
+
+
+def check_the_app_says_what_its_controls_are_set_to(exe, folder, report):
+    """W1: "단위·현재 값을 표시한다", and "결과를 고정하고 툴팁/가이드에 설명한다".
+
+    A knob that says only what it is called leaves a person to work the number out by
+    listening, and a fader with no units is a number about nothing. The transport was
+    the same: pressing Stop twice returns to where playing began, which is a decision
+    rather than a fact, and nothing on screen said so."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open(extra=["--screenshots"])
+
+    try:
+        prepare_song(session)
+        state = session.settled()
+
+        # A fader says what it is set to when the pointer reaches it, not on a timer -
+        # a tooltip that answers differently every time it is asked makes the tooltip
+        # window flicker, and with automation playing it took the whole message thread
+        # with it. So touch one first, the way a person does before reading it.
+        session.run([{"fader": [state["mixer"]["inserts"][0]["id"], 0.5, 0.5]}])
+        time.sleep(1.5)
+        tips = [str(t) for t in read(folder / "ui-state.json")["tooltips"]]
+
+        report.expect("a fader says what it is set to, in its own units",
+                      any("dB" in t and ":" in t for t in tips),
+                      [t for t in tips if "dB" in t][:3])
+        report.expect("the transport explains what stopping twice does",
+                      any("Stopping twice" in t for t in tips),
+                      [t for t in tips if "Space" in t][:2])
+        report.expect("and says which keys do it",
+                      any("Space" in t for t in tips) and any("Ctrl+L" in t for t in tips),
+                      [t for t in tips if "Ctrl+" in t][:3])
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -1059,6 +1136,12 @@ def run(exe, output):
     print()
     print("Erase and Split are chosen, not stumbled into")
     check_erase_and_split_are_chosen_not_stumbled_into(exe, output / "destructive", report)
+    print()
+    print("the app says what its controls are set to")
+    check_the_app_says_what_its_controls_are_set_to(exe, output / "tooltips", report)
+    print()
+    print("a fader can be moved finely")
+    check_a_fader_can_be_moved_finely(exe, output / "fine", report)
     print()
     print("no words are cut off")
     check_no_words_are_cut_off(exe, output / "clipping", report)

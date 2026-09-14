@@ -101,6 +101,16 @@ public:
         play.onClick = [this] { commandManager.invokeDirectly (commands::playStop, false); };
         song.onClick = [this] { commandManager.invokeDirectly (commands::songMode, false); };
         click.onClick = [this] { commandManager.invokeDirectly (commands::metronome, false); };
+
+        // What each one does, including the part that is a choice rather than a fact:
+        // stopping twice goes back to where playing began, and Home goes to the top of
+        // the song. Somebody who does not know that finds out by losing their place.
+        play.setTooltip ("Space. Plays from where the cursor is, or stops. Stopping twice "
+                         "returns to where playing started; Home goes to the beginning.");
+        song.setTooltip ("Ctrl+L. Switches between playing the whole arrangement and "
+                         "playing the selected pattern on its own.");
+        click.setTooltip ("Ctrl+M. A click track while playing. It is not recorded and "
+                          "is not part of the music.");
         song.setClickingTogglesState (true);
         click.setClickingTogglesState (true);
 
@@ -3047,10 +3057,11 @@ private:
         if (action.hasProperty ("fader"))
         {
             const auto drag = action["fader"];
-            return drag.isArray() && drag.size() == 3
+            return drag.isArray() && drag.size() >= 3
                     && workspace.dragFader (drag[0].toString(),
                                             static_cast<double> (drag[1]),
-                                            static_cast<double> (drag[2]));
+                                            static_cast<double> (drag[2]),
+                                            drag.size() > 3 ? drag[3].toString() : String());
         }
 
         if (action.hasProperty ("curve_pointer"))
@@ -3360,9 +3371,12 @@ private:
         Array<var> clipped;
         collectClippedText (*this, clipped);
 
+        Array<var> tips;
+        collectTooltips (*this, tips);
+
         live::atomicWrite (project.source.getSiblingFile ("ui-state.json"), JSON::toString (live::object ({
             { "revision", project.revision }, { "labels", labels },
-            { "clipped_text", clipped } }), false));
+            { "clipped_text", clipped }, { "tooltips", tips } }), false));
     }
 
     /** Written through a temporary file so a tool never reads a half-finished image. */
@@ -3384,6 +3398,23 @@ private:
     {
         if (auto* label = dynamic_cast<Label*> (&component)) labels.add (label->getText());
         for (auto* child : component.getChildren()) collectLabels (*child, labels);
+    }
+
+    /** What the app says when the pointer rests on something.
+
+        W1 asks for the transport's behaviour to be explained and for controls to show
+        their units and current value, and both of those live in tooltips - which are
+        drawn on demand and so leave no trace a check could read. This is that trace. */
+    static void collectTooltips (Component& component, Array<var>& tips)
+    {
+        if (! component.isVisible())
+            return;
+
+        if (auto* client = dynamic_cast<TooltipClient*> (&component))
+            if (const auto text = client->getTooltip(); text.isNotEmpty())
+                tips.add (text);
+
+        for (auto* child : component.getChildren()) collectTooltips (*child, tips);
     }
 
     /** Every piece of text on screen that cannot be read because there is no room.
