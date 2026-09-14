@@ -30,7 +30,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from cocompose import read, tool, wait_for
+from cocompose import control, read, tool, wait_for
 from test_plugin_compatibility import Session, prepare_song
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -286,7 +286,56 @@ def run(exe, output, model, host):
             moved = {n["id"]: n for n in tool(project, "inspect_pattern",
                                               {"pattern": here["pattern"],
                                                "channel": here["channel"]})["result"]["parts"][0]["notes"]}
-            session.run([{"chat": "apply"}])
+
+            # --- hearing it before taking it, from the panel ------------------------
+            # W3 asks for A/B, Apply and Undo on a real model's proposal, from the
+            # screen. These press the buttons rather than calling what is behind them:
+            # a person who cannot reach the button cannot compare anything, and that
+            # is the half that has been missing before.
+            (folder / "preview-status.json").unlink(missing_ok=True)
+            report.expect("the panel offers a Preview to press",
+                          session.run([{"press": "preview"}]) is not None)
+
+            def rendered():
+                at = folder / "preview-status.json"
+                status = read(at) if at.exists() else {}
+                return status if status and status.get("running") is False else None
+
+            heard = wait_for(rendered, timeout=300)
+            report.expect("both halves of the model's change were rendered",
+                          heard["before"]["exists"] and heard["after"]["exists"],
+                          (heard["before"]["exists"], heard["after"]["exists"]))
+
+            # A is what the song is, B is what was proposed. They have to differ at the
+            # level the change was made at - the notes the engine played - because two
+            # renders of the same music are not identical on this machine and "the files
+            # differ" would pass on noise.
+            report.expect("and A is the song while B is the proposal, not two of the same",
+                          sorted(heard["before"].get("notes", []))
+                            != sorted(heard["after"].get("notes", [])),
+                          (sorted(heard["before"].get("notes", []))[:6],
+                           sorted(heard["after"].get("notes", []))[:6]))
+
+            report.expect("Play A can be pressed once there is something to hear",
+                          session.run([{"press": "play_a"}]) is not None)
+            time.sleep(0.6)
+            panel = read(folder / "chat-inspector.json")
+            report.expect("and the panel says which half is playing",
+                          panel["listening"]["a"] == "Playing A", panel["listening"])
+
+            report.expect("Play B stops A and plays the other one",
+                          session.run([{"press": "play_b"}]) is not None)
+            time.sleep(0.6)
+            panel = read(folder / "chat-inspector.json")
+            report.expect("and it says so, rather than leaving both looking the same",
+                          panel["listening"]["b"] == "Playing B"
+                          and panel["listening"]["a"] == "Play A", panel["listening"])
+
+            session.run([{"press": "play_b"}])   # pressing the one that is playing stops it
+            time.sleep(0.4)
+
+            before_apply = read(folder / "sync-status.json")["revision"]
+            report.expect("and Apply is a button too", session.run([{"press": "apply"}]) is not None)
             time.sleep(1.5)
             after = {n["id"]: n for n in tool(project, "inspect_pattern",
                                               {"pattern": here["pattern"],
@@ -304,15 +353,38 @@ def run(exe, output, model, host):
                           all(after[i]["pitch"] == moved[i]["pitch"]
                               for i in moved if i not in touched))
 
+            # --- and one Undo puts the whole of it back ----------------------------
+            # A proposal is one change however many notes it touched, so taking it back
+            # is one Ctrl+Z. This is the last step W3 asks for.
+            control(project, "undo")
+            time.sleep(1.5)
+            back = {n["id"]: n for n in tool(project, "inspect_pattern",
+                                             {"pattern": here["pattern"],
+                                              "channel": here["channel"]})["result"]["parts"][0]["notes"]}
+            report.expect("one Undo puts every note the model moved back",
+                          all(back[i]["pitch"] == moved[i]["pitch"] for i in touched),
+                          [(moved[i]["pitch"], after[i]["pitch"], back[i]["pitch"])
+                           for i in touched])
+            # Not "the revision is back to what it was". A revision counts changes; it
+            # does not rewind, and undoing is itself a change the watching tools have to
+            # be told about. Asserting the number returned would have been asserting
+            # something the app never promised. What is asserted is that it moved, so
+            # anything reading the folder learns the undo happened.
+            report.expect("and the undo is published rather than happening silently",
+                          read(folder / "sync-status.json")["revision"] > before_apply,
+                          (before_apply, read(folder / "sync-status.json")["revision"]))
+
         # --- and none of it was an edit ------------------------------------------------
         print()
         print("asking is not editing")
-        # started_revision plus the one note this script added to open the note editor.
-        # started_revision, plus the note this check added to open the editor, plus the
-        # proposal if the model managed to write one and it was applied.
+        # Every step this check asked for, and nothing else: the note it added to open
+        # the editor, the proposal if the model wrote one that could be applied, and the
+        # undo that took it back. Asking, previewing and listening are on the list
+        # because they are not edits - if any of them were, this is where it would show.
+        asked_for = 1 + (2 if answer.get("proposal_id") else 0)
         report.expect("every edit is one this check asked for on purpose",
-                      read(folder / "sync-status.json")["revision"] <= started_revision + 2,
-                      (read(folder / "sync-status.json")["revision"], started_revision))
+                      read(folder / "sync-status.json")["revision"] <= started_revision + asked_for,
+                      (read(folder / "sync-status.json")["revision"], started_revision, asked_for))
         report.expect("the app is still answering afterwards",
                       tool(project, "get_capabilities")["status"] == "ok")
 
