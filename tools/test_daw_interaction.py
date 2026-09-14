@@ -971,6 +971,49 @@ def check_the_status_line_says_what_is_picked_out(exe, folder, report):
         session.close()
 
 
+def check_no_words_are_cut_off(exe, folder, report):
+    """W2: "100/150/200% 배율과 작은 창에서 글자·버튼·메뉴가 잘리지 않는지 실제로 확인한다".
+
+    Half of that is measurable. Text wider than its box is not the measure: JUCE squeezes
+    a string to seventy per cent before it truncates, so an overrun of a few pixels is
+    drawn a little narrower with every letter still there. Measuring the overrun alone
+    called five such labels cut when nothing was missing from any of them. What counts is
+    text that will not fit even squeezed.
+
+    What is still a person's job is whether the layout reads well. This only finds words
+    that are gone."""
+    folder.mkdir(parents=True, exist_ok=True)
+
+    def cutAt(where, extra):
+        at = folder / where
+        at.mkdir(parents=True, exist_ok=True)
+        session = Session(exe, at).open(extra=["--screenshots"] + extra)
+        try:
+            prepare_song(session)
+            session.settled()
+            time.sleep(2.0)
+            return read(at / "ui-state.json")["clipped_text"]
+        finally:
+            session.close()
+
+    for where, extra in (("at100", []), ("at150", ["--scale", "1.5"])):
+        cut = cutAt(where, extra)
+        report.expect("nothing is cut off at " + where[2:] + "%",
+                      not cut, [(c["text"], c["squeezed"], c["has"]) for c in cut])
+
+    # Two sizes where the measurement stands but the answer is somebody's to choose.
+    # The Channel Rack's row of three named buttons wants 350 pixels and has about a
+    # quarter of that; making it icons is a decision about how the app should look.
+    for where, extra, what in (("at200", ["--scale", "2.0"], "200%"),
+                               ("small", ["--size", "700x480"], "a 700x480 window")):
+        cut = cutAt(where, extra)
+        report.cannot_check("whether " + what + " should show icons instead of names",
+                            "measured, not guessed: " + (
+                                ", ".join("%s needs %d and has %d"
+                                          % (c["text"], c["squeezed"], c["has"]) for c in cut)
+                                if cut else "nothing is cut there either"))
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -1016,6 +1059,9 @@ def run(exe, output):
     print()
     print("Erase and Split are chosen, not stumbled into")
     check_erase_and_split_are_chosen_not_stumbled_into(exe, output / "destructive", report)
+    print()
+    print("no words are cut off")
+    check_no_words_are_cut_off(exe, output / "clipping", report)
     print()
     print("the status line says what is picked out")
     check_the_status_line_says_what_is_picked_out(exe, output / "statusline", report)

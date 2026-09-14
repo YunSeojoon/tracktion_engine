@@ -3228,8 +3228,12 @@ private:
         if (auto* roll = workspace.pianoRollContent())
             writeImage ("piano-roll.png", *roll);
 
+        Array<var> clipped;
+        collectClippedText (*this, clipped);
+
         live::atomicWrite (project.source.getSiblingFile ("ui-state.json"), JSON::toString (live::object ({
-            { "revision", project.revision }, { "labels", labels } }), false));
+            { "revision", project.revision }, { "labels", labels },
+            { "clipped_text", clipped } }), false));
     }
 
     /** Written through a temporary file so a tool never reads a half-finished image. */
@@ -3251,6 +3255,56 @@ private:
     {
         if (auto* label = dynamic_cast<Label*> (&component)) labels.add (label->getText());
         for (auto* child : component.getChildren()) collectLabels (*child, labels);
+    }
+
+    /** Every piece of text on screen that cannot be read because there is no room.
+
+        W2 asks whether words get cut off at 100, 150 and 200 per cent, and that half of
+        the question is measurable rather than seen.
+
+        Wider than its box is not the measure. JUCE squeezes text to seventy per cent of
+        its width before it gives up and truncates, so a string that overruns by a few
+        pixels is drawn a little narrower and every letter is still there. Measuring the
+        overrun alone reported five such labels as cut when nothing was missing from any
+        of them. What counts is text that will not fit even squeezed. */
+    static void collectClippedText (Component& component, Array<var>& clipped)
+    {
+        auto tooWide = [&clipped] (Component& c, const String& text, const Font& font,
+                                   int room, float squeeze)
+        {
+            if (squeeze <= 0.0f)
+                squeeze = Font::getDefaultMinimumHorizontalScaleFactor();
+
+            const auto needs = GlyphArrangement::getStringWidthInt (font, text);
+            const auto smallest = roundToInt ((float) needs * squeeze);
+
+            if (text.isNotEmpty() && room > 0 && smallest > room)
+                clipped.add (live::object ({ { "text", text },
+                                             { "name", c.getName() },
+                                             { "needs", needs },
+                                             { "squeezed", smallest },
+                                             { "has", room } }));
+        };
+
+        // Not isShowing(): that also asks whether the window is on a screen, which is
+        // false when the app runs headless - so the whole walk quietly examined nothing
+        // and reported a clean bill. Descending only into visible children asks the
+        // same question about ancestors without asking about the screen.
+        if (! component.isVisible())
+            return;
+
+        {
+            if (auto* label = dynamic_cast<Label*> (&component))
+                tooWide (component, label->getText(), label->getFont(),
+                         label->getWidth() - label->getBorderSize().getLeftAndRight(),
+                         label->getMinimumHorizontalScale());
+            else if (auto* button = dynamic_cast<TextButton*> (&component))
+                tooWide (component, button->getButtonText(),
+                         component.getLookAndFeel().getTextButtonFont (*button, button->getHeight()),
+                         button->getWidth() - 8, 0.0f);
+        }
+
+        for (auto* child : component.getChildren()) collectClippedText (*child, clipped);
     }
 
     std::unique_ptr<FileChooser> chooser;

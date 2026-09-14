@@ -848,15 +848,35 @@ public:
         addAndMakeVisible (add);
         addAndMakeVisible (remove);
         addAndMakeVisible (pianoRoll);
+
+        // A button whose name does not fit still has to say what it is. At 200 per cent
+        // and in a small window this bar has less room than its three labels need, and
+        // whether it should become icons there is a judgement about how it looks - so
+        // the measurement is written down and the buttons are at least not mute.
+        add.setTooltip ("Add a channel");
+        remove.setTooltip ("Remove the selected channel");
+        pianoRoll.setTooltip ("Open the note editor for what is selected");
     }
 
     void resized() override
     {
         auto r = getLocalBounds();
         auto bar = r.removeFromBottom (26);
-        add.setBounds (bar.removeFromLeft (110).reduced (2));
-        remove.setBounds (bar.removeFromLeft (130).reduced (2));
-        pianoRoll.setBounds (bar.removeFromLeft (110).reduced (2));
+
+        // Three fixed widths add up to 350, and the panel is not always that wide - at
+        // 200% it is not, and the last button was getting whatever was left, which was
+        // 24 pixels and no room for its own name. They share instead: the preferred
+        // widths when there is room, in proportion when there is not.
+        const auto wanted = 110 + 130 + 110;
+        const auto share = [&bar, wanted] (int preferred)
+        {
+            return bar.getWidth() >= wanted ? preferred
+                                            : jmax (1, preferred * bar.getWidth() / wanted);
+        };
+
+        add.setBounds (bar.removeFromLeft (share (110)).reduced (2));
+        remove.setBounds (bar.removeFromLeft (share (130)).reduced (2));
+        pianoRoll.setBounds (bar.removeFromLeft (share (110)).reduced (2));
         viewport.setBounds (r);
         layoutRows();
     }
@@ -1142,6 +1162,11 @@ public:
         const auto slot = static_cast<int> (insert[ids::index]);
         if (! name.isBeingEdited())
             name.setText (String (slot) + "  " + insert[ids::name].toString(), dontSendNotification);
+            // A strip is narrower than the names people give things. JUCE squeezes text
+            // to seventy per cent before it truncates, which was not enough here and the
+            // end of every name was being thrown away. Letting it squeeze further keeps
+            // all of it; narrower letters are still letters.
+            name.setMinimumHorizontalScale (0.6f);
         gain.setValue (static_cast<double> (insert[ids::gainDb]), dontSendNotification);
         pan.setValue (static_cast<double> (insert[ids::pan]), dontSendNotification);
         mute.setToggleState (static_cast<bool> (insert[ids::mute]), dontSendNotification);
