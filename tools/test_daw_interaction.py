@@ -1091,6 +1091,50 @@ def check_the_app_says_what_its_controls_are_set_to(exe, folder, report):
         session.close()
 
 
+def check_escape_gives_the_keyboard_back_without_losing_the_typing(exe, folder, report):
+    """W1: "채팅 ... 입력 중 ... Escape로 취소할 수 있다".
+
+    While the chat box has the keyboard, Space and Delete are held away from the song -
+    which is right, and leaves the question of how a person gets out. There was no
+    answer: Escape did nothing, so the way out was to find something else to click.
+
+    Escape gives the keyboard back and keeps what was typed. Cancel here means "I am
+    done typing for now", not "throw away the paragraph I just wrote" - losing it to
+    get the keyboard back is a worse trade than the one being offered."""
+    folder.mkdir(parents=True, exist_ok=True)
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        session.settled()
+
+        session.run([{"chat": "draft: a question I am still writing"},
+                     {"chat": "focus"}])
+        time.sleep(0.6)
+        panel = read(folder / "chat-inspector.json")
+        report.expect("what was typed is in the box",
+                      "still writing" in panel["draft"], panel["draft"])
+        report.cannot_check("that the box actually holds the keyboard while typing",
+                            "this machine will not give the app window the keyboard from "
+                            "a script - SetForegroundWindow is refused and so is the "
+                            "AttachThreadInput workaround; type in the box to see it")
+
+        answered = True
+        try:
+            session.run([{"escape_chat": True}])
+        except RuntimeError:
+            answered = False
+        report.expect("Escape is answered rather than ignored", answered)
+
+        time.sleep(0.6)
+        panel = read(folder / "chat-inspector.json")
+        report.expect("the keyboard is given back", not panel["typing"], panel["typing"])
+        report.expect("and the typing survives, because Escape is not a delete",
+                      "still writing" in panel["draft"], panel["draft"])
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -1136,6 +1180,9 @@ def run(exe, output):
     print()
     print("Erase and Split are chosen, not stumbled into")
     check_erase_and_split_are_chosen_not_stumbled_into(exe, output / "destructive", report)
+    print()
+    print("Escape gives the keyboard back without losing the typing")
+    check_escape_gives_the_keyboard_back_without_losing_the_typing(exe, output / "escape", report)
     print()
     print("the app says what its controls are set to")
     check_the_app_says_what_its_controls_are_set_to(exe, output / "tooltips", report)

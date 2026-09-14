@@ -32,6 +32,18 @@ public:
         entry.setMultiLine (true, true);
         entry.setReturnKeyStartsNewLine (true);
         entry.setTextToShowWhenEmpty ("Attach something and ask about it", theme::textFaint);
+
+        // Escape steps out of the box. It does not throw away what was typed: somebody
+        // pressing Escape wants the keyboard back for the song, and losing a paragraph
+        // to get it is a worse trade than the one they were offering. Space and Delete
+        // are already held away from the transport while this has focus, and this is
+        // how a person gives the focus up on purpose.
+        entry.onEscapeKey = [this]
+        {
+            entry.giveAwayKeyboardFocus();
+            if (onLeftTheBox)
+                onLeftTheBox();
+        };
         addAndMakeVisible (entry);
 
         inspect.setButtonText ("What gets sent");
@@ -242,6 +254,19 @@ public:
 
     bool entryHasFocus() const { return entry.hasKeyboardFocus (true); }
 
+    /** Escape, delivered to the box rather than to the handler behind it.
+
+        It does not ask whether the box holds the keyboard first. This machine will not
+        give the app window the keyboard from a script at all - that is measured, not
+        assumed - so requiring it would mean the key could never be delivered here and
+        the handler could never be driven. Whether the box has the focus in real use is
+        a person's half; whether Escape does the right thing when it arrives is this
+        one. */
+    bool pressEscapeInTheBox()
+    {
+        return entry.keyPressed (KeyPress (KeyPress::escapeKey));
+    }
+
     String draft() const { return entry.getText(); }
     void setDraft (const String& text) { entry.setText (text, dontSendNotification); }
 
@@ -264,6 +289,9 @@ public:
     /** Called when the choice of suggestion changes, so the panel can be redrawn about
         the new one. */
     std::function<void()> onPicked;
+    /** Called when Escape gives the keyboard back, so the app can put it somewhere
+        useful rather than nowhere. */
+    std::function<void()> onLeftTheBox;
 
     /** The proposal currently being offered, if any. Empty once it has been applied, so
         the same change cannot be applied twice by pressing the button again. */

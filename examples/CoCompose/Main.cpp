@@ -149,6 +149,14 @@ public:
         // Picking an earlier suggestion renders it again rather than applying it. Going
         // back to one is something a person does in order to listen, and an app that
         // took the choice as "use this" would be deciding for them.
+        workspace.chatPanel().onLeftTheBox = [this]
+        {
+            // Somewhere useful: the arrangement, which is what the transport keys and
+            // Delete are about. Nowhere at all would mean the next key press goes to
+            // whatever happens to be under the pointer.
+            workspace.playlistGrid().grabKeyboardFocus();
+        };
+
         workspace.chatPanel().onPicked = [this]
         {
             // The panel's words, its Preview and its Apply are all about whichever
@@ -2878,6 +2886,11 @@ private:
             openProjectFolder (folder);
             return true;
         }
+
+        // Escape while typing, sent to the box. W1 asks that a person can get the
+        // keyboard back without the keys they press on the way leaking into the song.
+        if (action.hasProperty ("escape_chat"))
+            return workspace.chatPanel().pressEscapeInTheBox();
 
         if (action.hasProperty ("press"))
         {
