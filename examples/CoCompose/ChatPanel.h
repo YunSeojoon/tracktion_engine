@@ -57,7 +57,12 @@ public:
         addAndMakeVisible (change);
 
         apply.setButtonText ("Apply change");
-        apply.onClick = [this] { if (onApply && offered.isNotEmpty()) onApply (offered); };
+        // chosenProposal(), not offered. Preview already used the picked one while
+        // Apply used whatever the conversation offered last, so hearing the first of
+        // two suggestions and pressing Apply took the second - and when both were
+        // worked out at the same revision nothing refused it.
+        apply.onClick = [this] { if (onApply && chosenProposal().isNotEmpty())
+                                     onApply (chosenProposal()); };
         apply.setVisible (false);
         addAndMakeVisible (apply);
 
@@ -134,7 +139,11 @@ public:
         // listen - and an app that renders on the first of them has decided the second
         // for you. It also made "pick one and throw it away" start by rendering the
         // thing you were about to discard.
-        candidates.onChange = [this] { resized(); };
+        // It does have to redraw what the panel says, though: the description, the
+        // Preview and the Apply are all about whichever one is picked, and leaving the
+        // words describing the previous choice is how a person ends up applying
+        // something they did not read.
+        candidates.onChange = [this] { if (onPicked) onPicked(); resized(); };
         candidates.setVisible (false);
         addAndMakeVisible (candidates);
 
@@ -252,6 +261,9 @@ public:
     std::function<void()> onSend, onCancel;
     std::function<void (const String&)> onApply, onPreview, onPickCandidate, onListen;
     std::function<void (const String&)> onStrength, onDecide, onAcceptGuess, onForget;
+    /** Called when the choice of suggestion changes, so the panel can be redrawn about
+        the new one. */
+    std::function<void()> onPicked;
 
     /** The proposal currently being offered, if any. Empty once it has been applied, so
         the same change cannot be applied twice by pressing the button again. */
@@ -339,6 +351,20 @@ public:
     }
 
     String notesOnScreen() const { return decisions.getText(); }
+
+    /** Picks one from the list, the way a person does - selection only, no render.
+        Returns false when that suggestion is not on the list to be picked. */
+    bool pickCandidate (const String& proposalID)
+    {
+        for (int i = 0; i < candidateIDs.size(); ++i)
+            if (candidateIDs[i] == proposalID)
+            {
+                candidates.setSelectedId (i + 1, sendNotificationSync);
+                return true;
+            }
+
+        return false;
+    }
 
     /** Whether there are two halves to hear, and which one is playing.
 
@@ -467,6 +493,13 @@ public:
         offered.clear();
         String changeText;
 
+        // Which one the panel is talking about. Picked from the list if anything is
+        // picked, otherwise the last one offered - and the description, the Preview and
+        // the Apply all have to be about that same one or the words on screen belong to
+        // a different change from the button underneath them.
+        const auto picked = chosenProposal();
+        auto describedThePicked = false;
+
         for (const auto& message : conversation.messages())
         {
             if (message.proposalProblem.isNotEmpty())
@@ -476,6 +509,19 @@ public:
                 continue;
 
             const auto done = static_cast<bool> (message.proposalSummary["applied"]);
+
+            if (! done)
+                offered = message.proposalID;
+
+            // Once the picked one has been described, later messages do not overwrite
+            // it. When nothing is picked the last one wins, as it always did.
+            if (describedThePicked)
+                continue;
+
+            if (picked.isNotEmpty() && message.proposalID != picked)
+                continue;
+
+            describedThePicked = picked.isNotEmpty();
             changeText = message.proposalSummary["description"].toString();
             if (changeText.isEmpty())
                 changeText = "A suggested change";
@@ -507,19 +553,20 @@ public:
 
             if (done)
                 changeText << newLine << "   applied";
-            else
-                offered = message.proposalID;
         }
 
         change.setText (changeText, dontSendNotification);
-        apply.setVisible (offered.isNotEmpty());
-        apply.setEnabled (offered.isNotEmpty() && ! waiting);
+
+        // Everything below asks the same question: what is this panel about right now.
+        const auto acting = chosenProposal();
+        apply.setVisible (acting.isNotEmpty());
+        apply.setEnabled (acting.isNotEmpty() && ! waiting);
 
         // Listening and taking are offered together: a person who can press Apply can
         // hear what it would do first, and one without the other is the choice this
         // panel used to make for them.
-        preview.setVisible (offered.isNotEmpty() || ! candidateIDs.isEmpty());
-        preview.setEnabled (chosenProposal().isNotEmpty() && ! waiting);
+        preview.setVisible (acting.isNotEmpty() || ! candidateIDs.isEmpty());
+        preview.setEnabled (acting.isNotEmpty() && ! waiting);
 
         if (offered.isEmpty())
             setPreviewState ({});
@@ -621,6 +668,10 @@ public:
                          { "draft", entry.getText() },
                          { "typing", entry.hasKeyboardFocus (true) },
                          { "offered_proposal", offered },
+                         // What the buttons would act on, and the words above them.
+                         // These two disagreeing is exactly the fault this reports.
+                         { "chosen_proposal", chosenProposal() },
+                         { "change", change.getText() },
                          { "buttons", object ({ { "apply", apply.isVisible() && apply.isEnabled() },
                                                 { "preview", preview.isVisible() && preview.isEnabled() },
                                                 { "ask", send.isEnabled() },
@@ -671,7 +722,11 @@ public:
             << "|" << previewState.getText()
             << "|" << candidateShape
             << "|" << listenShape
-            << "|" << notesShape;
+            << "|" << notesShape
+            // Which one the panel is about. Picking from the list changes nothing else
+            // in this key, and leaving it out kept the packet describing the previous
+            // choice - the same trap this file has fallen into before.
+            << "|" << chosenProposal();
         return key;
     }
 

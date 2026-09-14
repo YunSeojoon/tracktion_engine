@@ -139,6 +139,23 @@ public:
         // Picking an earlier suggestion renders it again rather than applying it. Going
         // back to one is something a person does in order to listen, and an app that
         // took the choice as "use this" would be deciding for them.
+        workspace.chatPanel().onPicked = [this]
+        {
+            // The panel's words, its Preview and its Apply are all about whichever
+            // suggestion is picked, so picking one has to redraw the words.
+            //
+            // Forgetting the last shape is not enough on its own: the redraw happens
+            // while polling the assistant, and that returns early when nothing is
+            // connected - which is exactly when a person is going back through what
+            // was already offered. So it is done here as well as marked for later.
+            lastConversationShape.clear();
+
+            if (conversation != nullptr)
+                workspace.chatPanel().showConversation (*conversation,
+                                                        bridge != nullptr && bridge->isWaiting(),
+                                                        describeTheConnection());
+        };
+
         workspace.chatPanel().onPickCandidate = [this] (const String& proposalID)
                                                 { previewFromThePanel (proposalID); };
         workspace.chatPanel().onListen = [this] (const String& half) { listenToHalf (half); };
@@ -150,6 +167,7 @@ public:
                                          { shelf->discard (proposalID); };
 
         listening = std::make_unique<live::Listening> (engine.getDeviceManager().deviceManager);
+        restoreFinishedComparison();
         listening->onFinished = [this] { workspace.chatPanel().setSomethingToHear (true, {}); };
 
         // Target menus reach the same commands the menu bar and the keyboard do, so
@@ -857,6 +875,15 @@ private:
         String problem;
         StringArray beforeNotes, afterNotes;   // what each half actually played
         int placesChanged = 0, placesHeard = 0;
+
+        /** Whether the two files on disk are one finished comparison.
+
+            They are written to the same two paths every time, so the existence of both
+            proves nothing: between the first half of a new comparison and the second,
+            what is on disk is the new A beside the previous B, and pressing the buttons
+            then gets you half of one comparison and half of another. Failure leaves the
+            same mess. Only a pair that finished together is worth hearing. */
+        bool paired = false;
     };
 
     bool renderWasBusy = false;
@@ -1947,12 +1974,13 @@ private:
             workspace.chatPanel().setProjectNotes (notes->asJson(),
                                                    live::strengthName (notes->strength()));
 
-        // Two halves to hear, or not. Read from the files rather than from the stage,
-        // so a comparison rendered in an earlier session is still offered when the app
-        // is opened again.
+        // Two halves to hear, or not. Both files existing is not the question - they
+        // are written to the same two paths every time, so a comparison that is halfway
+        // through leaves the new A beside the previous B and both exist. What is offered
+        // is a pair that finished together.
         if (listening != nullptr)
             workspace.chatPanel().setSomethingToHear (
-                preview.before.existsAsFile() && preview.after.existsAsFile(),
+                preview.paired && preview.before.existsAsFile() && preview.after.existsAsFile(),
                 listening->nowPlaying());
         workspace.refresh();
         workspace.store();
@@ -2039,6 +2067,19 @@ private:
             return;
         }
 
+        // The button should not be there when there is nothing whole to play, but a
+        // press can still arrive from a script or from a stale frame, and half of one
+        // comparison beside half of another is worse than silence: it sounds like an
+        // answer.
+        if (! preview.paired)
+        {
+            say (preview.stage == Preview::Stage::idle
+                   ? "There is no finished comparison to hear. Press Preview first."
+                   : "The comparison is still rendering. Both halves have to be the "
+                     "same comparison or you are not comparing anything.");
+            return;
+        }
+
         stopTransport();
 
         const auto file = half == "after" ? preview.after : preview.before;
@@ -2047,7 +2088,7 @@ private:
         if (problem.isNotEmpty())
         {
             say (problem);
-            workspace.chatPanel().setSomethingToHear (preview.before.existsAsFile(), {});
+            workspace.chatPanel().setSomethingToHear (false, {});
             return;
         }
 
@@ -2236,6 +2277,32 @@ private:
         the only difference between the two files is the change itself. Nothing here
         touches the song: the proposal is still unapplied when this finishes, and the
         revision has not moved. */
+    /** Picks up a comparison finished in an earlier run.
+
+        The two files are written to fixed paths, so their being there says nothing about
+        whether they belong together. What does say so is the record the app wrote when
+        the second half landed: if that says the render was not running and names both
+        halves as present, the pair on disk is whole and can be heard again. */
+    void restoreFinishedComparison()
+    {
+        preview.before = project.source.getSiblingFile ("preview-before.wav");
+        preview.after = project.source.getSiblingFile ("preview-after.wav");
+
+        const auto record = JSON::parse (project.source.getSiblingFile ("preview-status.json"));
+
+        if (! record.isObject() || static_cast<bool> (record["running"]))
+            return;
+
+        if (! preview.before.existsAsFile() || ! preview.after.existsAsFile())
+            return;
+
+        preview.proposalID = record["proposal"].toString();
+        preview.revision = static_cast<int> (record["source_revision"]);
+        preview.fromBeat = static_cast<double> (record["start_beat"]);
+        preview.toBeat = static_cast<double> (record["end_beat"]);
+        preview.paired = true;
+    }
+
     bool startPreview (const String& proposalID, double fromBeat, double toBeat)
     {
         if (preview.stage != Preview::Stage::idle || exporter.isBusy())
@@ -2466,6 +2533,7 @@ private:
 
                 preview.afterNotes = result->notes;
                 preview.stage = Preview::Stage::idle;
+                preview.paired = preview.before.existsAsFile() && preview.after.existsAsFile();
                 writePreviewStatus (false);
 
                 // The candidate remembers what it was heard with. Fingerprints rather
@@ -2720,6 +2788,10 @@ private:
 
             const auto id = what[1].toString();
 
+            // Picking is not taking. The list is how a person goes back to an earlier
+            // suggestion, and what happens next - reading it, hearing it, applying it -
+            // has to be about the one they picked.
+            if (kind == "pick")    return workspace.chatPanel().pickCandidate (id);
             if (kind == "adopt")   { applySuggestedChange (id); return true; }
             if (kind == "discard") return shelf->discard (id);
             return false;

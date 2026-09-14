@@ -366,12 +366,179 @@ def check_a_copied_project_does_not_inherit_the_shelf(exe, folder, report):
         other.close()
 
 
+def check_apply_takes_the_one_that_was_picked(exe, folder, report):
+    """review-v6 R1: the button applies what the panel is talking about.
+
+    Preview used the suggestion picked from the list; Apply used whichever the
+    conversation had offered last. Pick the first of two, listen to it, press Apply, and
+    the second one is what lands - and when both were worked out at the same revision
+    the stale check has no reason to stop it. The description on screen stayed with the
+    last one too, so the words never gave it away.
+
+    Everything here goes through the panel: the list, the button, the text. Calling what
+    sits behind them would prove the machinery and miss the wiring, which is the half
+    that was wrong."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        pattern_id = prepare_song(session)
+        state = session.settled()
+        channel_id = state["channels"][0]["id"]
+        part = tool(project, "inspect_pattern",
+                    {"pattern": pattern_id, "channel": channel_id})["result"]
+        notes = [n for p in part["parts"] for n in p["notes"]]
+        if not notes:
+            report.expect("there is a note to make two suggestions about", False)
+            return
+
+        subject = notes[0]
+        was = subject["pitch"]
+
+        # Two suggestions about the same note, at the same revision, doing different
+        # things. Same revision on purpose: that is what stops staleness from covering
+        # the mistake up.
+        with Liveness(folder / "chat-bridge.json", "fixture bridge"):
+            wait_for(lambda: read(folder / "chat-inspector.json").get("bridge_connected"),
+                     timeout=20, what="the app to see the fixture bridge")
+            asked = None
+            for lift in (2, 9):
+                asked = ask_once(session, folder,
+                                 {"description": "AI: up %d" % lift,
+                                  "notes": [{"what": "change", "id": subject["id"],
+                                             "pitch": min(127, was + lift)}]},
+                                 asked)
+                time.sleep(0.4)
+
+        kept = shelf(folder)
+        report.expect("both suggestions are on the shelf", len(kept) == 2,
+                      [c["description"] for c in kept])
+        if len(kept) != 2:
+            return
+        report.expect("and both were worked out against the same music",
+                      kept[0]["base_revision"] == kept[1]["base_revision"],
+                      [c["base_revision"] for c in kept])
+
+        # Pick the first - the one that is not what the conversation offered last.
+        first = kept[0]
+        session.run([{"candidate": ["pick", first["id"]]}])
+        time.sleep(1.2)
+        panel = read(folder / "chat-inspector.json")
+        report.expect("picking the earlier one is what the panel now talks about",
+                      "up 2" in panel.get("change", ""), panel.get("change", "")[:80])
+
+        session.run([{"press": "apply"}])
+        time.sleep(1.5)
+        after = {n["id"]: n["pitch"] for n in
+                 tool(project, "inspect_pattern",
+                      {"pattern": pattern_id, "channel": channel_id})["result"]["parts"][0]["notes"]}
+        report.expect("and Apply applies that one, not the one offered last",
+                      after[subject["id"]] == was + 2,
+                      (was, was + 2, was + 9, after[subject["id"]]))
+    finally:
+        session.close()
+
+
+def check_half_of_one_comparison_is_not_played_with_half_of_another(exe, folder, report):
+    """review-v6 R2: A and B have to be the same comparison.
+
+    Both halves are written to the same two paths every time, and the play buttons only
+    asked whether the two files existed. Between the first half of a new comparison and
+    the second, what is on disk is the new A beside the previous B - both there, both
+    playable, and what you hear is half of one answer and half of another. A failed
+    second half leaves the same thing.
+
+    The app tracks whether the pair finished together now, so what is offered is a
+    comparison rather than two files."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        pattern_id = prepare_song(session)
+        state = session.settled()
+        channel_id = state["channels"][0]["id"]
+        part = tool(project, "inspect_pattern",
+                    {"pattern": pattern_id, "channel": channel_id})["result"]
+        notes = [n for p in part["parts"] for n in p["notes"]]
+        if not notes:
+            report.expect("there is a note to compare", False)
+            return
+
+        subject = notes[0]
+        with Liveness(folder / "chat-bridge.json", "fixture bridge"):
+            wait_for(lambda: read(folder / "chat-inspector.json").get("bridge_connected"),
+                     timeout=20, what="the app to see the fixture bridge")
+            asked = None
+            for lift in (3, 11):
+                asked = ask_once(session, folder,
+                                 {"description": "AI: up %d" % lift,
+                                  "notes": [{"what": "change", "id": subject["id"],
+                                             "pitch": min(127, subject["pitch"] + lift)}]},
+                                 asked)
+                time.sleep(0.4)
+
+        kept = shelf(folder)
+        if len(kept) != 2:
+            report.expect("two suggestions to compare", False, len(kept))
+            return
+
+        def listening():
+            return read(folder / "chat-inspector.json").get("listening", {})
+
+        report.expect("nothing is offered to hear before any comparison is made",
+                      not listening().get("offered"), listening())
+
+        # One finished comparison: that is a pair, and it can be heard.
+        (folder / "preview-status.json").unlink(missing_ok=True)
+        session.run([{"preview": [kept[0]["id"], 0.0, 8.0]}])
+        wait_for(lambda: (read(folder / "preview-status.json")
+                          if (folder / "preview-status.json").exists()
+                          and read(folder / "preview-status.json").get("running") is False
+                          else None),
+                 timeout=300, what="the first comparison to finish")
+        time.sleep(1.0)
+        report.expect("a finished comparison is offered", listening().get("offered"), listening())
+
+        # Start a second one. From the moment it starts, the two files on disk stop
+        # being one comparison - and this is where they used to stay playable.
+        session.run([{"preview": [kept[1]["id"], 0.0, 8.0]}])
+        time.sleep(0.3)
+        report.expect("a comparison that has started is not offered while it is halfway",
+                      not listening().get("offered"), listening())
+
+        played = True
+        try:
+            session.run([{"press": "play_a"}], timeout=25)
+        except RuntimeError:
+            played = False
+        report.expect("and the button refuses rather than playing a mixed pair", not played)
+
+        wait_for(lambda: (read(folder / "preview-status.json")
+                          if (folder / "preview-status.json").exists()
+                          and read(folder / "preview-status.json").get("running") is False
+                          else None),
+                 timeout=300, what="the second comparison to finish")
+        time.sleep(1.0)
+        report.expect("and it comes back once both halves are the same comparison again",
+                      listening().get("offered"), listening())
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
 
     print("three ways of the same bars, and taking one")
     check_three_ways_of_the_same_bars(exe, output / "three", report)
+    print()
+    print("half of one comparison is not played with half of another")
+    check_half_of_one_comparison_is_not_played_with_half_of_another(exe, output / "pairing", report)
+    print()
+    print("Apply takes the one that was picked")
+    check_apply_takes_the_one_that_was_picked(exe, output / "picked", report)
     print()
     print("the model is told what it already offered")
     check_the_model_is_told_what_it_already_offered(exe, output / "told", report)
