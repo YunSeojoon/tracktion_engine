@@ -1135,6 +1135,63 @@ def check_escape_gives_the_keyboard_back_without_losing_the_typing(exe, folder, 
         session.close()
 
 
+def check_shift_puts_the_grid_away_in_the_piano_roll(exe, folder, report):
+    """W1: "스냅 상태와 임시 해제 방법을 일관되게 제공한다".
+
+    The arrangement has always had a way to drop a clip between the lines - hold Alt.
+    The piano roll had none: snap applied to every drag with no condition on it, so the
+    only way to place a note off the grid was to change the grid and change it back.
+
+    Alt here has meant velocity for a long time and is not being taken away to match,
+    so this window uses Shift, which was going spare during a drag. What is asserted is
+    the property, not a number: with Shift the note lands somewhere the grid does not
+    allow, and without it, somewhere the grid does."""
+    folder.mkdir(parents=True, exist_ok=True)
+    project = folder / "project.json"
+    session = Session(exe, folder).open()
+
+    try:
+        prepare_song(session)
+        session.settled()
+        session.run([{"select_channel": 0}, {"note": [72, 0.0, 1.0, 100]}])
+        time.sleep(0.8)
+        here = tool(project, "get_selection")["result"]
+
+        def where(pitch):
+            part = tool(project, "inspect_pattern",
+                        {"pattern": here["pattern"], "channel": here["channel"]})["result"]
+            got = [n for p in part["parts"] for n in p["notes"] if n["pitch"] == pitch]
+            return got[0]["start_beat"] if got else None
+
+        def on_the_grid(beat):
+            # 1/16 is the default step, so a beat the grid allows is a multiple of 0.25.
+            return abs(beat / 0.25 - round(beat / 0.25)) < 1.0e-6
+
+        session.run([{"piano_tool": "select"}, {"note_drag": [72, 0.0, 4.1]}])
+        time.sleep(0.8)
+        plain = where(72)
+        report.expect("a plain drag lands on the grid", plain is not None and on_the_grid(plain),
+                      plain)
+
+        session.run([{"note_drag": [72, plain, plain + 2.1, "shift"]}])
+        time.sleep(0.8)
+        held = where(72)
+        report.expect("and the note moved when Shift was held",
+                      held is not None and abs(held - plain) > 1.0, (plain, held))
+        report.expect("but it landed between the lines, which is what Shift is for",
+                      held is not None and not on_the_grid(held), held)
+
+        # And the grid comes straight back - a suspension that outlived the drag would
+        # be a mode nobody chose.
+        session.run([{"note_drag": [72, held, held + 1.6]}])
+        time.sleep(0.8)
+        after = where(72)
+        report.expect("the grid is back on the next drag, with nothing held",
+                      after is not None and on_the_grid(after), after)
+    finally:
+        session.close()
+
+
 def run(exe, output):
     output.mkdir(parents=True, exist_ok=True)
     report = Report()
@@ -1180,6 +1237,9 @@ def run(exe, output):
     print()
     print("Erase and Split are chosen, not stumbled into")
     check_erase_and_split_are_chosen_not_stumbled_into(exe, output / "destructive", report)
+    print()
+    print("Shift puts the grid away in the piano roll")
+    check_shift_puts_the_grid_away_in_the_piano_roll(exe, output / "pianosnap", report)
     print()
     print("Escape gives the keyboard back without losing the typing")
     check_escape_gives_the_keyboard_back_without_losing_the_typing(exe, output / "escape", report)

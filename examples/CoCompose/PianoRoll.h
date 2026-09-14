@@ -183,11 +183,26 @@ private:
         }
     }
 
+    /** Shift suspends the grid for as long as it is held.
+
+        The arrangement gives that job to Alt. Alt here has meant velocity for a long
+        time and is not being taken away for the sake of matching, so this window needed
+        a different key, and Shift was the one going spare - it is read when a note is
+        pressed, to add it to the selection, and not once the drag is under way.
+
+        Which leaves one overlap worth knowing about: Shift-clicking a note adds it to
+        the selection and then dragging with Shift still down puts the grid away. Both
+        are things a person might mean at once, and neither undoes the other.
+
+        The list at the top still has Off, which is the same thing for as long as you
+        want rather than as long as you hold. */
     double snapped (double beat) const
     {
         const auto step = snapBeats();
-        return step <= 0.0 ? beat : std::round (beat / step) * step;
+        return (snapSuspended || step <= 0.0) ? beat : std::round (beat / step) * step;
     }
+
+    bool snapSuspended = false;
 
     double beatWidth() const { return zoom.getValue(); }
 
@@ -588,8 +603,22 @@ private:
 
             if (e.mods.isShiftDown())
             {
-                if (owner.selected.contains (noteID)) owner.selected.removeString (noteID);
-                else owner.selected.add (noteID);
+                // Shift-clicking a note takes it out of the selection, and Shift also
+                // puts the grid away while dragging - so Shift-dragging a note that was
+                // already picked out deselected it and then had nothing to move. The
+                // press still toggles; if it turns into a drag, the toggle is taken
+                // back so the note goes with the rest. A click and a drag look the same
+                // until the pointer moves, which is why this waits to find out.
+                if (owner.selected.contains (noteID))
+                {
+                    owner.selected.removeString (noteID);
+                    droppedOnPress = noteID;
+                }
+                else
+                {
+                    owner.selected.add (noteID);
+                    droppedOnPress.clear();
+                }
             }
             else if (! owner.selected.contains (noteID))
             {
@@ -631,6 +660,21 @@ private:
                 repaint();
                 return;
             }
+
+            // Before the guard below, not after it. Shift-clicking a note that was
+            // already picked out takes it out of the selection, which left nothing to
+            // capture - so the drag stopped here and Shift-dragging a selected note did
+            // nothing at all. The press still toggles; a press that turns into a drag
+            // takes the toggle back, because a click and a drag are the same thing until
+            // the pointer moves.
+            if (droppedOnPress.isNotEmpty())
+            {
+                owner.selected.add (droppedOnPress);
+                droppedOnPress.clear();
+                captureStarts();   // nothing has moved yet, so this is still the start
+            }
+
+            owner.snapSuspended = e.mods.isShiftDown();
 
             if (dragMode == none || starts.isEmpty())
                 return;
@@ -685,6 +729,10 @@ private:
 
         void mouseUp (const MouseEvent&) override
         {
+            // The grid comes back the moment the hand comes off, whatever is still held
+            // down. A suspension that outlived the drag would be a mode nobody chose.
+            owner.snapSuspended = false;
+            droppedOnPress.clear();
             dragMode = none;
             starts.clearQuick();
             rubberBand = {};
@@ -916,6 +964,7 @@ private:
         Array<Start> starts;
         DragMode dragMode = none;
         bool dragTransactionOpen = false;
+        String droppedOnPress;
         Point<int> dragAnchor, rubberStart;
         Rectangle<int> rubberBand;
     };
