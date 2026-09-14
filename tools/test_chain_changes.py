@@ -556,7 +556,7 @@ def check_an_effect_moves_by_its_place_in_the_chain(exe, folder, report):
         session.close()
 
 
-def check_a_chain_comparison_covers_where_that_insert_plays(exe, folder, report):
+def check_a_chain_comparison_covers_where_that_insert_plays(exe, folder, report, route=None):
     """review-v6 R3: the comparison has to be where the thing being changed is heard.
 
     The range the panel works out looks at note changes and clip changes only. A change
@@ -583,8 +583,20 @@ def check_a_chain_comparison_covers_where_that_insert_plays(exe, folder, report)
         def move_them_late(live):
             for i, late in enumerate(live["playlist"]["clips"]):
                 late["start"] = 64.0 + i * 32.0
+            if route:
+                source = live["mixer"]["inserts"][0]
+                live["mixer"]["inserts"].append(
+                    {"id": "review-bus", "index": 2, "name": "Review bus",
+                     "gain_db": 0.0, "pan": 0.0, "mute": False,
+                     "output": "master", "effects": [], "sends": []})
+                if route == "send":
+                    source["sends"] = [{"id": "review-send", "target": "review-bus", "level": 0.5}]
+                else:
+                    source["output"] = "review-bus"
 
         apply_change(project, move_them_late)
+        if route:
+            mine = "review-bus"
         time.sleep(1.0)
         moved = session.settled()["playlist"]["clips"]
         report.expect("the music starts at bar seventeen, not at the beginning",

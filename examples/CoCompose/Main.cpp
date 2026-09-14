@@ -2285,19 +2285,34 @@ private:
         if (! touchedInserts.isEmpty())
         {
             StringArray patternsHeard;
+            // Walk upstream through both outputs and sends. A bus need not have a
+            // channel assigned directly to it to carry that channel's music.
+            auto feedingInserts = touchedInserts;
+            for (int i = 0; i < feedingInserts.size(); ++i)
+                for (auto insert : project.model->mixer())
+                {
+                    bool feeds = insert.getProperty (live::ids::output, live::masterInsert).toString()
+                                    == feedingInserts[i];
+                    for (auto child : insert)
+                        if (child.hasType (live::ids::SEND)
+                            && child[live::ids::target].toString() == feedingInserts[i])
+                            feeds = true;
+                    if (feeds)
+                        feedingInserts.addIfNotAlreadyThere (live::Model::uidOf (insert));
+                }
 
             for (auto channel : project.model->channels())
             {
                 const auto slot = static_cast<int> (channel[live::ids::insert]);
                 const auto through = project.model->insertForSlot (slot);
 
-                if (! through.isValid() || ! touchedInserts.contains (live::Model::uidOf (through)))
+                if (! through.isValid() || ! feedingInserts.contains (live::Model::uidOf (through)))
                     continue;
 
                 // Every pattern with anything on that channel. A placement of it is a
                 // stretch of song where this insert has something to carry.
                 for (auto pattern : project.model->patterns())
-                    if (live::Model::findSequence (pattern, live::Model::uidOf (channel)).isValid())
+                    if (live::Model::findSequence (pattern, live::Model::uidOf (channel)).getNumChildren() > 0)
                         patternsHeard.addIfNotAlreadyThere (live::Model::uidOf (pattern));
             }
 
@@ -2352,10 +2367,15 @@ private:
 
         const auto record = JSON::parse (project.source.getSiblingFile ("preview-status.json"));
 
-        if (! record.isObject() || static_cast<bool> (record["running"]))
+        if (! record.isObject() || static_cast<bool> (record["running"])
+            || ! static_cast<bool> (record["paired"]))
             return;
 
         if (! preview.before.existsAsFile() || ! preview.after.existsAsFile())
+            return;
+
+        if (record["before"]["fingerprint"].toString() != fingerprintOf (preview.before)
+            || record["after"]["fingerprint"].toString() != fingerprintOf (preview.after))
             return;
 
         preview.proposalID = record["proposal"].toString();
@@ -2491,6 +2511,7 @@ private:
                            JSON::toString (live::object ({
                                { "running", running },
                                { "proposal", preview.proposalID },
+                               { "paired", preview.paired && ! running },
                                { "source_revision", preview.revision },
                                { "start_beat", preview.fromBeat },
                                { "end_beat", preview.toBeat },
